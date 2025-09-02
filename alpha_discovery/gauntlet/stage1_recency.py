@@ -134,7 +134,9 @@ def run_stage1_recency_liveness(
 
     equity = _build_equity_from_ledger(led_this)
     if isinstance(equity.index, pd.DatetimeIndex) and data_end is not None:
-        equity = equity[(data_end.normalize() - equity.index.normalize()).dt.days <= short_window_days]
+        idx_norm = pd.to_datetime(equity.index).normalize()
+        ages_days = (data_end.normalize() - idx_norm) / pd.Timedelta(days=1)
+        equity = equity[ages_days <= short_window_days]
     max_dd_short = _compute_short_window_dd(equity)
 
     pass_recency = days_since_last <= recency_max_days

@@ -55,6 +55,7 @@ def run_pipeline():
     splits = create_walk_forward_splits(data_index=signals_df.index)
     print(f"Total folds created: {len(splits)}")
 
+    # Embargo sanity guard vs. holding horizon
     min_needed = max(
         int(getattr(settings.options, "exit_time_cap_days", 0) or 0),
         max(TRADE_HORIZONS_DAYS) if isinstance(TRADE_HORIZONS_DAYS, (list, tuple)) else int(TRADE_HORIZONS_DAYS),
@@ -66,12 +67,14 @@ def run_pipeline():
         )
 
     all_fold_results = []
+
     # Create a single run directory for this entire pipeline execution
     run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     folder_name = f"run_seed{settings.ga.seed}_{run_timestamp}"
     output_dir = os.path.join('runs', folder_name)
     os.makedirs(output_dir, exist_ok=True)
 
+    # ===== Walk-forward training across folds =====
     for i, (train_idx, test_idx) in enumerate(splits):
         fold_num = i + 1
         print(f"\n==================== RUNNING FOLD {fold_num}/{len(splits)} ====================")
@@ -82,7 +85,6 @@ def run_pipeline():
         train_signals_df = signals_df.reindex(train_idx).fillna(False)
 
         pareto_front_for_fold = evolve(train_signals_df, signals_metadata, train_master_df)
-
         for solution in pareto_front_for_fold:
             solution["fold"] = fold_num
 
@@ -91,31 +93,27 @@ def run_pipeline():
     print(f"\n{'=' * 20} WALK-FORWARD (TRAIN artifacts) COMPLETE {'=' * 20}")
 
     print("\n--- Saving In-Sample Training Results ---")
-    # Pass the specific output_dir to save_results
     save_results(all_fold_results, signals_metadata, settings, output_dir=output_dir)
     print("Global results saved.")
 
     try:
-        # Pass the specific output_dir to materialize artifacts
         materialize_per_fold_artifacts(base_dir=output_dir)
         print("Per-fold TRAIN artifacts materialized.")
     except Exception as e:
         print(f"Warning: could not materialize per-fold artifacts: {e}")
 
+    # ===== Gauntlet: true OOS validation =====
     print("\n--- Launching Out-of-Sample Gauntlet ---")
     try:
-        from alpha_discovery.gauntlet.run import run_gauntlet
-        # --- MODIFIED PART: Pass the 'splits' variable into the function call ---
         run_gauntlet(
-            run_dir=output_dir, # Use the specific run directory
+            run_dir=output_dir,              # Use this run's directory
             settings=settings,
-            config=gauntlet_cfg(settings),  # <<< important: flat keys
+            config=gauntlet_cfg(settings),   # Flattened Stage1/2/3 knobs
             master_df=master_df,
             signals_df=signals_df,
             signals_metadata=signals_metadata,
-            splits=splits # <<< THIS IS THE CRITICAL FIX
+            splits=splits                    # Critical: to compute train_end per fold
         )
-        # --- END MODIFIED PART ---
     except Exception as e:
         print(f"ERROR: Gauntlet failed to run: {e}")
         import traceback
@@ -126,4 +124,3 @@ if __name__ == '__main__':
     print("--- Starting Full Alpha Discovery Pipeline ---")
     run_pipeline()
     print("\n--- Pipeline Finished ---")
-

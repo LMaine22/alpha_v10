@@ -185,5 +185,10 @@ def run_gauntlet_backtest(
 
     # Ensure end-of-data open trades remain OPEN
     ledger = _mark_open_positions_at_eod(ledger, oos_end=oos_end, last_mark=last_mark)
-
+    ledger = ledger.copy()
+    ledger["setup_id"] = setup_id
+    ledger["origin_fold"] = int(origin_fold)  # helpful for auditing which fold produced OOS
+    ledger["signal_ids"] = ",".join(signal_ids)  # exact signals behind each trade
     return ledger
+
+

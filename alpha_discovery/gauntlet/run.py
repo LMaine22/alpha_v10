@@ -98,6 +98,37 @@ def run_gauntlet(
         return
 
     full_oos_ledger = pd.concat(oos_ledgers.values(), ignore_index=True)
+    # alpha_discovery/gauntlet/run.py
+
+    # (near the top of the file, after imports)
+    LEDGER_BASE_SCHEMA = [
+        # identifiers
+        "setup_id", "origin_fold", "specialized_ticker",
+        # timing
+        "trigger_date", "entry_date", "exit_date",
+        # instrument
+        "ticker", "horizon_days", "direction", "option_type", "strike",
+        # underlyer/vol
+        "entry_underlying", "exit_underlying", "entry_iv", "exit_iv",
+        # prices (option exec)
+        "entry_option_price", "exit_option_price",
+        # size/capital
+        "contracts", "contracts_partial", "contracts_remaining",
+        "capital_allocated", "capital_allocated_used",
+        # PnL
+        "pnl_dollars", "pnl_pct",
+        # exits & policy
+        "first_exit_reason", "exit_reason", "exit_policy_id", "holding_days_actual",
+        # partial-exit details
+        "partial_exit_date", "partial_exit_price", "partial_exit_frac",
+    ]
+
+    ...
+
+    # where the OOS ledgers are concatenated
+    full_oos_ledger = pd.concat(oos_ledgers.values(), ignore_index=True)
+    write_stage_csv(run_dir, "gauntlet_ledger", full_oos_ledger, base_schema=LEDGER_BASE_SCHEMA)
+
     write_stage_csv(run_dir, "gauntlet_ledger", full_oos_ledger)
     print(f"\nOut-of-sample backtesting complete. Generated OOS ledgers for {len(oos_ledgers)} strategies.")
 

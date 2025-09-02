@@ -9,8 +9,10 @@ from ..config import settings
 from .bt_common import (
     TRADE_HORIZONS_DAYS, _add_bdays,
     _get_risk_free_rate, _has_iv_for_ticker, _build_option_strike,
-    ExitPolicy, _decide_exit_from_path, _policy_id
+    ExitPolicy, _decide_exit_from_path, _policy_id,
 )
+from .bt_common import _decide_exit_with_scale_out, _decide_exit_from_path
+
 from .bt_runtime import (
     _maybe_reset_caches, _cached_underlier, _cached_iv3m,
     _cached_sigma_map, _cached_price_entry_exit, _get_or_build_price_path
@@ -56,7 +58,11 @@ def run_setup_backtest_options(
     except KeyError as e:
         print(f" Error: Missing signals in signals_df: {e}")
         return pd.DataFrame()
-    trigger_dates = trigger_mask[trigger_mask].index
+
+    # Rising-edge trigger: only fire when signal flips from False -> True
+    edge = trigger_mask & ~trigger_mask.shift(1).fillna(False)
+    trigger_dates = edge[edge].index
+
     if len(trigger_dates) < settings.validation.min_initial_support:
         return pd.DataFrame()
 
@@ -139,6 +145,13 @@ def run_setup_backtest_options(
                     trail_frac=(exit_policy or {}).get("trail_frac", getattr(settings.options, "exit_trail_frac", None)) if isinstance(exit_policy, dict) else getattr(settings.options, "exit_trail_frac", None),
                     sl_multiple=(exit_policy or {}).get("sl_multiple", getattr(settings.options, "exit_sl_multiple", None)) if isinstance(exit_policy, dict) else getattr(settings.options, "exit_sl_multiple", None),
                     time_cap_days=(exit_policy or {}).get("time_cap_days", getattr(settings.options, "exit_time_cap_days", None)) if isinstance(exit_policy, dict) else getattr(settings.options, "exit_time_cap_days", None),
+                    # NEW behavior fields (GA may omit — we fall back to settings)
+                    pt_behavior=(exit_policy or {}).get("pt_behavior",
+                                                        getattr(settings.options, "pt_behavior", "exit")),
+                    armed_trail_frac=(exit_policy or {}).get("armed_trail_frac",
+                                                             getattr(settings.options, "armed_trail_frac", None)),
+                    scale_out_frac=float(
+                        (exit_policy or {}).get("scale_out_frac", getattr(settings.options, "scale_out_frac", 0.50))),
                 )
 
                 exit_idx, exit_reason, holding_days_actual = _decide_exit_from_path(
@@ -151,42 +164,179 @@ def run_setup_backtest_options(
                 chosen_exit_mid = float(price_path.iloc[min(exit_idx, len(price_path) - 1)])
 
                 exit_exec = chosen_exit_mid * (1.0 - slip)
+                # Build a stable policy id string up front
                 policy_str = _policy_id(pol, int(h))
 
-                capital = float(getattr(settings.options, "capital_per_trade", 10000.0))
-                contract_mult = int(getattr(settings.options, "contract_multiplier", 100))
-                cost_per_contract = float(priced["entry_price"]) * contract_mult
-                contracts = int(min(max_contracts, max(0, math.floor(capital / max(cost_per_contract, 1e-12)))))
-                if contracts <= 0:
-                    continue
+                # --- Try SCALE-OUT first (if configured) ---
+                did_scale = False
+                if getattr(pol, "pt_behavior", "exit") == "scale_out" and pol.pt_multiple:
+                    # Clip by time cap / horizon
+                    time_cap = min(int(h), int(pol.time_cap_days) if pol.time_cap_days is not None else int(h))
+                    last_idx = min(time_cap, len(price_path) - 1)
 
-                capital_used = float(contracts) * cost_per_contract
-                pnl_dlr = (exit_exec - entry_exec) * contracts * contract_mult
-                pnl_pc = pnl_dlr / capital if capital > 0 else 0.0
+                    # Prices up to cap
+                    p = price_path.iloc[: last_idx + 1].astype(float).values
 
-                rows.append({
-                    "trigger_date": pd.Timestamp(trigger_date),
-                    "exit_date": pd.Timestamp(chosen_exit_date),
-                    "ticker": ticker,
-                    "horizon_days": int(h),
-                    "direction": direction,
-                    "option_type": priced.get("option_type", "C" if direction == "long" else "P"),
-                    "strike": float(K),
-                    "entry_underlying": float(S0),
-                    "exit_underlying": float(_cached_underlier(master_df, ticker, chosen_exit_date) or S0),
-                    "entry_iv": float(priced["entry_iv"]),
-                    "exit_iv": float(exit_sigma_T1_hz),
-                    "entry_option_price": float(entry_exec),
-                    "exit_option_price": float(exit_exec),
-                    "contracts": int(contracts),
-                    "capital_allocated": float(capital),
-                    "capital_allocated_used": float(capital_used),
-                    "pnl_dollars": float(pnl_dlr),
-                    "pnl_pct": float(pnl_pc),
-                    "exit_reason": exit_reason,
-                    "exit_policy_id": policy_str,
-                    "holding_days_actual": int(holding_days_actual),
-                })
+                    # PT threshold on option exec price path
+                    pt_thresh = float(entry_exec) * float(pol.pt_multiple)
+                    pt_hits = np.nonzero(p >= pt_thresh)[0]
+
+                    if pt_hits.size > 0:
+                        did_scale = True
+                        pt_idx = int(pt_hits[0])
+
+                        # Exec prices (apply slippage)
+                        pt_mid = float(price_path.iloc[pt_idx])
+                        exit_exec_pt = pt_mid * (1.0 - slip)
+
+                        # After PT, tighten trailing (armed) and keep SL; same time cap remainder
+                        armed_frac = pol.armed_trail_frac if (pol.armed_trail_frac is not None) else pol.trail_frac
+                        p2 = p[pt_idx: last_idx + 1]  # from PT day to end
+                        peak2 = np.maximum.accumulate(p2)
+
+                        ts2_mask = np.zeros_like(p2, dtype=bool)
+                        if armed_frac is not None and 0 < float(armed_frac) < 1:
+                            ts2_thresh = peak2 * float(armed_frac)
+                            ts2_mask = p2 <= ts2_thresh
+
+                        sl2_mask = np.zeros_like(p2, dtype=bool)
+                        if pol.sl_multiple is not None and pol.sl_multiple > 0:
+                            sl_thresh = float(entry_exec) * float(pol.sl_multiple)
+                            sl2_mask = p2 <= sl_thresh
+
+                        def _first_true(mask: np.ndarray):
+                            idxs = np.nonzero(mask)[0]
+                            return int(idxs[0]) if idxs.size > 0 else None
+
+                        day_ts2 = _first_true(ts2_mask)
+                        day_sl2 = _first_true(sl2_mask)
+
+                        candidates = []
+                        if day_ts2 is not None: candidates.append((day_ts2, "trailing_stop"))
+                        if day_sl2 is not None: candidates.append((day_sl2, "stop_loss"))
+
+                        if candidates:
+                            rel_idx, final_reason = min(candidates, key=lambda t: t[0])
+                            final_idx = pt_idx + int(rel_idx)
+                        else:
+                            final_idx = last_idx
+                            final_reason = "horizon" if time_cap == int(h) else "time_stop"
+
+                        # Final exec at end
+                        final_mid = float(price_path.iloc[final_idx])
+                        exit_exec_final = final_mid * (1.0 - slip)
+
+                        # Position sizing / contracts
+                        capital = float(getattr(settings.options, "capital_per_trade", 10000.0))
+                        contract_mult = int(getattr(settings.options, "contract_multiplier", 100))
+                        cost_per_contract = float(priced["entry_price"]) * contract_mult
+                        contracts = int(min(max_contracts, max(0, math.floor(capital / max(cost_per_contract, 1e-12)))))
+                        if contracts > 0:
+                            capital_used = float(contracts) * cost_per_contract
+
+                            so_frac = max(0.0, min(1.0, float(getattr(pol, "scale_out_frac", 0.50))))
+                            contracts_partial = int(round(contracts * so_frac))
+                            contracts_remaining = int(max(0, contracts - contracts_partial))
+                            # ensure at least 1 remains if partial happened
+                            if contracts_partial > 0 and contracts_remaining == 0:
+                                contracts_remaining = 1
+                                contracts_partial = max(0, contracts - 1)
+
+                            pnl_dlr = (
+                                    (exit_exec_pt - float(entry_exec)) * contracts_partial * contract_mult +
+                                    (exit_exec_final - float(entry_exec)) * contracts_remaining * contract_mult
+                            )
+                            pnl_pc = pnl_dlr / capital if capital > 0 else 0.0
+
+                            rows.append({
+                                "trigger_date": pd.Timestamp(trigger_date),
+                                "exit_date": pd.Timestamp(price_path.index[final_idx]),
+                                "ticker": ticker,
+                                "horizon_days": int(h),
+                                "direction": direction,
+                                "option_type": priced.get("option_type", "C" if direction == "long" else "P"),
+                                "strike": float(K),
+                                "entry_underlying": float(S0),
+                                "exit_underlying": float(
+                                    _cached_underlier(master_df, ticker, price_path.index[final_idx]) or S0),
+                                "entry_iv": float(priced["entry_iv"]),
+                                "exit_iv": float(exit_sigma_T1_hz),
+
+                                # Prices (exec)
+                                "entry_option_price": float(entry_exec),
+                                "exit_option_price": float(exit_exec_final),
+
+                                # Partial exit info
+                                "partial_exit_date": pd.Timestamp(price_path.index[pt_idx]),
+                                "partial_exit_price": float(exit_exec_pt),
+                                "partial_exit_frac": float(so_frac),
+
+                                # Position sizing
+                                "contracts": int(contracts),
+                                "contracts_partial": int(contracts_partial),
+                                "contracts_remaining": int(contracts_remaining),
+                                "capital_allocated": float(capital),
+                                "capital_allocated_used": float(capital_used),
+
+                                # PnL rollup
+                                "pnl_dollars": float(pnl_dlr),
+                                "pnl_pct": float(pnl_pc),
+
+                                # Reasons & policy
+                                "first_exit_reason": "profit_target_partial",
+                                "exit_reason": final_reason,
+                                "exit_policy_id": policy_str,
+                                "holding_days_actual": int(final_idx),
+                            })
+
+                # --- If scale-out didn't happen, fall back to single-leg path ---
+                if not did_scale:
+                    exit_idx, exit_reason, holding_days_actual = _decide_exit_from_path(
+                        price_path=price_path,
+                        entry_exec_price=float(entry_exec),
+                        horizon_days=int(h),
+                        policy=pol
+                    )
+                    chosen_exit_date = price_path.index[min(exit_idx, len(price_path) - 1)]
+                    chosen_exit_mid = float(price_path.iloc[min(exit_idx, len(price_path) - 1)])
+                    exit_exec = chosen_exit_mid * (1.0 - slip)
+
+                    capital = float(getattr(settings.options, "capital_per_trade", 10000.0))
+                    contract_mult = int(getattr(settings.options, "contract_multiplier", 100))
+                    cost_per_contract = float(priced["entry_price"]) * contract_mult
+                    contracts = int(min(max_contracts, max(0, math.floor(capital / max(cost_per_contract, 1e-12)))))
+                    if contracts <= 0:
+                        continue
+
+                    capital_used = float(contracts) * cost_per_contract
+                    pnl_dlr = (exit_exec - float(entry_exec)) * contracts * contract_mult
+                    pnl_pc = pnl_dlr / capital if capital > 0 else 0.0
+
+                    rows.append({
+                        "trigger_date": pd.Timestamp(trigger_date),
+                        "exit_date": pd.Timestamp(chosen_exit_date),
+                        "ticker": ticker,
+                        "horizon_days": int(h),
+                        "direction": direction,
+                        "option_type": priced.get("option_type", "C" if direction == "long" else "P"),
+                        "strike": float(K),
+                        "entry_underlying": float(S0),
+                        "exit_underlying": float(_cached_underlier(master_df, ticker, chosen_exit_date) or S0),
+                        "entry_iv": float(priced["entry_iv"]),
+                        "exit_iv": float(exit_sigma_T1_hz),
+                        "entry_option_price": float(entry_exec),
+                        "exit_option_price": float(exit_exec),
+
+                        "contracts": int(contracts),
+                        "capital_allocated": float(capital),
+                        "capital_allocated_used": float(capital_used),
+                        "pnl_dollars": float(pnl_dlr),
+                        "pnl_pct": float(pnl_pc),
+
+                        "exit_reason": exit_reason,
+                        "exit_policy_id": policy_str,
+                        "holding_days_actual": int(holding_days_actual),
+                    })
 
     if not rows:
         return pd.DataFrame()

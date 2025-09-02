@@ -1,9 +1,11 @@
 # alpha_discovery/gauntlet/reporting.py
+
 from __future__ import annotations
 import os
 import json
 import pandas as pd
-from typing import Optional
+import numpy as np                 # <-- ADD
+from typing import Optional, List   # <-- ADD
 from .io import ensure_dir
 
 def _gauntlet_dir(run_dir: str) -> str:
@@ -11,15 +13,39 @@ def _gauntlet_dir(run_dir: str) -> str:
     ensure_dir(d)
     return d
 
-def write_stage_csv(run_dir: str, name: str, df: pd.DataFrame) -> str:
+def _coerce_schema(df: pd.DataFrame, base_schema: Optional[List[str]]) -> pd.DataFrame:
+    """
+    Make the DataFrame forward-compatible by:
+      - adding any missing columns as NaN
+      - ordering columns with base_schema first (in order), then any extras
+    """
+    if not base_schema:
+        return df
+
+    out = df.copy()
+    for col in base_schema:
+        if col not in out.columns:
+            out[col] = np.nan
+
+    # place base_schema columns first, then any remaining
+    ordered = [c for c in base_schema if c in out.columns]
+    tail = [c for c in out.columns if c not in ordered]
+    return out[ordered + tail]
+
+def write_stage_csv(run_dir: str, name: str, df: pd.DataFrame, base_schema: Optional[List[str]] = None) -> str:
     d = _gauntlet_dir(run_dir)
     path = os.path.join(d, f"{name}.csv")
     try:
+        df = _coerce_schema(df, base_schema)
         df.to_csv(path, index=False)
     except Exception:
-        # last resort to avoid crashing the pipeline
-        df.reset_index(drop=True).to_csv(path, index=False)
+        df = _coerce_schema(df.reset_index(drop=True), base_schema)
+        df.to_csv(path, index=False)
     return path
+
+def write_readme(run_dir: str, extra: Optional[dict] = None) -> str:
+    ...
+
 
 def write_readme(run_dir: str, extra: Optional[dict] = None) -> str:
     d = _gauntlet_dir(run_dir)

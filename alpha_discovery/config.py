@@ -10,15 +10,15 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 50
-    generations: int = 5
+    population_size: int = 125
+    generations: int = 12
     elitism_rate: float = 0.1
     mutation_rate: float = 0.2
-    seed: int = 13
+    seed: int = 18
     setup_lengths_to_explore: List[int] = [2]
 
     # Verbosity & debugging used by NSGA layer (added)
-    verbose: int = 1              # 0..3 (2 = extra progress summaries)
+    verbose: int = 2              # 0..3 (2 = extra progress summaries)
     debug_sequential: bool = False   # True = evaluate in-process (no joblib)
 
 
@@ -30,7 +30,7 @@ class DataConfig(BaseModel):
     excel_file_path: str = 'data_store/raw/bb_data.xlsx'
     parquet_file_path: str = 'data_store/processed/bb_data.parquet'
     start_date: date = date(2010, 1, 1)
-    end_date: date = date(2025, 8, 27)
+    end_date: date = date(2025, 9, 2)
     holdout_start_date: date = date(2023, 8, 27)
 
     # Finalized ticker lists
@@ -44,7 +44,7 @@ class DataConfig(BaseModel):
         #'BMY US Equity', 'PEPS US Equity', 'NKE US Equity',
     ]
     macro_tickers: List[str] = [
-        'RTY Index', 'MXWO Index', 'USGG10YR Index', 'USGG2YR Index',
+        #'RTY Index', 'MXWO Index', 'USGG10YR Index', 'USGG2YR Index',
         'DXY Curncy', 'JPY Curncy', 'EUR Curncy', 'EEM US Equity',
         'CL1 Comdty', 'HG1 Comdty', 'XAU Curncy'
     ]
@@ -85,7 +85,7 @@ class ValidationConfig(BaseModel):
     """Validation and support thresholds"""
     min_initial_support: int = 10
     min_portfolio_support: int = 30
-    embargo_days: int = 15 # days of post-train embargo before test
+    embargo_days: int = 5 # days of post-train embargo before test
 
 
 # -----------------------------
@@ -103,7 +103,7 @@ class OptionsConfig(BaseModel):
     allow_nonoptionable: bool = False
 
     # Tenor selection (business days to expiry)
-    tenor_grid_bd: List[int] = [7, 14, 21, 30, 45, 63]
+    tenor_grid_bd: List[int] = [7, 14, 21]
     tenor_buffer_k: float = 1.25
 
     # Dynamic exit policy defaults (global; GA can override per-setup)
@@ -111,8 +111,17 @@ class OptionsConfig(BaseModel):
     exit_pt_multiple: float | None = None
     exit_trail_frac: float | None = 0.7
     exit_sl_multiple: float | None = 0.6
-    # If None, default to the current horizon (per-trade) inside the backtester
-    exit_time_cap_days: int | None = None
+    exit_time_cap_days: int | None = None  # if None, default to horizon
+
+    # NEW — how profit target behaves:
+    #   'exit'       -> take full exit on PT (current behavior)
+    #   'arm_trail'  -> do NOT exit; just tighten trailing stop and keep running
+    #   'scale_out'  -> exit a fraction at PT; tighten trailing on remainder
+    pt_behavior: Literal['exit', 'arm_trail', 'scale_out'] = 'scale_out'
+    # NEW — when PT arms a tighter trail (for arm_trail/scale_out)
+    armed_trail_frac: float | None = 0.93
+    # NEW — fraction to close at PT when pt_behavior == 'scale_out'
+    scale_out_frac: float = 0.50
 
     # IV term structure mapping (fallbacks)
     iv_map_alpha: float = 0.7
@@ -126,6 +135,7 @@ class OptionsConfig(BaseModel):
     }
     min_premium: float = 0.30
     max_contracts: int = 100
+
 
 
 # -----------------------------
@@ -181,13 +191,13 @@ class ReportingConfig(BaseModel):
 class Stage1Config(BaseModel):
     """Stage-1 recency and liveness gates (OOS only)."""
     # Fail if last trigger older than this
-    recency_max_days: int = 7
+    recency_max_days: int = 20
     # Short-window size for liveness/trade checks
     short_window_days: int = 20
     # Require at least this many trades in the short window
     min_trades_short: int = 2
     # Cap on max drawdown in the short window (fractional, e.g. 0.15 = 15%)
-    max_drawdown_short: float = 0.15
+    max_drawdown_short: float = 0.45
 
 # -----------------------------
 # Stage-2 (MBB) configuration

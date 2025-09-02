@@ -12,7 +12,7 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [14]
+TRADE_HORIZONS_DAYS = [10]
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
     """Inclusive business-day add (entry day = 0)."""
@@ -49,6 +49,7 @@ def _ensure_df_token(df: pd.DataFrame) -> str:
 
 # ---------------- Exit policy ----------------
 
+
 @dataclass(frozen=True)
 class ExitPolicy:
     enabled: bool = True
@@ -57,11 +58,17 @@ class ExitPolicy:
     sl_multiple: float | None = None
     time_cap_days: int | None = None  # if None, defaults to horizon
 
+    # NEW behavior knobs (read from settings or GA policy dict)
+    pt_behavior: str = "exit"         # 'exit' | 'arm_trail' | 'scale_out'
+    armed_trail_frac: float | None = None
+    scale_out_frac: float = 0.50
+
     def is_noop(self) -> bool:
         return (self.pt_multiple is None and
                 self.trail_frac is None and
                 self.sl_multiple is None and
                 self.time_cap_days is None)
+
 
 def _first_true_index(mask: np.ndarray) -> Optional[int]:
     idxs = np.nonzero(mask)[0]
@@ -74,61 +81,162 @@ def _policy_id(policy: ExitPolicy, horizon_days: int) -> str:
         "sl": policy.sl_multiple,
         "tc": policy.time_cap_days,
         "hz": horizon_days,
+        # NEW:
+        "pb": policy.pt_behavior,
+        "at": policy.armed_trail_frac,
+        "sf": policy.scale_out_frac,
     }
     s = "|".join(f"{k}={v}" for k, v in active.items() if v is not None)
     import hashlib
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10] if s else ""
 
+def _decide_exit_with_scale_out(price_path: pd.Series,
+                                entry_exec_price: float,
+                                horizon_days: int,
+                                policy: ExitPolicy) -> tuple[bool, dict]:
+    """
+    Returns (did_scale, info dict).
+    If PT isn't hit or behavior is incompatible, returns (False, {}).
+
+    When scale-out triggers:
+      info = {
+        "pt_idx": int,                 # day index of PT hit (0-based)
+        "pt_reason": "profit_target_partial",
+        "final_idx": int,              # day index of final exit
+        "final_reason": str,           # e.g., 'trailing_stop' | 'stop_loss' | 'horizon' | 'time_stop'
+      }
+    """
+    n = len(price_path)
+    if n == 0:
+        return False, {}
+
+    # Respect time cap just like the regular path
+    time_cap = min(horizon_days, policy.time_cap_days if policy.time_cap_days is not None else horizon_days)
+    time_cap = max(0, time_cap)
+    last_idx = min(time_cap, n - 1)
+
+    # Need a real PT and the 'scale_out' behavior
+    if (not policy.enabled) or policy.pt_multiple is None or policy.pt_multiple <= 0:
+        return False, {}
+    if str(policy.pt_behavior).lower() != "scale_out":
+        return False, {}
+
+    p = price_path.iloc[: last_idx + 1].astype(float).values
+    pt_thresh = float(entry_exec_price) * float(policy.pt_multiple)
+    pt_mask = p >= pt_thresh
+    pt_idxs = np.nonzero(pt_mask)[0]
+    if pt_idxs.size == 0:
+        return False, {}  # PT never hit
+
+    pt_idx = int(pt_idxs[0])
+
+    # After PT, tighten trailing (if configured), keep SL, same time cap remainder
+    armed_frac = policy.armed_trail_frac if (policy.armed_trail_frac is not None) else policy.trail_frac
+    p2 = p[pt_idx: last_idx + 1]  # includes PT day
+    peak2 = np.maximum.accumulate(p2)
+
+    ts2_mask = np.zeros_like(p2, dtype=bool)
+    if armed_frac is not None and 0 < float(armed_frac) < 1:
+        ts2_thresh = peak2 * float(armed_frac)
+        ts2_mask = p2 <= ts2_thresh
+
+    sl2_mask = np.zeros_like(p2, dtype=bool)
+    if policy.sl_multiple is not None and policy.sl_multiple > 0:
+        sl_thresh = float(entry_exec_price) * float(policy.sl_multiple)
+        sl2_mask = p2 <= sl_thresh
+
+    # earliest of (trailing, stop) after PT; otherwise time/horizon
+    def _first_true_index(mask: np.ndarray) -> Optional[int]:
+        idxs = np.nonzero(mask)[0]
+        return int(idxs[0]) if idxs.size > 0 else None
+
+    day_ts2 = _first_true_index(ts2_mask)
+    day_sl2 = _first_true_index(sl2_mask)
+
+    candidates = []
+    if day_ts2 is not None: candidates.append((day_ts2, "trailing_stop"))
+    if day_sl2 is not None: candidates.append((day_sl2, "stop_loss"))
+
+    if candidates:
+        earliest_rel, reason = min(candidates, key=lambda t: t[0])
+        final_idx = pt_idx + int(earliest_rel)
+        return True, {"pt_idx": pt_idx, "pt_reason": "profit_target_partial",
+                      "final_idx": final_idx, "final_reason": reason}
+
+    # No TS/SL after PT -> end at time cap / horizon
+    final_idx = last_idx
+    final_reason = "horizon" if time_cap == horizon_days else "time_stop"
+    return True, {"pt_idx": pt_idx, "pt_reason": "profit_target_partial",
+                  "final_idx": final_idx, "final_reason": final_reason}
+
 def _decide_exit_from_path(price_path: pd.Series,
                            entry_exec_price: float,
                            horizon_days: int,
-                           policy: ExitPolicy) -> tuple[int, str, int]:
+                           policy: ExitPolicy) -> Tuple[int, str, int]:
     """
-    Return (exit_idx, exit_reason, holding_days_actual).
-    Tie-break same-day: PT -> TS -> SL -> Time. EOD-only, no lookahead.
+    Single-leg exit decision on an option price path with:
+      - Profit Target (PT)
+      - Trailing Stop (TS)
+      - Stop-Loss (SL)
+      - Time cap / Horizon fallback
+
+    Returns:
+        exit_idx (int): 0-based index into price_path where we exit
+        exit_reason (str): 'profit_target' | 'trailing_stop' | 'stop_loss' | 'time_stop' | 'horizon'
+        holding_days_actual (int): equals exit_idx (0..len(path)-1)
     """
     n = len(price_path)
     if n == 0:
         return 0, "horizon", 0
 
-    time_cap = min(horizon_days, policy.time_cap_days if policy.time_cap_days is not None else horizon_days)
+    # Respect time cap (defaults to horizon if None)
+    time_cap = min(int(horizon_days),
+                   int(policy.time_cap_days) if policy.time_cap_days is not None else int(horizon_days))
     time_cap = max(0, time_cap)
     last_idx = min(time_cap, n - 1)
 
-    if (not policy.enabled) or policy.is_noop():
-        return last_idx, ("horizon" if time_cap == horizon_days else "time_stop"), last_idx
-
+    # Slice path up to cap
     p = price_path.iloc[: last_idx + 1].astype(float).values
-    peak = np.maximum.accumulate(p)
 
-    pt_mask = np.zeros_like(p, dtype=bool)
-    if policy.pt_multiple is not None and policy.pt_multiple > 0:
+    # Tripwires (None => disabled)
+    # Profit Target
+    pt_idx = None
+    if policy.enabled and policy.pt_multiple is not None and policy.pt_multiple > 0:
         pt_thresh = float(entry_exec_price) * float(policy.pt_multiple)
-        pt_mask = p >= pt_thresh
+        pt_hits = np.nonzero(p >= pt_thresh)[0]
+        pt_idx = int(pt_hits[0]) if pt_hits.size > 0 else None
 
-    ts_mask = np.zeros_like(p, dtype=bool)
-    if policy.trail_frac is not None and 0 < policy.trail_frac < 1:
+    # Trailing Stop (uses running peak from entry)
+    ts_idx = None
+    if policy.enabled and policy.trail_frac is not None and 0.0 < float(policy.trail_frac) < 1.0:
+        peak = np.maximum.accumulate(p)
         ts_thresh = peak * float(policy.trail_frac)
-        ts_mask = p <= ts_thresh
+        ts_hits = np.nonzero(p <= ts_thresh)[0]
+        ts_idx = int(ts_hits[0]) if ts_hits.size > 0 else None
 
-    sl_mask = np.zeros_like(p, dtype=bool)
-    if policy.sl_multiple is not None and policy.sl_multiple > 0:
+    # Hard Stop-Loss (vs entry)
+    sl_idx = None
+    if policy.enabled and policy.sl_multiple is not None and policy.sl_multiple > 0:
         sl_thresh = float(entry_exec_price) * float(policy.sl_multiple)
-        sl_mask = p <= sl_thresh
+        sl_hits = np.nonzero(p <= sl_thresh)[0]
+        sl_idx = int(sl_hits[0]) if sl_hits.size > 0 else None
 
-    day_pt = _first_true_index(pt_mask)
-    day_ts = _first_true_index(ts_mask)
-    day_sl = _first_true_index(sl_mask)
+    # Choose earliest event; on same-day ties, PT beats TS, TS beats SL
+    candidates = []
+    if pt_idx is not None: candidates.append((pt_idx, "profit_target", 0))
+    if ts_idx is not None: candidates.append((ts_idx, "trailing_stop", 1))
+    if sl_idx is not None: candidates.append((sl_idx, "stop_loss", 2))
 
-    candidates = [(day_pt, "profit_target"), (day_ts, "trailing_stop"), (day_sl, "stop_loss")]
-    valid_days = [d for d in candidates if d[0] is not None]
-    if valid_days:
-        earliest = min(d[0] for d in valid_days)
-        for d, reason in [(day_pt, "profit_target"), (day_ts, "trailing_stop"), (day_sl, "stop_loss")]:
-            if d is not None and d == earliest:
-                return earliest, reason, earliest
+    if candidates:
+        day, reason, _prio = sorted(candidates, key=lambda t: (t[0], t[2]))[0]
+        return int(day), reason, int(day)
 
-    return last_idx, ("horizon" if time_cap == horizon_days else "time_stop"), last_idx
+    # No tripwire -> time/horizon
+    final_idx = last_idx
+    final_reason = "horizon" if time_cap == int(horizon_days) else "time_stop"
+    return int(final_idx), final_reason, int(final_idx)
+
+
 
 # ---------------- Pricing bridge (delegates to options.pricing if present) ----------------
 

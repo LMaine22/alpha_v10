@@ -24,10 +24,63 @@ VERBOSE: int = int(getattr(settings.ga, "verbose", 1))
 DEBUG_SEQUENTIAL: bool = bool(getattr(settings.ga, "debug_sequential", False))
 JOBLIB_VERBOSE: int = 0
 
-EXIT_PT_GRID = [None, 1.5, 2.0, 3.0]
-EXIT_TS_GRID = [0.5, 0.33]
-EXIT_SL_GRID = [0.5, 0.6]
+# --- Exit-policy grids (no-PT removed by design) ---
+EXIT_PT_GRID = [1.3, 1.5, 2.0, 3.0]        # PT always present
+EXIT_TS_GRID = [None, 0.95, 0.93, 0.9, 0.85]
+EXIT_SL_GRID = [0.7, 0.6]                  # keep simple
 EXIT_TC_TAGS = [None, "horizon"]
+
+# NEW behavior knobs
+EXIT_PT_BEHAVIOR = ['exit', 'arm_trail', 'scale_out']
+EXIT_ARMED_TRAIL_GRID = [None, 0.95, 0.93, 0.90]
+EXIT_SCALE_OUT_FRAC_GRID = [0.25, 0.33, 0.50, 0.67]
+
+def _sample_exit_policy(rng: np.random.Generator) -> Dict:
+    return {
+        "pt_multiple": rng.choice(EXIT_PT_GRID),
+        "trail_frac":  rng.choice(EXIT_TS_GRID),
+        "sl_multiple": rng.choice(EXIT_SL_GRID),
+        "time_cap_days": None,
+        # NEW:
+        "pt_behavior": rng.choice(EXIT_PT_BEHAVIOR),
+        "armed_trail_frac": rng.choice(EXIT_ARMED_TRAIL_GRID),
+        "scale_out_frac": rng.choice(EXIT_SCALE_OUT_FRAC_GRID),
+    }
+
+def _mutate_exit_policy(pol: Dict, rng: np.random.Generator) -> Dict:
+    if not pol:
+        return _sample_exit_policy(rng)
+    k = rng.choice([
+        "pt_multiple", "trail_frac", "sl_multiple", "time_cap_days",
+        "pt_behavior", "armed_trail_frac", "scale_out_frac"
+    ])
+    if k == "pt_multiple":
+        pol[k] = rng.choice(EXIT_PT_GRID)
+    elif k == "trail_frac":
+        pol[k] = rng.choice(EXIT_TS_GRID)
+    elif k == "sl_multiple":
+        pol[k] = rng.choice(EXIT_SL_GRID)
+    elif k == "time_cap_days":
+        pol[k] = None
+    elif k == "pt_behavior":
+        pol[k] = rng.choice(EXIT_PT_BEHAVIOR)
+    elif k == "armed_trail_frac":
+        pol[k] = rng.choice(EXIT_ARMED_TRAIL_GRID)
+    else:  # scale_out_frac
+        pol[k] = rng.choice(EXIT_SCALE_OUT_FRAC_GRID)
+    return pol
+
+def _crossover_exit_policy(a: Dict, b: Dict, rng: np.random.Generator) -> Dict:
+    if not a: return dict(b) if b else {}
+    if not b: return dict(a)
+    child = {}
+    for k in [
+        "pt_multiple", "trail_frac", "sl_multiple", "time_cap_days",
+        "pt_behavior", "armed_trail_frac", "scale_out_frac"
+    ]:
+        child[k] = a.get(k) if rng.random() < 0.5 else b.get(k)
+    return child
+
 
 # --- MODIFIED: DNA is now (ticker, [signals]) ---
 def _dna(individual: Tuple[str, List[str]]) -> Tuple[str, Tuple[str, ...]]:
@@ -66,14 +119,6 @@ def _evaluate_one_setup_cached(
         _EVAL_CACHE.popitem(last=False)
     return res
 
-# --- MODIFIED: Policy ops now handle the new individual structure ---
-def _sample_exit_policy(rng: np.random.Generator) -> Dict:
-    return {
-        "pt_multiple": rng.choice(EXIT_PT_GRID),
-        "trail_frac": rng.choice(EXIT_TS_GRID),
-        "sl_multiple": rng.choice(EXIT_SL_GRID),
-        "time_cap_days": None,
-    }
 
 def _mutate_exit_policy(pol: Dict, rng: np.random.Generator) -> Dict:
     if not pol: return _sample_exit_policy(rng)
@@ -162,23 +207,45 @@ def _evaluate_one_setup(
     }
 
 def _summarize_evals(tag: str, evaluated: List[Dict]) -> Dict[str, float]:
-    total_ledgers = 0; total_trades = 0; support_vals = []
+    total_ledgers = 0
+    total_trades = 0
+    support_vals = []
     exit_counter = Counter()
+    first_exit_counter = Counter()
+
     for ind in evaluated:
         df = ind.get("trade_ledger")
         if isinstance(df, pd.DataFrame) and not df.empty:
             total_ledgers += 1
             total_trades += len(df)
+
             if "exit_reason" in df.columns:
                 exit_counter.update(df["exit_reason"].value_counts().to_dict())
+
+            # NEW: count scale-outs (partial PTs)
+            if "first_exit_reason" in df.columns:
+                first_exit_counter.update(df["first_exit_reason"].value_counts().to_dict())
+
             if sup := ind.get("metrics", {}).get("support"):
-                try: support_vals.append(float(sup))
-                except Exception: pass
+                try:
+                    support_vals.append(float(sup))
+                except Exception:
+                    pass
+
     avg_support = float(np.mean(support_vals)) if support_vals else 0.0
+
     if VERBOSE >= 2:
         from tqdm.auto import tqdm
+        # top 3 final exit reasons
         top_exit = ", ".join(f"{k}:{v}" for k, v in exit_counter.most_common(3))
         tqdm.write(f"[{tag}] Ledgers:{total_ledgers} Trades:{total_trades} "
                    f"AvgSupport:{avg_support:.1f} ExitReasons[{top_exit}]")
+
+        # NEW: show scale-outs if any
+        pt_partials = first_exit_counter.get("profit_target_partial", 0)
+        if pt_partials:
+            tqdm.write(f"[{tag}] ScaleOuts[profit_target_partial:{pt_partials}]")
+
     return {"total_trades": float(total_trades), "avg_support": float(avg_support)}
+
 
