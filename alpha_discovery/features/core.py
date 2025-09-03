@@ -1,5 +1,3 @@
-# alpha_discovery/features/core.py
-
 import numpy as np
 import pandas as pd
 from typing import Tuple, Optional
@@ -7,44 +5,44 @@ from typing import Tuple, Optional
 # A small constant to prevent division by zero
 EPSILON = 1e-9
 
-
 # ===================================
 # Section 1: Normalization Functions
 # ===================================
 
 def zscore_rolling(series: pd.Series, window: int, min_periods: int = None) -> pd.Series:
     """
-    Calculates the rolling z-score of a series.
-    The z-score measures how many standard deviations an element is from the mean.
+    Rolling z-score: (x - mean) / std
     """
     if min_periods is None:
         min_periods = window // 2
-
     s = pd.to_numeric(series, errors="coerce")
     mean = s.rolling(window, min_periods=min_periods).mean()
     std = s.rolling(window, min_periods=min_periods).std()
-
     return (s - mean) / (std + EPSILON)
 
 
 def mad_z_rolling(series: pd.Series, window: int, min_periods: int = None) -> pd.Series:
     """
-    Calculates a z-score using the Median Absolute Deviation (MAD).
-    This is more robust to outliers than a standard z-score.
+    Rolling robust z using MAD (median absolute deviation).
     """
     if min_periods is None:
         min_periods = window // 2
-
     s = pd.to_numeric(series, errors="coerce")
-
-    # The constant 1.4826 scales the MAD to be comparable to the standard deviation
-    # for a normal distribution.
     c = 1.4826
-
     median = s.rolling(window, min_periods=min_periods).median()
     mad = (s - median).abs().rolling(window, min_periods=min_periods).median()
-
     return (s - median) / (c * mad + EPSILON)
+
+
+def robust_z(series: pd.Series) -> pd.Series:
+    """
+    Static (non-rolling) robust z using MAD.
+    """
+    s = pd.to_numeric(series, errors="coerce")
+    med = s.median()
+    mad = (s - med).abs().median()
+    c = 1.4826
+    return (s - med) / (c * mad + EPSILON)
 
 
 # ===================================
@@ -53,48 +51,46 @@ def mad_z_rolling(series: pd.Series, window: int, min_periods: int = None) -> pd
 
 def align_series(s1: pd.Series, s2: pd.Series) -> Tuple[pd.Series, pd.Series]:
     """
-    Aligns two series by their index and drops any rows with NaNs in either.
-    Ensures that calculations like correlation or beta are performed on a common set of dates.
+    Align two series on common index and drop any NaNs.
     """
     s1 = pd.to_numeric(s1, errors="coerce")
     s2 = pd.to_numeric(s2, errors="coerce")
     df = pd.concat([s1, s2], axis=1, join='inner').dropna()
+    if df.empty:
+        # Return empty aligned series with the union index to avoid KeyErrors downstream
+        idx = s1.index.union(s2.index)
+        return pd.Series(index=idx, dtype=float), pd.Series(index=idx, dtype=float)
     return df.iloc[:, 0], df.iloc[:, 1]
 
 
 def rolling_corr_fisher(s1: pd.Series, s2: pd.Series, window: int, min_periods: int = None) -> Tuple[pd.Series, pd.Series]:
     """
-    Calculates the rolling correlation and its Fisher transformation.
-    The Fisher transform helps normalize the correlation's distribution, making it
-    more suitable for subsequent z-scoring.
+    Rolling correlation and Fisher transform (stabilizes correlation variance).
+    Returns: (corr, fisher_z)
     """
     if min_periods is None:
         min_periods = window // 2
-
     s1_aligned, s2_aligned = align_series(s1, s2)
-
-    # Calculate rolling correlation, clipped to avoid issues with log(0)
+    if s1_aligned.empty or s2_aligned.empty:
+        idx = s1.index.union(s2.index)
+        empty = pd.Series(index=idx, dtype=float)
+        return empty, empty
     corr = s1_aligned.rolling(window, min_periods=min_periods).corr(s2_aligned).clip(-0.9999, 0.9999)
-
-    # Apply the Fisher transformation
     fisher_transform = 0.5 * np.log((1 + corr) / (1 - corr))
-
     return corr, fisher_transform
 
 
 def rolling_beta(s1: pd.Series, s2: pd.Series, window: int, min_periods: int = None) -> pd.Series:
     """
-    Calculates the rolling beta of series s1 with respect to series s2.
-    Beta = Cov(s1, s2) / Var(s2)
+    Rolling beta of s1 w.r.t. s2 = Cov(s1, s2) / Var(s2)
     """
     if min_periods is None:
         min_periods = window // 2
-
     s1_aligned, s2_aligned = align_series(s1, s2)
-
+    if s1_aligned.empty or s2_aligned.empty:
+        return pd.Series(index=s1.index.union(s2.index), dtype=float)
     covariance = s1_aligned.rolling(window, min_periods=min_periods).cov(s2_aligned)
     variance = s2_aligned.rolling(window, min_periods=min_periods).var()
-
     return covariance / (variance + EPSILON)
 
 
@@ -104,42 +100,34 @@ def rolling_beta(s1: pd.Series, s2: pd.Series, window: int, min_periods: int = N
 
 def get_realized_vol(price_series: pd.Series, window: int = 21) -> pd.Series:
     """
-    Calculates the annualized realized volatility over a rolling window.
-    Based on the standard deviation of daily log returns.
+    Annualized realized vol via std of daily log returns over a rolling window.
     """
     px = pd.to_numeric(price_series, errors="coerce").astype(float)
-    # Robust log returns: use log(px).diff() with a tiny floor to avoid log(<=0)
     log_px = np.log(px.clip(lower=1e-12))
     log_returns = log_px.diff()
+    return log_returns.rolling(window).std() * np.sqrt(252)
 
-    # Multiply by sqrt(252) to annualize the daily standard deviation
-    realized_vol = log_returns.rolling(window).std() * np.sqrt(252)
-    return realized_vol
+
+def garman_klass_vol(px_open, px_high, px_low, px_close, window: int = 21) -> pd.Series:
+    O = pd.to_numeric(px_open, errors="coerce").clip(lower=1e-12)
+    H = pd.to_numeric(px_high, errors="coerce").clip(lower=1e-12)
+    L = pd.to_numeric(px_low,  errors="coerce").clip(lower=1e-12)
+    C = pd.to_numeric(px_close,errors="coerce").clip(lower=1e-12)
+    rs = 0.5 * (np.log(H / L) ** 2) - (2 * np.log(2) - 1) * (np.log(C / O) ** 2)
+    return rs.rolling(window).sum().clip(lower=0).pow(0.5) * np.sqrt(252)
+
 
 
 def frac_diff(series: pd.Series, d: float, window: int = 100) -> pd.Series:
     """
-    Computes fractional differentiation of a time series.
-    This helps to make the series stationary while preserving more memory
-    than traditional integer differencing.
-
-    Args:
-        series (pd.Series): The input time series.
-        d (float): The order of differentiation, typically between [0, 1].
-        window (int): The lookback window to compute weights. A larger window
-                      provides a more accurate but slower calculation.
+    Fractional differentiation to help stationarity while retaining memory.
     """
     s = pd.to_numeric(series, errors="coerce")
-
-    # Calculate weights
     weights = [1.0]
     for k in range(1, window):
         weights.append(-weights[-1] * (d - k + 1) / k)
-    weights = np.array(weights[::-1])  # Reverse weights for dot product
-
-    # Apply weights
-    output = s.rolling(window).apply(lambda x: np.dot(weights, x), raw=True)
-    return output
+    weights = np.array(weights[::-1])
+    return s.rolling(window).apply(lambda x: np.dot(weights, x), raw=True)
 
 
 # ===================================
@@ -153,7 +141,6 @@ def to_numeric_safe(series: pd.Series) -> pd.Series:
 
 def pct_change_n(series: pd.Series, n: int) -> pd.Series:
     s = to_numeric_safe(series)
-    # keep your explicit ffill, but silence the future deprecation by setting fill_method=None
     return s.ffill().pct_change(n, fill_method=None)
 
 
@@ -217,11 +204,11 @@ def spike_on_change_z(series: pd.Series, change_n: int = 1, window: int = 30) ->
 
 
 # ===================================
-# Section 5: Convenience Helpers for This Project
+# Section 5: Convenience & Risk Helpers
 # ===================================
 
 def safe_divide(numer: pd.Series, denom: pd.Series) -> pd.Series:
-    """Elementwise safe division with numeric coercion and EPSILON protection."""
+    """Elementwise safe division with EPSILON protection."""
     n = to_numeric_safe(numer)
     d = to_numeric_safe(denom)
     return n / (d.replace(0, np.nan) + EPSILON)
@@ -229,8 +216,7 @@ def safe_divide(numer: pd.Series, denom: pd.Series) -> pd.Series:
 
 def range_polarity(px_last: pd.Series, px_low: pd.Series, px_high: pd.Series) -> pd.Series:
     """
-    Position of close within the daily range, normalized to [-1, 1]-ish:
-        (close - mid) / (high - low)
+    Close vs mid-range: (close - mid) / (high - low)
     """
     close = to_numeric_safe(px_last)
     low = to_numeric_safe(px_low)
@@ -238,3 +224,99 @@ def range_polarity(px_last: pd.Series, px_low: pd.Series, px_high: pd.Series) ->
     rng = (high - low)
     mid = (high + low) / 2.0
     return (close - mid) / (rng + EPSILON)
+
+
+def semivariance(returns: pd.Series, window: int, downside: bool = True) -> pd.Series:
+    """
+    Rolling semi-variance (downside by default).
+    """
+    r = to_numeric_safe(returns)
+    mask = r < 0 if downside else r > 0
+    r_masked = r.where(mask, 0.0)
+    return (r_masked ** 2).rolling(window).mean()
+
+
+def drawdown_from_high(series: pd.Series, window: int) -> pd.Series:
+    """
+    Drawdown from rolling max over window: (px / max) - 1
+    """
+    s = to_numeric_safe(series)
+    roll_max = s.rolling(window).max()
+    return (s / (roll_max + EPSILON)) - 1.0
+
+
+def amihud_illiquidity(ret: pd.Series, dollar_volume: pd.Series, window: int) -> pd.Series:
+    """
+    Amihud illiquidity: mean(|ret| / $volume) over window.
+    """
+    r = to_numeric_safe(ret).abs()
+    dv = to_numeric_safe(dollar_volume)
+    daily = r / (dv + EPSILON)
+    return daily.rolling(window).mean()
+
+
+def corwin_schultz_spread(px_high: pd.Series, px_low: pd.Series, window: int = 21) -> pd.Series:
+    """
+    Corwin–Schultz high–low spread proxy (rolling mean).
+    """
+    H, L = to_numeric_safe(px_high), to_numeric_safe(px_low)
+    beta = (np.log(H / L) ** 2).rolling(window=2).sum()
+    gamma = (np.log(H.shift(-1) / L) * np.log(H / L.shift(-1))).rolling(window=1).sum()
+    alpha = (beta - gamma).clip(lower=0)
+    spread = 2 * (np.exp(alpha) - 1) / (1 + np.exp(alpha))
+    return spread.rolling(window).mean()
+
+
+def percentile(series: pd.Series, window: int = 252) -> pd.Series:
+    """
+    Rolling percentile rank (0..1) of the latest value in the trailing window.
+    """
+    s = to_numeric_safe(series)
+    return s.rolling(window).apply(lambda x: (pd.Series(x).rank(pct=True)).iloc[-1], raw=False)
+
+
+def ewma_halflife(series: pd.Series, halflife: int, min_periods: Optional[int] = None) -> pd.Series:
+    """
+    EWMA with halflife parameter.
+    """
+    s = to_numeric_safe(series)
+    return s.ewm(halflife=halflife, min_periods=min_periods).mean()
+
+
+def relevance_weighted_ewma(values: pd.Series, weights: pd.Series, halflife: int) -> pd.Series:
+    """
+    Relevance-weighted EWMA: normalize weights locally, then EWMA.
+    """
+    v = to_numeric_safe(values)
+    w = to_numeric_safe(weights).clip(lower=0)
+    w_norm = w / (w.rolling(5).max() + EPSILON)
+    return (v * w_norm).ewm(halflife=halflife, min_periods=2).mean()
+
+
+# ===================================
+# Section 6: Project-Specific Convenience
+# ===================================
+
+REQUIRED_COLS = {
+    "Dates","PX_LAST","DAY_TO_DAY_TOT_RETURN_NET_DVDS","VWAP_VOLUME","TURNOVER","VOLATILITY_90D",
+    "BETA_ADJ_OVERRIDABLE","PUT_CALL_VOLUME_RATIO_CUR_DAY","TOT_OPT_VOLUME_CUR_DAY",
+    "OPEN_INT_TOTAL_CALL","OPEN_INT_TOTAL_PUT","PX_VOLUME","PX_OPEN","IVOL_MONEYNESS",
+    "TWITTER_POS_SENTIMENT_COUNT","TWITTER_PUBLICATION_COUNT","TWITTER_NEG_SENTIMENT_COUNT",
+    "TWITTER_SENTIMENT_DAILY_AVG","TWITTER_NEUTRAL_SENTIMENT_CNT","NEWS_PUBLICATION_COUNT",
+    "CHINESE_NEWS_SENTMNT_DAILY_AVG","NEWS_HEAT_READ_DMAX","3MO_CALL_IMP_VOL","3MO_PUT_IMP_VOL",
+    "PX_ASK","PX_HIGH","PX_LOW"
+}
+
+def validate_columns(df: pd.DataFrame):
+    missing = [c for c in REQUIRED_COLS if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required columns: {missing}")
+
+def safe_dollar_volume(df: pd.DataFrame) -> pd.Series:
+    """
+    TURNOVER preferred; fallback = PX_LAST * PX_VOLUME when TURNOVER is 0/NaN.
+    """
+    dv = pd.to_numeric(df.get("TURNOVER", pd.Series(index=df.index, dtype=float)), errors="coerce")
+    fallback = pd.to_numeric(df.get("PX_LAST", pd.Series(index=df.index, dtype=float)), errors="coerce") * \
+               pd.to_numeric(df.get("PX_VOLUME", pd.Series(index=df.index, dtype=float)), errors="coerce")
+    return dv.where(dv > 0, fallback)

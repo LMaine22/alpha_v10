@@ -1,4 +1,3 @@
-# alpha_discovery/data/events.py
 """
 Event calendar loader + daily EV_* feature builder.
 Robust to timezone mismatches (normalizes to ET midnight, tz-naive).
@@ -10,6 +9,7 @@ import pandas as pd
 from pandas.tseries.offsets import BDay
 
 from ..config import settings
+from ..features.core import ewma_halflife  # for new EWMA surprise features
 
 ET_TZ = "America/New_York"
 
@@ -23,7 +23,6 @@ def _to_et_midnight_naive(ts: pd.Timestamp) -> pd.Timestamp:
     then drop timezone to return a tz-naive Timestamp.
     """
     if ts.tz is None:
-        # assume it's ET local time already; localize then normalize
         ts_et = ts.tz_localize(ET_TZ)
     else:
         ts_et = ts.tz_convert(ET_TZ)
@@ -31,7 +30,6 @@ def _to_et_midnight_naive(ts: pd.Timestamp) -> pd.Timestamp:
 
 def _series_to_et_midnight_naive(s: pd.Series) -> pd.Series:
     s = pd.to_datetime(s, errors="coerce")
-    # If any tz-aware values exist, convert; otherwise localize to ET
     if getattr(s.dt, "tz", None) is not None:
         s = s.dt.tz_convert(ET_TZ).dt.normalize().dt.tz_localize(None)
     else:
@@ -53,35 +51,25 @@ def _load_and_normalize_events(path: str) -> pd.DataFrame | None:
         print(f"  Warning: Missing columns in events file: {sorted(missing)}")
         return None
 
-    # Normalize to ET midnight, tz-naive
     rel = pd.to_datetime(df["release_datetime"], errors="coerce")
-    # handle tz-aware and tz-naive robustly
     if getattr(rel.dt, "tz", None) is not None:
         df["date_naive"] = rel.dt.tz_convert(ET_TZ).dt.normalize().dt.tz_localize(None)
     else:
         df["date_naive"] = rel.dt.tz_localize(ET_TZ).dt.normalize().dt.tz_localize(None)
 
-    # Basic cleaning
     df = df.dropna(subset=["date_naive"]).copy()
     return df
 
 def _filter_events(df: pd.DataFrame, conf) -> pd.DataFrame:
     """Apply country, type, and relevance filters."""
     out = df.copy()
-
-    # Countries
     if getattr(conf, "countries", None):
         out = out[out["country"].isin(conf.countries)]
-
-    # Event type allowlist (optional)
     include_types = getattr(conf, "include_types", None)
     if include_types:
         out = out[out["event_type"].isin(include_types)]
-
-    # Relevance threshold
     thr = float(getattr(conf, "high_relevance_threshold", 70.0))
     out = out[out["relevance"] >= thr]
-
     return out
 
 def _get_high_impact_dates_naive(df: pd.DataFrame) -> list[pd.Timestamp]:
@@ -92,19 +80,16 @@ def _get_high_impact_dates_naive(df: pd.DataFrame) -> list[pd.Timestamp]:
 
 def _daily_surprise_z(df: pd.DataFrame) -> pd.Series:
     """
-    Surprise z per event_type (within the filtered set), then pick the max |z| per day.
-    Index returned is tz-naive ET dates (NOT event days shifted).
+    Surprise z per event_type (within filtered set), then pick the max |z| per day.
+    Index returned = tz-naive ET dates.
     """
     if df.empty:
         return pd.Series(dtype=float)
-
     work = df.copy()
     work["surprise"] = pd.to_numeric(work["actual"], errors="coerce") - pd.to_numeric(work["survey"], errors="coerce")
     work = work.dropna(subset=["surprise", "event_type", "date_naive"])
     if work.empty:
         return pd.Series(dtype=float)
-
-    # z by type within filtered sample
     grp = work.groupby("event_type")["surprise"]
     mu = grp.transform("mean")
     sd = grp.transform("std").replace(0.0, np.nan)
@@ -112,12 +97,21 @@ def _daily_surprise_z(df: pd.DataFrame) -> pd.Series:
     work = work.dropna(subset=["surprise_z"])
     if work.empty:
         return pd.Series(dtype=float)
-
     work["abs_z"] = work["surprise_z"].abs()
     best = work.sort_values("abs_z", ascending=False).drop_duplicates("date_naive")
     s = best.set_index("date_naive")["surprise_z"].sort_index()
-    # index is tz-naive already
     return s
+
+def _dense_count_next_days(df: pd.DataFrame, by_day: pd.Series, days: int = 7) -> pd.Series:
+    """
+    For each day in the base index, count number of high-impact events in next N calendar days.
+    """
+    base_days = pd.DatetimeIndex(by_day.index).sort_values().unique()
+    out = []
+    for dt in base_days:
+        horizon = [dt + pd.Timedelta(days=i) for i in range(1, days + 1)]
+        out.append(sum(by_day.reindex(horizon).fillna(0).values))
+    return pd.Series(out, index=base_days, dtype=float)
 
 # --------------------------
 # Public API
@@ -130,8 +124,11 @@ def build_event_features(full_data_index: pd.DatetimeIndex) -> pd.DataFrame:
     - EV_in_window: 1 if in [T-pre, T+post] around any high-impact event
     - EV_pre_window: 1 if in [T-pre, T-1]
     - EV_is_event_week: 1 if any high-impact event in the same ISO week
-    - EV_after_surprise_z: standardized surprise (posted on T+post_release_lag_days business days)
+    - EV_after_surprise_z: standardized surprise (posted on T+lag business days)
     - EV_after_pos/EV_after_neg: sign of surprise (T+lag)
+    - EV_surprise_ewma_21 / EV_surprise_ewma_63: EWMAs of the daily surprise z (post-release)
+    - EV_tail_intensity_21: share of days with |surprise_z|>2 over the past 21 days (post-release)
+    - EV_dense_macro_window_7: count of high-impact events in next 7 calendar days (calendar-only)
     """
     print("Building event features from economic calendar...")
 
@@ -148,7 +145,6 @@ def build_event_features(full_data_index: pd.DatetimeIndex) -> pd.DataFrame:
 
     # Ensure master index is tz-naive
     if getattr(full_data_index, "tz", None) is not None:
-        # Drop tz if someone passed tz-aware
         base_index = pd.DatetimeIndex(full_data_index.tz_localize(None))
     else:
         base_index = pd.DatetimeIndex(full_data_index)
@@ -201,15 +197,38 @@ def build_event_features(full_data_index: pd.DatetimeIndex) -> pd.DataFrame:
     if not sz.empty:
         lag = int(getattr(conf, "post_release_lag_days", 1))
         sz_t1 = pd.Series(sz.values, index=sz.index + BDay(lag))
-        out["EV_after_surprise_z"] = sz_t1.reindex(out.index)
+        # Align to base index
+        sz_t1 = sz_t1.reindex(out.index)
+        out["EV_after_surprise_z"] = sz_t1.fillna(0.0)
+        out["EV_after_pos"] = (out["EV_after_surprise_z"] > 0).astype(int)
+        out["EV_after_neg"] = (out["EV_after_surprise_z"] < 0).astype(int)
+
+        # Surprise EWMAs (post-release)
+        out["EV_surprise_ewma_21"] = ewma_halflife(out["EV_after_surprise_z"], halflife=21)
+        out["EV_surprise_ewma_63"] = ewma_halflife(out["EV_after_surprise_z"], halflife=63)
+
+        # Tail intensity over last 21 business days (post-release)
+        absz = out["EV_after_surprise_z"].abs()
+        out["EV_tail_intensity_21"] = (absz > 2.0).astype(float).rolling(21).mean().fillna(0.0)
     else:
-        out["EV_after_surprise_z"] = np.nan
+        out["EV_after_surprise_z"] = 0.0
+        out["EV_after_pos"] = 0
+        out["EV_after_neg"] = 0
+        out["EV_surprise_ewma_21"] = 0.0
+        out["EV_surprise_ewma_63"] = 0.0
+        out["EV_tail_intensity_21"] = 0.0
 
-    out["EV_after_pos"] = (out["EV_after_surprise_z"] > 0).astype(int).fillna(0)
-    out["EV_after_neg"] = (out["EV_after_surprise_z"] < 0).astype(int).fillna(0)
-
-    # Final NaN handling
-    out["EV_after_surprise_z"] = out["EV_after_surprise_z"].fillna(0.0)
+    # --- Dense macro window: count of high-impact events in next 7 calendar days (calendar-only) ---
+    if high_dates:
+        by_day = pd.Series(1, index=pd.DatetimeIndex(high_dates))
+        dense7 = []
+        # preserve full_data_index alignment
+        for dt in out.index:
+            horizon = [dt + pd.Timedelta(days=i) for i in range(1, 8)]
+            dense7.append(sum(by_day.reindex(horizon).fillna(0).values))
+        out["EV_dense_macro_window_7"] = pd.Series(dense7, index=out.index, dtype=float)
+    else:
+        out["EV_dense_macro_window_7"] = 0.0
 
     print(f"  Successfully built {len(out.columns)} event features.")
     return out

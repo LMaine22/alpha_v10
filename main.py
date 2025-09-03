@@ -53,6 +53,11 @@ def run_pipeline():
 
     print("--- Creating walk-forward splits ---")
     splits = create_walk_forward_splits(data_index=signals_df.index)
+    # Keep only the most recent (last) split for quick tests
+    #plits = [splits[-1]]
+    #print(
+       # f"[Quick Test] Using latest split only: Train={splits[0][0][0].date()}..{splits[0][0][-1].date()}  Test={splits[0][1][0].date()}..{splits[0][1][-1].date()}")
+
     print(f"Total folds created: {len(splits)}")
 
     # Embargo sanity guard vs. holding horizon

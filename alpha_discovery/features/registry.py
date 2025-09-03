@@ -1,8 +1,5 @@
-# alpha_discovery/features/registry.py
-
 import pandas as pd
 import numpy as np
-import itertools
 from typing import Dict, Callable, List, Tuple
 
 from ..config import settings
@@ -29,7 +26,7 @@ def _get_series(df: pd.DataFrame, ticker: str, column: str) -> pd.Series:
 
 FEATURE_SPECS: Dict[str, Callable] = {
     # =========================
-    # A) CORE (Kept)
+    # A) CORE (Kept from your build)
     # =========================
     "px_zscore_90d": lambda df, t: fcore.zscore_rolling(
         _get_series(df, t, "PX_LAST"), window=90
@@ -54,8 +51,28 @@ FEATURE_SPECS: Dict[str, Callable] = {
     ),
 
     # =========================
-    # B) PRICE / MICROSTRUCTURE (New)
+    # B) PRICE / MICROSTRUCTURE (Expanded)
     # =========================
+    "price.mom_21":   lambda D, t: fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 21),
+    "price.mom_63":   lambda D, t: fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 63),
+    "price.mom_126":  lambda D, t: fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 126),
+
+    "price.vol_gk_21": lambda D, t: fcore.garman_klass_vol(
+        _get_series(D, t, "PX_OPEN"),
+        _get_series(D, t, "PX_HIGH"),
+        _get_series(D, t, "PX_LOW"),
+        _get_series(D, t, "PX_LAST"),
+        window=21
+    ),
+
+    "price.downside_semivar_21": lambda D, t: fcore.semivariance(
+        fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 1), window=21, downside=True
+    ),
+
+    "price.drawdown_63": lambda D, t: fcore.drawdown_from_high(
+        _get_series(D, t, "PX_LAST"), window=63
+    ),
+
     "px_trend_5_20_z_60d": lambda df, t: fcore.zscore_rolling(
         fcore.momentum_trend(_get_series(df, t, "PX_LAST"), 5, 20), window=60
     ),
@@ -73,7 +90,7 @@ FEATURE_SPECS: Dict[str, Callable] = {
     ),
 
     # =========================
-    # C) DERIVATIVES / VOL (IVOL-FREE)
+    # C) DERIVATIVES / VOL (IVOL-Aware)
     # =========================
     "iv_call3m_shock_1d_z_30d": lambda df, t: fcore.zscore_rolling(
         fcore.diff_n(_get_series(df, t, "3MO_CALL_IMP_VOL"), 1), window=30
@@ -115,8 +132,16 @@ FEATURE_SPECS: Dict[str, Callable] = {
         fcore.pct_change_n(_get_series(df, t, "OPEN_INT_TOTAL_CALL"), 3), window=60
     ),
 
+    # Additionally, clean options bundle
+    "opt.iv_percentile_252": lambda D, t: fcore.percentile(_get_series(D, t, "3MO_CALL_IMP_VOL"), 252),
+    "opt.vrp_21": lambda D, t: (_get_series(D, t, "3MO_CALL_IMP_VOL") - fcore.get_realized_vol(_get_series(D, t, "PX_LAST"), 21)),
+    "opt.pcr_z_21": lambda D, t: fcore.zscore_rolling(_get_series(D, t, "PUT_CALL_VOLUME_RATIO_CUR_DAY"), 21),
+    "opt.oi_mom_5": lambda D, t: fcore.pct_change_n(
+        _get_series(D, t, "OPEN_INT_TOTAL_CALL") + _get_series(D, t, "OPEN_INT_TOTAL_PUT"), 5
+    ),
+
     # =========================
-    # D) SENTIMENT / NEWS COMPOSITES (New)
+    # D) SENTIMENT / NEWS COMPOSITES
     # =========================
     "tw_posneg_balance_z_60d": lambda df, t: fcore.zscore_rolling(
         fcore.safe_divide(
@@ -126,15 +151,19 @@ FEATURE_SPECS: Dict[str, Callable] = {
         window=60,
     ),
     "px_vs_sentiment_divergence_z_60d": lambda df, t: fcore.zscore_rolling(
-        (
-            fcore.pct_change_n(_get_series(df, t, "PX_LAST"), 7)
-            - fcore.diff_n(_get_series(df, t, "TWITTER_SENTIMENT_DAILY_AVG"), 7)
-        ),
+        (fcore.pct_change_n(_get_series(df, t, "PX_LAST"), 7) - fcore.diff_n(_get_series(df, t, "TWITTER_SENTIMENT_DAILY_AVG"), 7)),
         window=60,
     ),
+    "sent.dispersion_21": lambda D, t: pd.concat([
+        _get_series(D, t, "TWITTER_POS_SENTIMENT_COUNT"),
+        _get_series(D, t, "TWITTER_NEG_SENTIMENT_COUNT"),
+        _get_series(D, t, "TWITTER_NEUTRAL_SENTIMENT_CNT"),
+        _get_series(D, t, "NEWS_PUBLICATION_COUNT"),
+    ], axis=1).pct_change(fill_method=None).rolling(21).std().mean(axis=1),
+    "sent.news_heat_tail_21": lambda D, t: fcore.zscore_rolling(_get_series(D, t, "NEWS_HEAT_READ_DMAX"), 21).clip(lower=0),
 
     # =========================
-    # E) FLOW / PCR (Replacement)
+    # E) FLOW / PCR (Kept replacement style)
     # =========================
     "pcr_ema5_z_30d": lambda df, t: fcore.zscore_rolling(
         _get_series(df, t, "PUT_CALL_VOLUME_RATIO_CUR_DAY").ewm(span=5, min_periods=2).mean(),
@@ -142,19 +171,40 @@ FEATURE_SPECS: Dict[str, Callable] = {
     ),
 
     # =========================
-    # F) REGIME
+    # F) REGIME / INTERMARKET (uses macro tickers verbatim)
     # =========================
     "vol90d_regime_z_120d": lambda df, t: fcore.zscore_rolling(
         _get_series(df, t, "VOLATILITY_90D"), window=120
     ),
+    "inter.2s10s_slope": lambda D, _: (
+        _get_series(D, "USGG10YR Index", "PX_LAST") - _get_series(D, "USGG2YR Index", "PX_LAST")
+    ),
+    "inter.2s10s_slope_mom_21": lambda D, _: fcore.diff_n(
+        _get_series(D, "USGG10YR Index", "PX_LAST") - _get_series(D, "USGG2YR Index", "PX_LAST"), 21
+    ),
+    "inter.dxy_regime_percentile_252": lambda D, _: fcore.percentile(
+        _get_series(D, "DXY Curncy", "PX_LAST"), 252
+    ),
+    "inter.hgxau_ratio_mom_63": lambda D, _: fcore.pct_change_n(
+        fcore.safe_divide(_get_series(D, "HG1 Comdty", "PX_LAST"), _get_series(D, "XAU Curncy", "PX_LAST")), 63
+    ),
+    "inter.risk_on_score": lambda D, _: (
+        -fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "DXY Curncy", "PX_LAST"), 1), 63)
+        -fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "USGG10YR Index", "PX_LAST"), 1), 63)
+        +fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "HG1 Comdty", "PX_LAST"), 1), 63)
+        +fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "CL1 Comdty", "PX_LAST"), 1), 63)
+        -fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "XAU Curncy", "PX_LAST"), 1), 63)
+        +fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "BTC Index", "PX_LAST"), 1), 63)
+        +fcore.zscore_rolling(fcore.pct_change_n((_get_series(D, "RTY Index", "PX_LAST") - _get_series(D, "SPX Index", "PX_LAST")), 1), 63)
+    ),
 
     # =========================
-    # G) CROSS-ASSET (vs SPY): Fisher-z corr + deltas, and z-scored beta
+    # G) CROSS-ASSET (vs SPY): Fisher-z corr + deltas, z-beta (Kept, patched)
     # =========================
     "corr_px_fisher20_z_60d": lambda df, t1, t2: fcore.zscore_rolling(
         fcore.rolling_corr_fisher(
-            _get_series(df, t1, "PX_LAST").pct_change(),
-            _get_series(df, t2, "PX_LAST").pct_change(),
+            fcore.pct_change_n(_get_series(df, t1, "PX_LAST"), 1),
+            fcore.pct_change_n(_get_series(df, t2, "PX_LAST"), 1),
             window=20,
         )[1],
         window=60,
@@ -162,13 +212,13 @@ FEATURE_SPECS: Dict[str, Callable] = {
     "corr_delta_fisher_20_60_z_60d": lambda df, t1, t2: fcore.zscore_rolling(
         (
             fcore.rolling_corr_fisher(
-                _get_series(df, t1, "PX_LAST").pct_change(),
-                _get_series(df, t2, "PX_LAST").pct_change(),
+                fcore.pct_change_n(_get_series(df, t1, "PX_LAST"), 1),
+                fcore.pct_change_n(_get_series(df, t2, "PX_LAST"), 1),
                 window=20,
             )[1]
             - fcore.rolling_corr_fisher(
-                _get_series(df, t1, "PX_LAST").pct_change(),
-                _get_series(df, t2, "PX_LAST").pct_change(),
+                fcore.pct_change_n(_get_series(df, t1, "PX_LAST"), 1),
+                fcore.pct_change_n(_get_series(df, t2, "PX_LAST"), 1),
                 window=60,
             )[1]
         ),
@@ -176,16 +226,34 @@ FEATURE_SPECS: Dict[str, Callable] = {
     ),
     "beta_px_60d_z_120d": lambda df, t1, t2: fcore.zscore_rolling(
         fcore.rolling_beta(
-            _get_series(df, t1, "PX_LAST").pct_change(),
-            _get_series(df, t2, "PX_LAST").pct_change(),
+            fcore.pct_change_n(_get_series(df, t1, "PX_LAST"), 1),
+            fcore.pct_change_n(_get_series(df, t2, "PX_LAST"), 1),
             window=60,
         ),
         window=120,
     ),
+
+    # =========================
+    # H) CRYPTO LINKAGE (for COIN, MSTR, etc.) — patched
+    # =========================
+    "crypto.beta_btc_63": lambda D, t: fcore.rolling_beta(
+        fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 1),
+        fcore.pct_change_n(_get_series(D, "BTC Index", "PX_LAST"), 1),
+        window=63,
+    ),
+    "crypto.resid_vs_btc_z_63": lambda D, t: fcore.zscore_rolling(
+        fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 1)
+        - fcore.rolling_beta(
+            fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 1),
+            fcore.pct_change_n(_get_series(D, "BTC Index", "PX_LAST"), 1),
+            window=63,
+        ) * fcore.pct_change_n(_get_series(D, "BTC Index", "PX_LAST"), 1),
+        window=63,
+    ),
 }
 
 
-# ---------- Helpers for Option A correlation block ----------
+# ---------- Small helpers for correlation block ----------
 
 def _ret_1d(df: pd.DataFrame, t: str) -> pd.Series:
     return fcore.pct_change_n(_get_series(df, t, "PX_LAST"), 1)
@@ -209,11 +277,11 @@ def _name_safe(s: str) -> str:
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     """
     Constructs a complete matrix of lagged features for all tickers.
-
-    Iterates through all defined feature specs and tickers, calculates each
-    feature, and applies shift(1) to prevent lookahead bias.
-    Also appends EV_* daily features (same for all tickers) and the
-    Option A correlation block.
+    - Iterates FEATURE_SPECS for single-asset and cross-asset features
+    - Applies shift(1) everywhere to avoid lookahead
+    - Appends EV_* daily features (replicated per tradable ticker)
+    - Appends correlation features bundle (Option A style)
+    - Adds cross-sectional ranks for selected primitives
     """
     print("Starting feature matrix construction...")
     all_features: Dict[str, pd.Series] = {}
@@ -235,7 +303,6 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     # --- Build Cross-Asset Features (vs benchmark) ---
     benchmark_ticker = 'SPY US Equity'
     cross_asset_features: Dict[str, pd.Series] = {}
-
     for ticker in all_tickers:
         if ticker == benchmark_ticker:
             continue
@@ -257,7 +324,6 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
         ev_df = build_event_features(df.index)
         if isinstance(ev_df, pd.DataFrame) and not ev_df.empty:
             ev_cols = ev_df.columns.tolist()
-            # replicate per tradable ticker only (flow vars exist there)
             for t in settings.data.tradable_tickers:
                 for col in ev_cols:
                     all_features[f"{t}_EV__{col}"] = pd.to_numeric(ev_df[col], errors="coerce").shift(1)
@@ -274,7 +340,6 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     min_support = 126  # require enough overlap for stability
 
     def fisher_corr(s1: pd.Series, s2: pd.Series, win: int) -> pd.Series:
-        # Corr on aligned series
         try:
             _, fisher = fcore.rolling_corr_fisher(s1, s2, window=win)
             return pd.to_numeric(fisher, errors="coerce")
@@ -282,18 +347,14 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
             return pd.Series(index=df.index, dtype=float)
 
     for t in settings.data.tradable_tickers:
-        # Base series
         RET_1D = _ret_1d(df, t)
         TOT_OPT = _get_series(df, t, "TOT_OPT_VOLUME_CUR_DAY")
         OI_SKEW = _oi_skew_ratio(df, t)
         CALLIV3M = _get_series(df, t, "3MO_CALL_IMP_VOL")
         NEWS_HEAT = _get_series(df, t, "NEWS_HEAT_READ_DMAX")
         PCR5 = _pcr_ema5(df, t)
-
-        # SPY driver
         SPY_RET_1D = _ret_1d(df, "SPY US Equity")
 
-        # Pair list (7 per ticker)
         pairs: List[Tuple[str, pd.Series, str, pd.Series]] = [
             ("RET_1D", RET_1D, "TOT_OPT_VOLUME", TOT_OPT),
             ("RET_1D", RET_1D, "OI_SKEW", OI_SKEW),
@@ -305,22 +366,18 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
         ]
 
         for lhs_name, lhs, rhs_name, rhs in pairs:
-            # Windows
             fishers = {}
             for w in windows:
-                fz = fisher_corr(lhs, rhs, w).shift(1)  # anti-leakage
-                # support gate
+                fz = fisher_corr(lhs, rhs, w).shift(1)
                 if fz.count() < min_support:
                     continue
                 fishers[w] = fz
-
-                base_name = f"{t}_corrF{w}__{_name_safe(lhs_name)}__{_name_safe(rhs_name)}"
-                corr_features[base_name] = fz
+                base = f"{t}_corrF{w}__{_name_safe(lhs_name)}__{_name_safe(rhs_name)}"
+                corr_features[base] = fz
                 corr_features[f"{t}_invcorrF{w}__{_name_safe(lhs_name)}__{_name_safe(rhs_name)}"] = -fz
 
-            # Delta(20–60)
             if 20 in fishers and 60 in fishers:
-                delta = (fishers[20] - fishers[60]).shift(0)  # already shifted above
+                delta = (fishers[20] - fishers[60])
                 if delta.count() >= min_support:
                     base = f"{t}_corrDelta20_60__{_name_safe(lhs_name)}__{_name_safe(rhs_name)}"
                     corr_features[base] = delta
@@ -329,8 +386,33 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     print(f" Built {len(corr_features)} correlation features (Option A).")
     all_features.update(corr_features)
 
-    # Combine, prune all-NaN columns
+    # --- Combine to DataFrame ---
     feature_matrix = pd.DataFrame(all_features).dropna(how="all", axis=1)
+
+    # --- Cross-sectional ranks on key primitives (across tradable tickers) ---
+    def _cs_rank(feature_stub: str, out_name: str):
+        # build the list of columns we expect for this stub
+        cols = [f"{t}_{feature_stub}" for t in settings.data.tradable_tickers]
+        cols = [c for c in cols if c in feature_matrix.columns]
+        if not cols:
+            return
+        # take only those columns; drop any accidental duplicate column names
+        sub = feature_matrix.loc[:, cols]
+        if sub.columns.duplicated().any():
+            sub = sub.loc[:, ~sub.columns.duplicated()]
+        # rank across tickers for each date
+        ranked = sub.rank(axis=1, pct=True)
+        # write back one column per ticker
+        for t in settings.data.tradable_tickers:
+            col = f"{t}_{feature_stub}"
+            if col in ranked.columns:
+                feature_matrix[f"{t}_{out_name}"] = ranked[col].astype(float)
+
+    _cs_rank("price.mom_21",  "cs.rank_mom_21")
+    _cs_rank("price.mom_63",  "cs.rank_mom_63")
+    _cs_rank("price.mom_126", "cs.rank_mom_126")
+    _cs_rank("price.vol_gk_21", "cs.rank_vol_21")
+    _cs_rank("price.drawdown_63", "cs.rank_drawdown_63")
 
     print(f" Feature matrix construction complete. Shape: {feature_matrix.shape}")
     return feature_matrix

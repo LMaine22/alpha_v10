@@ -54,13 +54,18 @@ def run_setup_backtest_options(
     _maybe_reset_caches(master_df)
 
     try:
-        trigger_mask = signals_df[setup_signals].all(axis=1)
+        # Build a clean boolean trigger mask (robust to NA / mixed dtypes)
+        trigger_df = signals_df[setup_signals].astype("boolean").fillna(False)
+        trigger_mask = trigger_df.all(axis=1)
     except KeyError as e:
         print(f" Error: Missing signals in signals_df: {e}")
         return pd.DataFrame()
 
-    # Rising-edge trigger: only fire when signal flips from False -> True
-    edge = trigger_mask & ~trigger_mask.shift(1).fillna(False)
+        # Rising-edge trigger: only fire when signal flips from False -> True
+    prev = trigger_mask.shift(1, fill_value=False)  # avoids deprecated .fillna on object
+    edge = trigger_mask & ~prev
+
+    # Dates where the rising edge occurs
     trigger_dates = edge[edge].index
 
     if len(trigger_dates) < settings.validation.min_initial_support:

@@ -4,22 +4,97 @@ from pydantic import BaseModel
 from typing import List, Literal, Optional, Dict
 from datetime import date
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Genetic Algorithm (nested configs used by nsga.py / ga_core.py)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SelectorConfig(BaseModel):
+    """Parent selection strategy for NSGA-II."""
+    name: Literal["lexicase", "tournament"] = "lexicase"  # nsga.py reads this
+
+
+class LexicaseConfig(BaseModel):
+    """ε-lexicase selection hyperparams."""
+    epsilon_quantile: float = 0.20  # keep top (1 - eps_q) per case
+
+
+class MemeticConfig(BaseModel):
+    """Local search on exit policy (PT & armed-trail)."""
+    enabled: bool = True
+    max_evals: int = 8
+    improve_tol: float = 0.004  # relative improvement threshold on Sortino adj
+
+
+class MultifidelityConfig(BaseModel):
+    """Coarse→full evaluation schedule to speed early generations."""
+    enabled: bool = True
+    coarse_span_frac: float = 0.50  # first 50% of train span
+    stride: int = 2                 # evaluate every 2nd day
+    full_after_gen: int = 10        # switch to full window after this gen
+
+
+class ComplexityConfig(BaseModel):
+    """Soft parsimony penalty used by ga_core on objective[0]."""
+    preferred: int = 6      # preferred setup length
+    lambda_: float = 0.03   # penalty per extra signal over preferred
+
+
+class FamilyEntropyConfig(BaseModel):
+    """Optional diversity shaping bonus (0 disables)."""
+    weight: float = 0.02    # small positive nudges toward mixed families
+
+
+class RiskFloorsConfig(BaseModel):
+    """
+    Cheap early-reject floors used inside ga_core before running a full backtest.
+    If omitted, ga_core falls back to these defaults anyway.
+    """
+    support_floor: int = 60
+    support_floor_fraction_of_test: float = 0.12
+
 
 # -----------------------------
 # Genetic Algorithm (core)
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 125
-    generations: int = 12
+    # Tuned run-scale
+    population_size: int = 64
+    generations: int = 21
+
+    # Keep legacy knobs (even if not used directly by NSGA logic)
     elitism_rate: float = 0.1
     mutation_rate: float = 0.2
-    seed: int = 18
+    seed: int = 23
     setup_lengths_to_explore: List[int] = [2]
 
-    # Verbosity & debugging used by NSGA layer (added)
-    verbose: int = 2              # 0..3 (2 = extra progress summaries)
-    debug_sequential: bool = False   # True = evaluate in-process (no joblib)
+    # Verbosity & debugging used by NSGA layer
+    verbose: int = 2
+    debug_sequential: bool = False
+
+    # ─ Islands & migration (set islands=1 to disable islands) ─
+    islands: int = 4
+    migration_period: int = 3
+
+    # Niching guard (Jaccard similarity on signal sets, same ticker)
+    niche_jaccard_max: float = 0.85
+
+    # Eval cache for per-process LRU in ga_core
+    eval_cache_max: int = 8192
+
+    # Selection & ε-lexicase
+    selector: SelectorConfig = SelectorConfig()
+    lexicase: LexicaseConfig = LexicaseConfig()
+
+    # Memetic local search on exit policy
+    memetic: MemeticConfig = MemeticConfig()
+
+    # Multi-fidelity schedule
+    multifidelity: MultifidelityConfig = MultifidelityConfig()
+
+    # Objective shaping
+    complexity: ComplexityConfig = ComplexityConfig()
+    family_entropy: FamilyEntropyConfig = FamilyEntropyConfig()
 
 
 # -----------------------------
@@ -35,18 +110,15 @@ class DataConfig(BaseModel):
 
     # Finalized ticker lists
     tradable_tickers: List[str] = [
-        'CRWV US Equity', 'TSLA US Equity', 'AMZN US Equity', 'QQQ US Equity',
+        'TSLA US Equity', 'CRWV US Equity', 'AMZN US Equity', 'QQQ US Equity', 'PLTR US Equity',
         'GOOGL US Equity', 'MSFT US Equity', 'AAPL US Equity', 'LLY US Equity',
-        'AMD US Equity', 'MSTR US Equity', 'COIN US Equity', 'ARM US Equity'
-        #'XLE US Equity', 'XLK US Equity', 'XLRE US Equity', 'XLC US Equity',
-        #'XLV US Equity', 'XLP US Equity', 'SPY US Equity', 'QQQ US Equity',
-        #'JPM US Equity', 'C US Equity', 'PLTR US Equity',
-        #'BMY US Equity', 'PEPS US Equity', 'NKE US Equity',
+        'AMD US Equity', 'MSTR US Equity', 'COIN US Equity', 'ARM US Equity',
+        'XLV US Equity', 'XLP US Equity', 'SPY US Equity', 'QQQ US Equity',
     ]
     macro_tickers: List[str] = [
-        #'RTY Index', 'MXWO Index', 'USGG10YR Index', 'USGG2YR Index',
+        'RTY Index', 'MXWO Index', 'USGG10YR Index', 'USGG2YR Index',
         'DXY Curncy', 'JPY Curncy', 'EUR Curncy', 'EEM US Equity',
-        'CL1 Comdty', 'HG1 Comdty', 'XAU Curncy'
+        'CL1 Comdty', 'HG1 Comdty', 'XAU Curncy', 'BTC Index'
     ]
 
 
@@ -60,13 +132,13 @@ class EventsConfig(BaseModel):
     # Filters
     countries: List[str] = ["US"]
     include_event_types: Optional[List[str]] = None  # e.g., ["CPI", "FOMC", "NFP"]; None = all
-    include_tickers: List[str] = []              # reserved (not used yet)
-    include_types: List[str] = []                # reserved (not used yet)
+    include_tickers: List[str] = []
+    include_types: List[str] = []
 
     # Relevance & windows
     high_relevance_threshold: float = 70.0
     pre_window_days: int = 2
-    post_window_days: int = 2              # reserved (not used yet)
+    post_window_days: int = 2
     post_release_lag_days: int = 1   # shift post-release features to T+1 business day
 
 
@@ -85,7 +157,7 @@ class ValidationConfig(BaseModel):
     """Validation and support thresholds"""
     min_initial_support: int = 10
     min_portfolio_support: int = 30
-    embargo_days: int = 5 # days of post-train embargo before test
+    embargo_days: int = 5  # days of post-train embargo before test
 
 
 # -----------------------------
@@ -103,25 +175,32 @@ class OptionsConfig(BaseModel):
     allow_nonoptionable: bool = False
 
     # Tenor selection (business days to expiry)
-    tenor_grid_bd: List[int] = [7, 14, 21]
-    tenor_buffer_k: float = 1.25
+    tenor_grid_bd: List[int] = [7, 14, 21]  # [7, 14, 21, 30, 45, 63]
+    tenor_buffer_k: float = 1.25  # consider 1.5 in high IV regimes
 
     # Dynamic exit policy defaults (global; GA can override per-setup)
     exit_policies_enabled: bool = True
-    exit_pt_multiple: float | None = None
-    exit_trail_frac: float | None = 0.7
-    exit_sl_multiple: float | None = 0.6
-    exit_time_cap_days: int | None = None  # if None, default to horizon
 
-    # NEW — how profit target behaves:
-    #   'exit'       -> take full exit on PT (current behavior)
-    #   'arm_trail'  -> do NOT exit; just tighten trailing stop and keep running
-    #   'scale_out'  -> exit a fraction at PT; tighten trailing on remainder
-    pt_behavior: Literal['exit', 'arm_trail', 'scale_out'] = 'scale_out'
-    # NEW — when PT arms a tighter trail (for arm_trail/scale_out)
-    armed_trail_frac: float | None = 0.93
-    # NEW — fraction to close at PT when pt_behavior == 'scale_out'
-    scale_out_frac: float = 0.50
+    # PT: arm trail after a meaningful move (e.g., 1.8× entry)
+    exit_pt_multiple: float | None = 1.8
+
+    # Trailing stop BEFORE PT
+    exit_trail_frac: float | None = None  # set 0.90 if running the 3-day “clipper” preset
+
+    # Hard stop-loss (option price multiple)
+    exit_sl_multiple: float | None = None  # {None, 0.50, 0.60} explored by GA
+
+    # Time cap (business days) – usually let horizon drive TTL
+    exit_time_cap_days: int | None = None
+
+    # PT behavior
+    pt_behavior: Literal['exit', 'arm_trail', 'scale_out'] = 'arm_trail'
+
+    # Armed trail (AFTER PT) – give-back fraction from the post-PT peak
+    armed_trail_frac: float | None = 0.98
+
+    # Scale-out fraction (ignored in arm_trail)
+    scale_out_frac: float = 0.0
 
     # IV term structure mapping (fallbacks)
     iv_map_alpha: float = 0.7
@@ -136,6 +215,8 @@ class OptionsConfig(BaseModel):
     min_premium: float = 0.30
     max_contracts: int = 100
 
+    # ─ Multi-horizon menu used by ga_core (regime×horizon cases) ─
+    trade_horizons_days: List[int] = [3, 5, 8, 13]
 
 
 # -----------------------------
@@ -144,7 +225,7 @@ class OptionsConfig(BaseModel):
 class SelectionConfig(BaseModel):
     """
     Selection policy for choosing tickers/horizons used in GA scoring.
-    Includes knobs expected by selection_core (added) + your existing fields.
+    Includes knobs expected by selection_core + your existing fields.
     """
     # Ranking -- UPDATED to use new metrics
     metric_primary: Literal[
@@ -155,8 +236,8 @@ class SelectionConfig(BaseModel):
     # Per-ticker gates (optional)
     per_ticker_min_sharpe_lb: Optional[float] = None
     per_ticker_min_omega: Optional[float] = None
-    per_ticker_min_sortino_lb: Optional[float] = None # Added for Sortino
-    per_ticker_min_expectancy: Optional[float] = None # Added for Expectancy
+    per_ticker_min_sortino_lb: Optional[float] = None
+    per_ticker_min_expectancy: Optional[float] = None
 
     # Support requirements
     min_support_per_ticker: int = 10   # used by selection_core
@@ -185,37 +266,34 @@ class ReportingConfig(BaseModel):
     trimmed_alpha: float = 0.05
     outlier_factor_flag: float = 10.0
 
+
 # -----------------------------
 # Stage-1 Recency / Liveness
 # -----------------------------
 class Stage1Config(BaseModel):
     """Stage-1 recency and liveness gates (OOS only)."""
-    # Fail if last trigger older than this
-    recency_max_days: int = 20
-    # Short-window size for liveness/trade checks
+    recency_max_days: int = 25
     short_window_days: int = 20
-    # Require at least this many trades in the short window
-    min_trades_short: int = 2
-    # Cap on max drawdown in the short window (fractional, e.g. 0.15 = 15%)
-    max_drawdown_short: float = 0.45
+    min_trades_short: int = 1
+    max_drawdown_short: float = 0.55
+
 
 # -----------------------------
 # Stage-2 (MBB) configuration
 # -----------------------------
 class Stage2Config(BaseModel):
-    mbb_B: int = 1000              # bootstrap resamples
-    block_len_method: str = "auto"   # "auto" -> sqrt(T), clamped
+    mbb_B: int = 1000
+    block_len_method: str = "auto"  # "auto" -> sqrt(T), clamped
     block_len_min: int = 5
     block_len_max: int = 50
     seed: int = 42
+
 
 # -----------------------------
 # Stage-3 (FDR/DSR) configuration
 # -----------------------------
 class Stage3Config(BaseModel):
-    fdr_q: float = 0.10              # BH–FDR level
-
-
+    fdr_q: float = 0.10  # BH–FDR level
 
 
 # -----------------------------
@@ -235,10 +313,13 @@ class Settings(BaseModel):
     stage2: Stage2Config = Stage2Config()
     stage3: Stage3Config = Stage3Config()
 
+    # ─ Optional floors used by ga_core early-reject ─
+    risk_floors: RiskFloorsConfig = RiskFloorsConfig()
 
 
 # Instantiate a global settings object for easy import
 settings = Settings()
+
 
 def gauntlet_cfg(settings: Settings) -> dict:
     """Flattened config keys for gauntlet stages (Stage1, Stage2, Stage3)."""
@@ -261,4 +342,3 @@ def gauntlet_cfg(settings: Settings) -> dict:
     }
 
 __all__ = ["Settings", "settings", "gauntlet_cfg"]
-
