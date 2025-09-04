@@ -12,7 +12,7 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [5]
+TRADE_HORIZONS_DAYS = [5, 8, 12]
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
     """Inclusive business-day add (entry day = 0)."""

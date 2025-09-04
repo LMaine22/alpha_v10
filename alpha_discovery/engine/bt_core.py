@@ -1,5 +1,6 @@
 # alpha_discovery/engine/bt_core.py
 from __future__ import annotations
+
 from typing import List, Dict, Any, Optional
 import math
 import numpy as np
@@ -7,16 +8,91 @@ import pandas as pd
 
 from ..config import settings
 from .bt_common import (
-    TRADE_HORIZONS_DAYS, _add_bdays,
-    _get_risk_free_rate, _has_iv_for_ticker, _build_option_strike,
-    ExitPolicy, _decide_exit_from_path, _policy_id,
+    TRADE_HORIZONS_DAYS,
+    _add_bdays,
+    _get_risk_free_rate,
+    _has_iv_for_ticker,
+    _build_option_strike,
+    ExitPolicy,
+    _decide_exit_from_path,
+    _policy_id,
 )
-from .bt_common import _decide_exit_with_scale_out, _decide_exit_from_path
+from .bt_common import _decide_exit_with_scale_out
 
 from .bt_runtime import (
-    _maybe_reset_caches, _cached_underlier, _cached_iv3m,
-    _cached_sigma_map, _cached_price_entry_exit, _get_or_build_price_path
+    _maybe_reset_caches,
+    _cached_underlier,
+    _cached_iv3m,
+    _cached_sigma_map,
+    _cached_price_entry_exit,
+    _get_or_build_price_path,
 )
+
+# --- NEW: Exit policy A (Timebox → Breakeven → Trailing) ---
+def _decide_exit_timebox_be_trail(
+    price_path: pd.Series,
+    entry_exec_price: float,
+    horizon_days: int,
+    *,
+    time_cap_days: int | None,
+    sl_multiple: float | None,
+    be_trigger_multiple: float = 1.25,   # +25% arms breakeven
+    trail_arm_multiple: float = 1.40,    # +40% arms trailing
+    trail_frac: float = 0.80             # 20% giveback once trailing is armed
+) -> tuple[int, str, int]:
+    """
+    Returns (exit_idx, exit_reason, holding_days_actual).
+    Assumes long option price series (direction & PnL sign handled elsewhere).
+    """
+    p = np.asarray(price_path, dtype=float)
+    n = len(p)
+    if n == 0:
+        return 0, "horizon", 0
+
+    # Cap the walk to time_cap_days if provided; otherwise use full horizon
+    time_cap = min(horizon_days, time_cap_days if time_cap_days is not None else horizon_days)
+    time_cap = max(0, int(time_cap))
+    last_idx = min(time_cap, n - 1)
+
+    entry = float(entry_exec_price)
+    be_armed = False
+    trail_armed = False
+    peak = p[0] if n else entry
+
+    has_trail = (trail_frac is not None) and (0.0 < float(trail_frac) < 1.0)
+
+    for i in range(0, last_idx + 1):
+        px = p[i]
+
+        # 1) Hard stop vs entry (e.g., 0.65 => -35%)
+        if sl_multiple is not None and sl_multiple > 0 and px <= entry * float(sl_multiple):
+            return i, "stop_loss", i
+
+        # 2) Arm breakeven once up +X%
+        if (not be_armed) and px >= entry * float(be_trigger_multiple):
+            be_armed = True
+
+        # 3) If breakeven armed, protect entry
+        if be_armed and px <= entry:
+            return i, "breakeven", i
+
+        # 4) Arm trailing once up +Y%
+        if (not trail_armed) and px >= entry * float(trail_arm_multiple):
+            trail_armed = True
+            peak = px
+
+        # 5) Trailing stop (keep ≥ trail_frac of max since arm)
+        if trail_armed and has_trail:
+            peak = max(peak, px)
+            thresh = peak * float(trail_frac)
+            if px <= thresh:
+                return i, "trailing_stop", i
+
+    # 6) Time stop or horizon
+    if time_cap < horizon_days:
+        return last_idx, "time_stop", last_idx
+    return last_idx, "horizon", last_idx
+
 
 def _choose_tenor_bd(horizon_days: int) -> int:
     """Pick a tenor from options.tenor_grid_bd that is >= k * horizon_days; else longest."""
@@ -28,6 +104,7 @@ def _choose_tenor_bd(horizon_days: int) -> int:
             return int(t)
     return int(grid[-1])
 
+
 def _slippage_for_tenor(tenor_bd: int) -> float:
     tiers = getattr(settings.options, "slippage_tiers", {"days_15": 0.0, "days_30": 0.0, "days_any": 0.0})
     if tenor_bd <= 15:
@@ -36,56 +113,51 @@ def _slippage_for_tenor(tenor_bd: int) -> float:
         return float(tiers.get("days_30", 0.0))
     return float(tiers.get("days_any", 0.0))
 
+
 def run_setup_backtest_options(
     setup_signals: List[str],
     signals_df: pd.DataFrame,
     master_df: pd.DataFrame,
-    direction: str,  # "long" or "short"
+    direction: str,                         # "long" or "short"
     exit_policy: dict | None = None,
-    tickers_to_run: Optional[List[str]] = None # <<< NEW ARGUMENT
+    tickers_to_run: Optional[List[str]] = None,  # allow narrowing to a subset
 ) -> pd.DataFrame:
     """
     Options ledger with optional dynamic exits.
-    Can now run on all tradable tickers or a specified subset.
+    Can run on all tradable tickers or a specified subset.
     """
     if not setup_signals:
         return pd.DataFrame()
 
     _maybe_reset_caches(master_df)
 
+    # Rising-edge trigger from all selected signals
     try:
-        # Build a clean boolean trigger mask (robust to NA / mixed dtypes)
         trigger_df = signals_df[setup_signals].astype("boolean").fillna(False)
         trigger_mask = trigger_df.all(axis=1)
     except KeyError as e:
         print(f" Error: Missing signals in signals_df: {e}")
         return pd.DataFrame()
 
-        # Rising-edge trigger: only fire when signal flips from False -> True
-    prev = trigger_mask.shift(1, fill_value=False)  # avoids deprecated .fillna on object
+    prev = trigger_mask.shift(1, fill_value=False)
     edge = trigger_mask & ~prev
-
-    # Dates where the rising edge occurs
     trigger_dates = edge[edge].index
 
     if len(trigger_dates) < settings.validation.min_initial_support:
         return pd.DataFrame()
 
     min_premium = float(getattr(settings.options, "min_premium", 0.0))
-    max_contracts = int(getattr(settings.options, "max_contracts", 10**9))
+    max_contracts = int(getattr(settings.options, "max_contracts", 10 ** 9))
     r_mode = getattr(settings.options, "risk_free_rate_mode", "constant")
 
-    # --- MODIFIED PART ---
-    # Use the provided ticker list, or default to all tradable tickers from settings
     ticker_list = tickers_to_run if tickers_to_run is not None else settings.data.tradable_tickers
-    # --- END MODIFIED PART ---
 
     rows: List[Dict[str, Any]] = []
 
     for trigger_date in trigger_dates:
         r = _get_risk_free_rate(trigger_date, df=master_df if r_mode == "macro" else None)
 
-        for ticker in ticker_list: # Loop over the specified ticker list
+        for ticker in ticker_list:
             if not _has_iv_for_ticker(ticker, master_df):
                 continue
 
@@ -146,33 +218,26 @@ def run_setup_backtest_options(
 
                 pol = ExitPolicy(
                     enabled=getattr(settings.options, "exit_policies_enabled", True),
-                    pt_multiple=(exit_policy or {}).get("pt_multiple", getattr(settings.options, "exit_pt_multiple", None)) if isinstance(exit_policy, dict) else getattr(settings.options, "exit_pt_multiple", None),
-                    trail_frac=(exit_policy or {}).get("trail_frac", getattr(settings.options, "exit_trail_frac", None)) if isinstance(exit_policy, dict) else getattr(settings.options, "exit_trail_frac", None),
-                    sl_multiple=(exit_policy or {}).get("sl_multiple", getattr(settings.options, "exit_sl_multiple", None)) if isinstance(exit_policy, dict) else getattr(settings.options, "exit_sl_multiple", None),
-                    time_cap_days=(exit_policy or {}).get("time_cap_days", getattr(settings.options, "exit_time_cap_days", None)) if isinstance(exit_policy, dict) else getattr(settings.options, "exit_time_cap_days", None),
-                    # NEW behavior fields (GA may omit — we fall back to settings)
-                    pt_behavior=(exit_policy or {}).get("pt_behavior",
-                                                        getattr(settings.options, "pt_behavior", "exit")),
-                    armed_trail_frac=(exit_policy or {}).get("armed_trail_frac",
-                                                             getattr(settings.options, "armed_trail_frac", None)),
-                    scale_out_frac=float(
-                        (exit_policy or {}).get("scale_out_frac", getattr(settings.options, "scale_out_frac", 0.50))),
+                    pt_multiple=(exit_policy or {}).get("pt_multiple", getattr(settings.options, "exit_pt_multiple", None))
+                        if isinstance(exit_policy, dict) else getattr(settings.options, "exit_pt_multiple", None),
+                    trail_frac=(exit_policy or {}).get("trail_frac", getattr(settings.options, "exit_trail_frac", None))
+                        if isinstance(exit_policy, dict) else getattr(settings.options, "exit_trail_frac", None),
+                    sl_multiple=(exit_policy or {}).get("sl_multiple", getattr(settings.options, "exit_sl_multiple", None))
+                        if isinstance(exit_policy, dict) else getattr(settings.options, "exit_sl_multiple", None),
+                    time_cap_days=(exit_policy or {}).get("time_cap_days", getattr(settings.options, "exit_time_cap_days", None))
+                        if isinstance(exit_policy, dict) else getattr(settings.options, "exit_time_cap_days", None),
+                    # behavior knobs
+                    pt_behavior=(exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "exit")),
+                    armed_trail_frac=(exit_policy or {}).get("armed_trail_frac", getattr(settings.options, "armed_trail_frac", None)),
+                    scale_out_frac=float((exit_policy or {}).get("scale_out_frac", getattr(settings.options, "scale_out_frac", 0.50))),
                 )
 
-                exit_idx, exit_reason, holding_days_actual = _decide_exit_from_path(
-                    price_path=price_path,
-                    entry_exec_price=float(entry_exec),
-                    horizon_days=int(h),
-                    policy=pol
-                )
-                chosen_exit_date = price_path.index[min(exit_idx, len(price_path) - 1)]
-                chosen_exit_mid = float(price_path.iloc[min(exit_idx, len(price_path) - 1)])
-
-                exit_exec = chosen_exit_mid * (1.0 - slip)
-                # Build a stable policy id string up front
+                # --- Build a stable policy id string up front
                 policy_str = _policy_id(pol, int(h))
 
-                # --- Try SCALE-OUT first (if configured) ---
+                # =========================
+                # SCALE-OUT path (existing)
+                # =========================
                 did_scale = False
                 if getattr(pol, "pt_behavior", "exit") == "scale_out" and pol.pt_multiple:
                     # Clip by time cap / horizon
@@ -217,8 +282,10 @@ def run_setup_backtest_options(
                         day_sl2 = _first_true(sl2_mask)
 
                         candidates = []
-                        if day_ts2 is not None: candidates.append((day_ts2, "trailing_stop"))
-                        if day_sl2 is not None: candidates.append((day_sl2, "stop_loss"))
+                        if day_ts2 is not None:
+                            candidates.append((day_ts2, "trailing_stop"))
+                        if day_sl2 is not None:
+                            candidates.append((day_sl2, "stop_loss"))
 
                         if candidates:
                             rel_idx, final_reason = min(candidates, key=lambda t: t[0])
@@ -242,14 +309,13 @@ def run_setup_backtest_options(
                             so_frac = max(0.0, min(1.0, float(getattr(pol, "scale_out_frac", 0.50))))
                             contracts_partial = int(round(contracts * so_frac))
                             contracts_remaining = int(max(0, contracts - contracts_partial))
-                            # ensure at least 1 remains if partial happened
                             if contracts_partial > 0 and contracts_remaining == 0:
                                 contracts_remaining = 1
                                 contracts_partial = max(0, contracts - 1)
 
                             pnl_dlr = (
-                                    (exit_exec_pt - float(entry_exec)) * contracts_partial * contract_mult +
-                                    (exit_exec_final - float(entry_exec)) * contracts_remaining * contract_mult
+                                (exit_exec_pt - float(entry_exec)) * contracts_partial * contract_mult +
+                                (exit_exec_final - float(entry_exec)) * contracts_remaining * contract_mult
                             )
                             pnl_pc = pnl_dlr / capital if capital > 0 else 0.0
 
@@ -262,8 +328,7 @@ def run_setup_backtest_options(
                                 "option_type": priced.get("option_type", "C" if direction == "long" else "P"),
                                 "strike": float(K),
                                 "entry_underlying": float(S0),
-                                "exit_underlying": float(
-                                    _cached_underlier(master_df, ticker, price_path.index[final_idx]) or S0),
+                                "exit_underlying": float(_cached_underlier(master_df, ticker, price_path.index[final_idx]) or S0),
                                 "entry_iv": float(priced["entry_iv"]),
                                 "exit_iv": float(exit_sigma_T1_hz),
 
@@ -294,14 +359,44 @@ def run_setup_backtest_options(
                                 "holding_days_actual": int(final_idx),
                             })
 
-                # --- If scale-out didn't happen, fall back to single-leg path ---
+                # ==============================
+                # SINGLE-LEG path (default/NEW)
+                # ==============================
                 if not did_scale:
-                    exit_idx, exit_reason, holding_days_actual = _decide_exit_from_path(
-                        price_path=price_path,
-                        entry_exec_price=float(entry_exec),
-                        horizon_days=int(h),
-                        policy=pol
-                    )
+                    # --- NEW policy gate: Timebox → BE → Trail ---
+                    policy_mode = (exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "exit"))
+                    if str(policy_mode).lower() == "timebox_be_trail":
+                        # Build safe parameter defaults for the new policy
+                        be_mult = float((exit_policy or {}).get(
+                            "be_trigger_multiple", getattr(settings.options, "be_trigger_multiple", 1.25)
+                        ))
+                        arm_mult = float((exit_policy or {}).get(
+                            "trail_arm_multiple", getattr(settings.options, "trail_arm_multiple", 1.40)
+                        ))
+                        trail_frac_cfg = (exit_policy or {}).get("trail_frac",
+                                                                 getattr(settings.options, "exit_trail_frac", None))
+                        if trail_frac_cfg is None:
+                            trail_frac_cfg = 0.80  # default 20% giveback once trailing is armed
+
+                        exit_idx, exit_reason, holding_days_actual = _decide_exit_timebox_be_trail(
+                            price_path=price_path,
+                            entry_exec_price=float(entry_exec),
+                            horizon_days=int(h),
+                            time_cap_days=pol.time_cap_days,
+                            sl_multiple=pol.sl_multiple,
+                            be_trigger_multiple=be_mult,
+                            trail_arm_multiple=arm_mult,
+                            trail_frac=float(trail_frac_cfg),
+                        )
+
+                    else:
+                        exit_idx, exit_reason, holding_days_actual = _decide_exit_from_path(
+                            price_path=price_path,
+                            entry_exec_price=float(entry_exec),
+                            horizon_days=int(h),
+                            policy=pol
+                        )
+
                     chosen_exit_date = price_path.index[min(exit_idx, len(price_path) - 1)]
                     chosen_exit_mid = float(price_path.iloc[min(exit_idx, len(price_path) - 1)])
                     exit_exec = chosen_exit_mid * (1.0 - slip)

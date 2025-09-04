@@ -15,7 +15,10 @@ from .stage2_mbb import run_stage2_mbb_on_ledger
 from .stage3_fdr_dsr import stage3_cohort_oos
 from .summary import write_gauntlet_summary
 from .backtester import run_gauntlet_backtest
-from .reporting import write_stage_csv, LEDGER_BASE_SCHEMA
+from .reporting import write_stage_csv
+from .io import ensure_dir
+from .backtester import _align_to_pareto_schema_auto
+
 
 
 def run_gauntlet(
@@ -119,7 +122,19 @@ def run_gauntlet(
 
     # Concatenate all OOS ledgers and write with an explicit, forward-compatible schema
     full_oos_ledger = pd.concat(oos_ledgers.values(), ignore_index=True)
-    write_stage_csv(run_dir, "gauntlet_ledger", full_oos_ledger, base_schema=LEDGER_BASE_SCHEMA)
+    # Align the combined OOS ledger to the Pareto (TRAIN) header, then write directly.
+    try:
+        # Choose any present origin_fold for the template (columns are the same across folds)
+        fold_for_template = int(pd.to_numeric(full_oos_ledger.get("origin_fold")).dropna().iloc[0])
+    except Exception:
+        fold_for_template = 1
+
+    aligned_ledger = _align_to_pareto_schema_auto(full_oos_ledger, origin_fold=fold_for_template)
+
+    # Write directly to avoid the legacy LEDGER_BASE_SCHEMA coercion
+    gaunt_dir = os.path.join(run_dir, "gauntlet")
+    ensure_dir(gaunt_dir)
+    aligned_ledger.to_csv(os.path.join(gaunt_dir, "gauntlet_ledger.csv"), index=False)
     print(f"\nOut-of-sample backtesting complete. Generated OOS ledgers for {len(oos_ledgers)} strategies.")
 
     # -----------------------------------------------------------------

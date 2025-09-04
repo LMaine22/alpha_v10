@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Optional, Dict, Tuple, List
 import numpy as np
 import pandas as pd
+import os
+
 
 from .bt_common import (
     _ensure_df_token, _get_underlier_eod_raw, _get_iv3m_eod_raw,
@@ -17,6 +19,86 @@ _IV3M_CACHE: Dict[Tuple[str, str, pd.Timestamp, str], Optional[float]] = {}
 _SIGMA_MAP_CACHE: Dict[Tuple[str, str, pd.Timestamp, int, float], Optional[float]] = {}
 _PRICE_ENTRY_EXIT_CACHE: Dict[Tuple[float, float, float, float, int, float, str, float, float], Optional[dict]] = {}
 _PATH_CACHE: Dict[Tuple, pd.Series] = {}
+
+# --- Phase 1: Exclusivity & cooldown helpers ---
+def _parse_bt_env_flag(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    v = str(v).strip().lower()
+    return v in {"1", "true", "yes", "y", "on"}
+
+def _parse_bt_env_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    try:
+        return int(v) if v is not None else default
+    except Exception:
+        return default
+
+def _enforce_exclusivity_by_setup(ledger: pd.DataFrame, cooldown_days: int | None = None) -> pd.DataFrame:
+    """
+    Enforce non-overlapping trades per setup_id using `trigger_date` as the entry timestamp.
+
+    Logic:
+      - For each setup_id, sort trades by trigger_date.
+      - Keep the first trade; suppress any subsequent trade whose trigger_date is
+        <= last_eligible_time.
+      - last_eligible_time = exit_date + cooldown_days (if exit_date present),
+        otherwise a far-future sentinel if the trade is still open (NaT exit).
+
+    Notes:
+      - Requires columns: ['setup_id', 'trigger_date']; 'exit_date' is optional.
+      - Cooldown_days is measured in calendar days (set via BT_COOLDOWN_DAYS env or passed in).
+    """
+    if ledger is None or len(ledger) == 0:
+        return ledger
+    if "setup_id" not in ledger.columns:
+        return ledger
+    if "trigger_date" not in ledger.columns:
+        # Hard guardrail: your system defines entry time via trigger_date only
+        raise KeyError("Ledger is missing required 'trigger_date' column for exclusivity enforcement.")
+
+    # Normalize timestamps
+    ledger = ledger.copy()
+    ledger["trigger_date"] = pd.to_datetime(ledger["trigger_date"], errors="coerce")
+    has_exit = "exit_date" in ledger.columns
+    if has_exit:
+        ledger["exit_date"] = pd.to_datetime(ledger["exit_date"], errors="coerce")
+
+    if cooldown_days is None:
+        cooldown_days = _parse_bt_env_int("BT_COOLDOWN_DAYS", 0)
+
+    keep_idx: list[int] = []
+    for _sid, grp in ledger.groupby("setup_id", group_keys=False):
+        g = grp.sort_values("trigger_date").copy()
+        last_eligible = pd.Timestamp.min
+        for idx, row in g.iterrows():
+            t = row.get("trigger_date")
+            if pd.isna(t):
+                # Keep rows with missing trigger_date so downstream can decide; they won't open the gate anyway
+                keep_idx.append(idx)
+                continue
+
+            # Block if not yet eligible
+            if t <= last_eligible:
+                continue
+
+            # Keep this trade
+            keep_idx.append(idx)
+
+            # Advance eligibility to exit + cooldown (or block indefinitely if no exit)
+            if has_exit:
+                exit_t = row.get("exit_date")
+                if pd.isna(exit_t):
+                    last_eligible = t + pd.Timedelta(days=3650)  # treat as open; block reentry for a long time
+                else:
+                    last_eligible = exit_t + pd.Timedelta(days=int(cooldown_days))
+            else:
+                # No exit column -> treat as immediate eligibility plus cooldown
+                last_eligible = t + pd.Timedelta(days=int(cooldown_days))
+
+    return ledger.loc[keep_idx].sort_values(["setup_id", "trigger_date"])
+
 
 def _rf(x: float, nd: int = 8) -> float:
     return float(round(float(x), nd))
