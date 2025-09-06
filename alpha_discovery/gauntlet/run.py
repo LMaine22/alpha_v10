@@ -13,7 +13,7 @@ from .io import find_latest_run_dir, read_global_artifacts
 from .stage1_recency import run_stage1_recency_liveness
 from .stage2_mbb import run_stage2_mbb_on_ledger
 from .stage3_fdr_dsr import stage3_cohort_oos
-from .summary import write_gauntlet_summary
+from .summary import write_gauntlet_summary, write_gauntlet_all_setups_summary
 from .backtester import run_gauntlet_backtest
 from .reporting import write_stage_csv
 from .io import ensure_dir
@@ -118,6 +118,8 @@ def run_gauntlet(
 
     if not oos_ledgers:
         print("No trades were generated during out-of-sample backtesting. Gauntlet finished.")
+        # Still emit an empty all-setups summary for consistency
+        write_gauntlet_all_setups_summary(run_dir, pd.DataFrame())
         return
 
     # Concatenate all OOS ledgers and write with an explicit, forward-compatible schema
@@ -185,12 +187,23 @@ def run_gauntlet(
 
     if not stage2_rows:
         print("No candidates reached Stage-2 on OOS; gauntlet complete.")
+        # Emit an all-setups summary with Stage-1 diagnostics only
+        write_gauntlet_all_setups_summary(run_dir, full_oos_ledger, stage1_rows=stage1_rows)
         return
 
     # Cohort Stage-3
     oos_s2_all = pd.DataFrame(stage2_rows)
     cohort_s3 = stage3_cohort_oos(oos_s2_all, ret_map, base_capital, cfg)
     write_stage_csv(run_dir, "stage3_cohort_oos", cohort_s3)
+
+    # Always write an all-setups summary with available diagnostics
+    write_gauntlet_all_setups_summary(
+        run_dir,
+        full_oos_ledger,
+        stage1_rows=stage1_rows,
+        stage2_df=oos_s2_all,
+        stage3_df=cohort_s3,
+    )
 
     # Survivors & summary
     survivor_ids = set(cohort_s3.loc[cohort_s3["fdr_pass"], "setup_id"].astype(str))

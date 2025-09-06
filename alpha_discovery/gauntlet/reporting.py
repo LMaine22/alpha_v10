@@ -144,6 +144,8 @@ def write_readme(run_dir: str, extra: Optional[dict] = None) -> str:
         "  - stage2_mbb_pvalues.csv      : Moving Block Bootstrap p-values and block lengths.",
         "  - stage3_fdr_dsr.csv          : Benjamini–Hochberg FDR and Deflated Sharpe across the cohort.",
         "  - gauntlet_ledger.csv         : Full OOS trade ledger (forward-compatible schema).",
+        "  - gauntlet_summary.csv        : Survivors-only OOS summary (Stage-3 passers).",
+        "  - gauntlet_all_setups_summary.csv : All OOS setups with diagnostics (pass/fail).",
         "",
         "Notes:",
         "  * Stage-1 uses short/medium/long EWMAs and a live-trigger gate.",
