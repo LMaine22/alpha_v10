@@ -13,7 +13,7 @@ from .io import find_latest_run_dir, read_global_artifacts
 from .stage1_recency import run_stage1_recency_liveness
 from .stage2_mbb import run_stage2_mbb_on_ledger
 from .stage3_fdr_dsr import stage3_cohort_oos
-from .summary import write_gauntlet_summary
+from .summary import write_gauntlet_summary, write_all_setups_summary
 from .backtester import run_gauntlet_backtest
 from .reporting import write_stage_csv
 from .io import ensure_dir
@@ -118,6 +118,26 @@ def run_gauntlet(
 
     if not oos_ledgers:
         print("No trades were generated during out-of-sample backtesting. Gauntlet finished.")
+        # Even with no trades, we might want to document which setups were attempted
+        # Create a minimal summary showing candidates that produced no trades
+        empty_summary_data = []
+        for _, row in candidates.iterrows():
+            empty_summary_data.append({
+                "setup_id": str(row["setup_id"]),
+                "fold": int(row["fold"]),
+                "specialized_ticker": str(row["specialized_ticker"]),
+                "direction": str(row["direction"]),
+                "signal_ids": str(row["signal_ids"]),
+                "gauntlet_stage_reached": "No OOS Trades",
+                "total_trades": 0,
+                "sum_pnl_dollars": 0.0
+            })
+        if empty_summary_data:
+            empty_df = pd.DataFrame(empty_summary_data)
+            gaunt_dir = os.path.join(run_dir, "gauntlet")
+            ensure_dir(gaunt_dir)
+            empty_df.to_csv(os.path.join(gaunt_dir, "all_setups_gauntlet_summary.csv"), index=False)
+            print(f"Created summary for {len(empty_summary_data)} setups that produced no OOS trades.")
         return
 
     # Concatenate all OOS ledgers and write with an explicit, forward-compatible schema
@@ -185,12 +205,17 @@ def run_gauntlet(
 
     if not stage2_rows:
         print("No candidates reached Stage-2 on OOS; gauntlet complete.")
+        # Still write the all setups summary even if no one reached stage 2
+        write_all_setups_summary(run_dir, stage1_rows, stage2_rows, None, full_oos_ledger)
         return
 
     # Cohort Stage-3
     oos_s2_all = pd.DataFrame(stage2_rows)
     cohort_s3 = stage3_cohort_oos(oos_s2_all, ret_map, base_capital, cfg)
     write_stage_csv(run_dir, "stage3_cohort_oos", cohort_s3)
+
+    # Write summary of ALL setups (regardless of whether they passed)
+    write_all_setups_summary(run_dir, stage1_rows, stage2_rows, cohort_s3, full_oos_ledger)
 
     # Survivors & summary
     survivor_ids = set(cohort_s3.loc[cohort_s3["fdr_pass"], "setup_id"].astype(str))
