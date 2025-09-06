@@ -49,6 +49,164 @@ def _flatten_survivors(survivors: List[Dict[str, Any]]) -> pd.DataFrame:
     return df
 
 
+def write_all_setups_summary(
+    run_dir: str,
+    stage1_rows: List[Dict[str, Any]],
+    stage2_rows: List[Dict[str, Any]],
+    stage3_df: Optional[pd.DataFrame],
+    full_oos_ledger: pd.DataFrame,
+) -> str:
+    """
+    Write a summary of ALL setups that entered the gauntlet, regardless of whether they passed.
+    This includes their stage progression and performance metrics.
+    """
+    gaunt_dir = os.path.join(run_dir, "gauntlet")
+    os.makedirs(gaunt_dir, exist_ok=True)
+
+    # Create base dataframe from all stage1 setups
+    if not stage1_rows:
+        print("No setups to summarize.")
+        return ""
+    
+    all_setups_df = pd.DataFrame(stage1_rows)
+    
+    # Add stage2 results if available
+    if stage2_rows:
+        stage2_df = pd.DataFrame(stage2_rows)
+        all_setups_df = all_setups_df.merge(
+            stage2_df[["setup_id", "pvalue_sharpe_gt0", "T", "mbb_block_len", "sr_train"]],
+            on="setup_id",
+            how="left",
+            suffixes=("", "_s2")
+        )
+        all_setups_df["pass_stage2"] = all_setups_df["pvalue_sharpe_gt0"].notna()
+    else:
+        all_setups_df["pass_stage2"] = False
+    
+    # Add stage3 results if available
+    if stage3_df is not None and not stage3_df.empty:
+        all_setups_df = all_setups_df.merge(
+            stage3_df[["setup_id", "fdr_pass", "dsr", "N_eff"]],
+            on="setup_id",
+            how="left"
+        )
+        all_setups_df["pass_stage3"] = all_setups_df["fdr_pass"].fillna(False)
+    else:
+        all_setups_df["pass_stage3"] = False
+        all_setups_df["fdr_pass"] = False
+    
+    # Add ledger-based metrics
+    led = full_oos_ledger.copy()
+    for dc in ["trigger_date", "entry_date", "exit_date"]:
+        if dc in led.columns:
+            led[dc] = pd.to_datetime(led[dc], errors="coerce")
+    
+    # Setup column
+    setup_col = None
+    for c in ["setup_id", "Setup", "strategy_id", "StrategyID"]:
+        if c in led.columns:
+            setup_col = c
+            break
+    if setup_col is None:
+        led["_tmp_setup_id"] = "unknown"
+        setup_col = "_tmp_setup_id"
+    
+    # Calculate metrics per setup
+    led["is_open"] = led["exit_date"].isna() if "exit_date" in led.columns else False
+    
+    # Include unrealized PnL for open trades
+    realized = pd.to_numeric(led.get("pnl_dollars", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    unreal = pd.to_numeric(led.get("unrealized_pnl", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    is_open = led["is_open"].astype(bool)
+    led["_total_pnl"] = realized + (unreal.where(is_open, 0.0))
+    
+    # Aggregate metrics
+    ledger_metrics = led.groupby(setup_col).agg(
+        total_trades=("is_open", "count"),
+        open_trades=("is_open", "sum"),
+        sum_pnl_dollars=("_total_pnl", "sum"),
+        first_trigger_date=("trigger_date", "min") if "trigger_date" in led.columns else ("entry_date", "min"),
+        last_trigger_date=("trigger_date", "max") if "trigger_date" in led.columns else ("entry_date", "max"),
+    ).reset_index().rename(columns={setup_col: "setup_id"})
+    
+    ledger_metrics["closed_trades"] = ledger_metrics["total_trades"] - ledger_metrics["open_trades"]
+    
+    # Merge with all setups
+    all_setups_df = all_setups_df.merge(ledger_metrics, on="setup_id", how="left")
+    
+    # Get original pareto front info
+    pareto_df, _ = read_global_artifacts(run_dir)
+    if not pareto_df.empty:
+        pareto_df["setup_id"] = pareto_df["setup_id"].astype(str)
+        merge_cols = ["setup_id"]
+        if "fold" in all_setups_df.columns and "fold" in pareto_df.columns:
+            merge_cols.append("fold")
+        
+        # Select key columns from pareto
+        pareto_cols = ["setup_id", "specialized_ticker", "direction", "signal_ids", "description"]
+        if "fold" in merge_cols:
+            pareto_cols.append("fold")
+        pareto_cols.extend([c for c in ["sharpe_median", "sum_pnl_dollars", "trades_count", "rank"] 
+                           if c in pareto_df.columns and c not in pareto_cols])
+        
+        all_setups_df = all_setups_df.merge(
+            pareto_df[pareto_cols], 
+            on=merge_cols, 
+            how="left",
+            suffixes=("", "_train")
+        )
+    
+    # Create gauntlet stage progression summary
+    all_setups_df["gauntlet_stage_reached"] = "Stage 1"
+    all_setups_df.loc[all_setups_df["pass_stage2"] == True, "gauntlet_stage_reached"] = "Stage 2"
+    all_setups_df.loc[all_setups_df["pass_stage3"] == True, "gauntlet_stage_reached"] = "Stage 3 (Passed)"
+    
+    # Column ordering
+    col_order = [
+        # Identifiers
+        "setup_id", "fold", "specialized_ticker", "direction", "signal_ids", "description",
+        
+        # Gauntlet progression
+        "gauntlet_stage_reached", "pass_stage1", "pass_stage2", "pass_stage3",
+        
+        # Stage 1 details
+        "reason", "days_since_last_trigger", "trades_in_short_window", "max_dd_short",
+        
+        # Stage 2 details (if reached)
+        "pvalue_sharpe_gt0", "T", "mbb_block_len", "sr_train",
+        
+        # Stage 3 details (if reached)
+        "fdr_pass", "dsr", "N_eff",
+        
+        # OOS Trading activity
+        "total_trades", "closed_trades", "open_trades",
+        "first_trigger_date", "last_trigger_date",
+        
+        # OOS Performance
+        "sum_pnl_dollars",
+        
+        # Training performance (for reference)
+        "rank", "sharpe_median", "sum_pnl_dollars_train", "trades_count",
+    ]
+    
+    existing_cols = [c for c in col_order if c in all_setups_df.columns]
+    all_setups_df = all_setups_df[existing_cols + [c for c in all_setups_df.columns if c not in existing_cols]]
+    
+    # Sort by gauntlet progression and performance
+    sort_order = {"Stage 3 (Passed)": 0, "Stage 2": 1, "Stage 1": 2}
+    all_setups_df["_sort_key"] = all_setups_df["gauntlet_stage_reached"].map(sort_order)
+    all_setups_df = all_setups_df.sort_values(
+        by=["_sort_key", "pass_stage1", "pvalue_sharpe_gt0", "sum_pnl_dollars"],
+        ascending=[True, False, True, False]
+    ).drop(columns=["_sort_key"])
+    
+    # Write the summary
+    out_path = os.path.join(gaunt_dir, "all_setups_gauntlet_summary.csv")
+    all_setups_df.to_csv(out_path, index=False, float_format="%.4f")
+    print(f"All setups gauntlet summary generated at: {out_path}")
+    return out_path
+
+
 def write_gauntlet_summary(
     run_dir: str,
     survivors: List[Dict[str, Any]],
