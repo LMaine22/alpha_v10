@@ -16,10 +16,14 @@ INPUT_CANDIDATES = [
     "Economic_Releases.xlsx",
     "Economic_Releases2.xlsx",
     "Economic_Releases3.xlsx",
+    "Economic_Releases4.xlsx",
+
     # fallbacks in case files were named singular
     "Economic_Release.xlsx",
     "Economic_Release2.xlsx",
     "Economic_Release3.xlsx",
+    "Economic_Release4.xlsx",
+
 ]
 
 OUTPUT_XLSX = RAW_DIR / "Economic_Releases_combined.xlsx"

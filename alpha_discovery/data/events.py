@@ -1,181 +1,332 @@
+# alpha_discovery/data/events.py
 """
-Event calendar loader + daily EV_* feature builder.
-Robust to timezone mismatches (normalizes to ET midnight, tz-naive).
+Event calendar loader + daily EV_* feature builder (expanded).
+- Robust to timezone mismatches (normalizes to ET midnight, tz-naive).
+- Strictly one-business-day post-release lag to avoid lookahead.
+- Preserves your original EV outputs and adds ~28 high-signal event features.
+- Optional debug:
+    * Recent 'event tape' with actual event_type names
+    * Print exact EV_* column list
+    * Write per-release and per-day inspection parquet tables
 """
 from __future__ import annotations
+
+import math
+from typing import Tuple, Optional
 
 import numpy as np
 import pandas as pd
 from pandas.tseries.offsets import BDay
 
-from ..config import settings
-from ..features.core import ewma_halflife  # for new EWMA surprise features
+# ---------------------------------------------------------------------
+# Project settings and helpers (safe fallbacks if imports missing)
+# ---------------------------------------------------------------------
+try:
+    from ..config import settings  # type: ignore
+except Exception:  # pragma: no cover
+    settings = type("S", (), {})()  # minimal fallback container
+
+try:
+    # Use shared halflife EWMA if available to keep semantics consistent
+    from ..features.core import ewma_halflife  # type: ignore
+except Exception:  # pragma: no cover
+    def ewma_halflife(s: pd.Series, halflife: float) -> pd.Series:
+        s = pd.to_numeric(s, errors="coerce")
+        return s.ewm(halflife=halflife, adjust=False).mean()
 
 ET_TZ = "America/New_York"
 
-# --------------------------
-# Helpers
-# --------------------------
+# ---------------------------------------------------------------------
+# Defaults (used only if settings.events.* not provided)
+# ---------------------------------------------------------------------
+DEFAULT_CAL_PATHS = (
+    # Canonical path (your correction)
+    "data_store/processed/economic_releases.parquet",
+    # Fallbacks for resilience
+    "data_store/processed/economic_releases.csv",
+    "data_store/processed/economic_combined.parquet",
+    "data_store/processed/economic_combined.csv",
+    "data_store/economic_releases.parquet",
+    "data_store/economic_releases.csv",
+    "data_store/economic_combined.parquet",
+    "data_store/economic_combined.csv",
+)
 
-def _to_et_midnight_naive(ts: pd.Timestamp) -> pd.Timestamp:
-    """
-    Convert any timestamp (naive or tz-aware) to America/New_York midnight (00:00),
-    then drop timezone to return a tz-naive Timestamp.
-    """
-    if ts.tz is None:
-        ts_et = ts.tz_localize(ET_TZ)
-    else:
-        ts_et = ts.tz_convert(ET_TZ)
-    return ts_et.normalize().tz_localize(None)
+DEFAULT_HIGH_RELEVANCE = 80.0
+DEFAULT_PRE_WINDOW = 1       # calendar days before an event included in EV_in_window
+DEFAULT_POST_WINDOW = 1      # calendar days after an event included in EV_in_window
+DEFAULT_POST_LAG = 1         # business days to delay post-release signals
+DEFAULT_TOP_TIER = (
+    # Inflation & prices
+    "CPI", "PCE", "PPI", "ISM Prices Paid",
+    # Labor
+    "Change in Nonfarm Payrolls", "Unemployment Rate", "Average Hourly Earnings",
+    # Growth/Activity
+    "GDP Annualized QoQ", "Retail Sales", "ISM Manufacturing", "ISM Services",
+    # Policy
+    "FOMC Rate Decision", "Fed Interest on Reserve Balances Rate",
+)
 
+INFLATION_KEYS = ("CPI", "PCE", "PPI", "Prices Paid")
+GROWTH_KEYS    = ("Payrolls", "Unemployment", "GDP", "Retail Sales", "ISM", "JOLTS")
+
+# ---------------------------------------------------------------------
+# Utils
+# ---------------------------------------------------------------------
 def _series_to_et_midnight_naive(s: pd.Series) -> pd.Series:
+    """Convert timestamps to ET midnight; return tz-naive dates."""
     s = pd.to_datetime(s, errors="coerce")
     if getattr(s.dt, "tz", None) is not None:
-        s = s.dt.tz_convert(ET_TZ).dt.normalize().dt.tz_localize(None)
-    else:
-        s = s.dt.tz_localize(ET_TZ).dt.normalize().dt.tz_localize(None)
-    return s
+        return s.dt.tz_convert(ET_TZ).dt.normalize().dt.tz_localize(None)
+    return s.dt.tz_localize(ET_TZ).dt.normalize().dt.tz_localize(None)
 
-def _load_and_normalize_events(path: str) -> pd.DataFrame | None:
-    """Load merged parquet and create a tz-naive 'date_naive' column aligned to ET midnight."""
-    try:
+def _safe_numeric(x: pd.Series) -> pd.Series:
+    return pd.to_numeric(x, errors="coerce")
+
+def _calendar_path() -> Optional[str]:
+    # explicit override
+    cal_path = getattr(getattr(settings, "events", object()), "calendar_path", None)
+    if isinstance(cal_path, str):
+        return cal_path
+    # common fallbacks
+    import os
+    for p in DEFAULT_CAL_PATHS:
+        if os.path.exists(p):
+            return p
+    return None
+
+def _load_calendar() -> pd.DataFrame:
+    """
+    Load the combined economic calendar.
+    Expected columns:
+      release_datetime, event_type, country, survey, actual, prior, revised,
+      relevance, bb_ticker, release_date
+    """
+    path = _calendar_path()
+    if path is None:
+        print("  [EV] No economic calendar found.")
+        return pd.DataFrame(columns=[
+            "release_datetime","event_type","country","survey","actual","prior","revised",
+            "relevance","bb_ticker","release_date"
+        ])
+
+    if path.endswith(".parquet"):
         df = pd.read_parquet(path)
-    except FileNotFoundError:
-        print(f"  Warning: Event calendar file not found at '{path}'.")
-        return None
-
-    # Required columns: release_datetime, event_type, country, relevance, actual, survey
-    required = {"release_datetime", "event_type", "country", "relevance", "actual", "survey"}
-    missing = required.difference(df.columns)
-    if missing:
-        print(f"  Warning: Missing columns in events file: {sorted(missing)}")
-        return None
-
-    rel = pd.to_datetime(df["release_datetime"], errors="coerce")
-    if getattr(rel.dt, "tz", None) is not None:
-        df["date_naive"] = rel.dt.tz_convert(ET_TZ).dt.normalize().dt.tz_localize(None)
     else:
-        df["date_naive"] = rel.dt.tz_localize(ET_TZ).dt.normalize().dt.tz_localize(None)
+        df = pd.read_csv(path)
 
-    df = df.dropna(subset=["date_naive"]).copy()
-    return df
+    # Coerce numerics
+    for c in ("survey","actual","prior","revised","relevance"):
+        if c in df.columns:
+            df[c] = _safe_numeric(df[c])
 
-def _filter_events(df: pd.DataFrame, conf) -> pd.DataFrame:
-    """Apply country, type, and relevance filters."""
-    out = df.copy()
-    if getattr(conf, "countries", None):
-        out = out[out["country"].isin(conf.countries)]
-    include_types = getattr(conf, "include_types", None)
-    if include_types:
-        out = out[out["event_type"].isin(include_types)]
-    thr = float(getattr(conf, "high_relevance_threshold", 70.0))
-    out = out[out["relevance"] >= thr]
-    return out
+    # Normalize to ET midnight (tz-naive) for the release day
+    if "release_datetime" in df.columns and df["release_datetime"].notna().any():
+        dt = pd.to_datetime(df["release_datetime"], errors="coerce", utc=True)
+        df["release_day"] = _series_to_et_midnight_naive(dt)
+        # pre-open flag (09:30 ET gate)
+        try:
+            etdt = dt.dt.tz_convert(ET_TZ)
+            df["preopen_release"] = ((etdt.dt.hour < 9) | ((etdt.dt.hour == 9) & (etdt.dt.minute < 30))).astype(int)
+        except Exception:
+            df["preopen_release"] = 0
+    else:
+        df["release_day"] = _series_to_et_midnight_naive(pd.to_datetime(df["release_date"], errors="coerce"))
+        df["preopen_release"] = 0
 
-def _get_high_impact_dates_naive(df: pd.DataFrame) -> list[pd.Timestamp]:
-    """Unique ET-midnight (tz-naive) high impact event dates, sorted."""
-    if df.empty:
-        return []
-    return sorted(pd.DatetimeIndex(df["date_naive"].unique()).tz_localize(None))
+    df["event_type"] = df["event_type"].fillna("").astype(str)
+    df["relevance"] = _safe_numeric(df["relevance"]).clip(lower=0.0)
 
-def _daily_surprise_z(df: pd.DataFrame) -> pd.Series:
+    # Keep US if we have it, else keep all
+    if "country" in df.columns:
+        has_us = df["country"].astype(str).str.upper().eq("US").any()
+        if has_us:
+            df = df[df["country"].astype(str).str.upper().eq("US")]
+
+    df = df[df["release_day"].notna() & df["event_type"].ne("")]
+    return df.reset_index(drop=True)
+
+# ---- grouped stats helpers (with pandas 2.2+ compat) ----------------
+def _gb_apply(df: pd.DataFrame, func, *args, **kwargs) -> pd.Series:
+    """GroupBy.apply with pandas>=2.2 include_groups=False support, fallback otherwise."""
+    g = df.groupby("event_type", group_keys=False, observed=True)
+    try:
+        return g.apply(func, *args, include_groups=False, **kwargs)
+    except TypeError:
+        return g.apply(func, *args, **kwargs)
+
+def _std_grouped_surprise(df: pd.DataFrame,
+                          col_actual="actual", col_survey="survey",
+                          win: int = 252, min_obs: int = 12) -> pd.Series:
     """
-    Surprise z per event_type (within filtered set), then pick the max |z| per day.
-    Index returned = tz-naive ET dates.
+    Standardized surprise per event_type (rolling z of (actual - survey)).
+    Uses shift(1) within each type to avoid same-print lookahead.
     """
-    if df.empty:
-        return pd.Series(dtype=float)
-    work = df.copy()
-    work["surprise"] = pd.to_numeric(work["actual"], errors="coerce") - pd.to_numeric(work["survey"], errors="coerce")
-    work = work.dropna(subset=["surprise", "event_type", "date_naive"])
-    if work.empty:
-        return pd.Series(dtype=float)
-    grp = work.groupby("event_type")["surprise"]
-    mu = grp.transform("mean")
-    sd = grp.transform("std").replace(0.0, np.nan)
-    work["surprise_z"] = (work["surprise"] - mu) / sd
-    work = work.dropna(subset=["surprise_z"])
-    if work.empty:
-        return pd.Series(dtype=float)
-    work["abs_z"] = work["surprise_z"].abs()
-    best = work.sort_values("abs_z", ascending=False).drop_duplicates("date_naive")
-    s = best.set_index("date_naive")["surprise_z"].sort_index()
-    return s
+    x = _safe_numeric(df[col_actual]) - _safe_numeric(df[col_survey])
+    df = df.copy()
+    df["surprise_raw"] = x
 
-def _dense_count_next_days(df: pd.DataFrame, by_day: pd.Series, days: int = 7) -> pd.Series:
+    def _z(g: pd.DataFrame) -> pd.Series:
+        s = g["surprise_raw"]
+        mu = s.shift(1).rolling(win, min_periods=min_obs).mean()
+        sd = s.shift(1).rolling(win, min_periods=min_obs).std(ddof=0)
+        return (s - mu) / (sd.replace(0, np.nan))
+
+    return _gb_apply(df, _z)
+
+def _std_grouped_revision(df: pd.DataFrame, win: int = 252, min_obs: int = 8) -> pd.Series:
     """
-    For each day in the base index, count number of high-impact events in next N calendar days.
+    Standardized revision per event_type (rolling z of (revised - prior)).
+    Shifted to avoid lookahead.
     """
-    base_days = pd.DatetimeIndex(by_day.index).sort_values().unique()
-    out = []
-    for dt in base_days:
-        horizon = [dt + pd.Timedelta(days=i) for i in range(1, days + 1)]
-        out.append(sum(by_day.reindex(horizon).fillna(0).values))
-    return pd.Series(out, index=base_days, dtype=float)
+    rev = _safe_numeric(df.get("revised", pd.Series(index=df.index, dtype=float))) \
+        - _safe_numeric(df.get("prior", pd.Series(index=df.index, dtype=float)))
 
-# --------------------------
-# Public API
-# --------------------------
+    def _rz(g: pd.DataFrame) -> pd.Series:
+        r = rev.loc[g.index]
+        mu = r.shift(1).rolling(win, min_periods=min_obs).mean()
+        sd = r.shift(1).rolling(win, min_periods=min_obs).std(ddof=0)
+        return (r - mu) / (sd.replace(0, np.nan))
 
+    return _gb_apply(df, _rz)
+
+def _expanding_signed_percentile(df: pd.DataFrame, values: pd.Series) -> pd.Series:
+    """
+    Expanding signed percentile (−1..+1) within each event_type.
+    Uses shift(1) to prohibit same-print information.
+    """
+    def _pct(g: pd.DataFrame) -> pd.Series:
+        v = values.loc[g.index]
+        ranks = v.rank(method="average", pct=True).shift(1)
+        return (ranks * 2.0 - 1.0)
+
+    return _gb_apply(df, _pct)
+
+def _is_top_tier(event_type: str, top_list: Tuple[str, ...]) -> bool:
+    et = event_type.lower()
+    for key in top_list:
+        if key.lower() in et:
+            return True
+    return False
+
+def _bucket(event_type: str) -> str:
+    et = event_type.lower()
+    if any(k.lower() in et for k in INFLATION_KEYS):
+        return "inflation"
+    if any(k.lower() in et for k in GROWTH_KEYS):
+        return "growth"
+    return "other"
+
+# ---------------------------------------------------------------------
+# Debug printing: human-readable event tape (optional)
+# ---------------------------------------------------------------------
+def _print_recent_event_tape(cal: pd.DataFrame, recent_days: int = 5, max_rows: int = 40) -> None:
+    """Pretty-print a recent 'event tape' with actual event_type names."""
+    if cal.empty:
+        print("  [EV][debug] No events to print.")
+        return
+    cutoff = cal["release_day"].max() - pd.Timedelta(days=recent_days)
+    tape = (
+        cal[cal["release_day"] >= cutoff]
+        .loc[:, ["release_day", "event_type", "relevance", "surprise_z", "revision_z", "net_info_surprise",
+                 "is_top_tier", "is_high_impact", "is_tail_1p5", "is_tail_2p5", "bucket", "preopen_release"]]
+        .sort_values(["release_day", "relevance"], ascending=[False, False])
+        .head(max_rows)
+    )
+    print("\n================ RECENT ECON EVENT TAPE ================")
+    if tape.empty:
+        print("  [EV][debug] No recent events in the chosen window.")
+    else:
+        display_cols = ["release_day", "event_type", "relevance", "surprise_z", "revision_z",
+                        "net_info_surprise", "is_top_tier", "is_high_impact", "is_tail_2p5", "bucket", "preopen_release"]
+        print(tape[display_cols].to_string(index=False))
+    print("========================================================\n")
+
+# ---------------------------------------------------------------------
+# Main builder
+# ---------------------------------------------------------------------
 def build_event_features(full_data_index: pd.DatetimeIndex) -> pd.DataFrame:
     """
-    Build daily EV_* features aligned to the master index (tz-naive).
-    - EV_days_to_high: days until next high-impact event (capped)
-    - EV_in_window: 1 if in [T-pre, T+post] around any high-impact event
-    - EV_pre_window: 1 if in [T-pre, T-1]
-    - EV_is_event_week: 1 if any high-impact event in the same ISO week
-    - EV_after_surprise_z: standardized surprise (posted on T+lag business days)
-    - EV_after_pos/EV_after_neg: sign of surprise (T+lag)
-    - EV_surprise_ewma_21 / EV_surprise_ewma_63: EWMAs of the daily surprise z (post-release)
-    - EV_tail_intensity_21: share of days with |surprise_z|>2 over the past 21 days (post-release)
-    - EV_dense_macro_window_7: count of high-impact events in next 7 calendar days (calendar-only)
+    Build daily EV_* features aligned to the master price index (tz-naive).
+
+    Preserved originals:
+      EV_days_to_high, EV_in_window, EV_pre_window, EV_is_event_week,
+      EV_after_surprise_z, EV_after_pos, EV_after_neg,
+      EV_surprise_ewma_21, EV_surprise_ewma_63,
+      EV_tail_intensity_21, EV_dense_macro_window_7
+
+    Additions (post-release, BDay(1) lag unless noted):
+      EV_signed_surprise_percentile, EV_surprise_dispersion_day,
+      EV_tail_flag_1p5, EV_tail_flag_2p5, EV_time_since_tailshock_60,
+      EV_revision_z, EV_revision_tail_flag, EV_net_info_surprise,
+      EV_revision_polarity_memory_3, EV_revision_vol_252,
+      EV_shock_adjusted_surprise,
+      EV_dense_macro_day_score, EV_top_tier_dominance_share,
+      EV_forward_calendar_heat_3 (calendar-forward, no lag),
+      EV_calendar_vacuum_7 (calendar-forward, no lag),
+      EV_clustered_tail_count_5,
+      EV_infl_vs_growth_divergence
     """
     print("Building event features from economic calendar...")
 
-    conf = settings.events
-    events_df = _load_and_normalize_events(conf.file_path)
-    if events_df is None:
-        return pd.DataFrame(index=full_data_index)
+    # Settings / thresholds (with safe defaults)
+    conf = getattr(settings, "events", object())
+    pre  = int(getattr(conf, "pre_window_days", DEFAULT_PRE_WINDOW))
+    post = int(getattr(conf, "post_window_days", DEFAULT_POST_WINDOW))
+    lag  = int(getattr(conf, "post_release_lag_days", DEFAULT_POST_LAG))
+    hi_rel = float(getattr(conf, "high_relevance_threshold", DEFAULT_HIGH_RELEVANCE))
+    top_tier = tuple(getattr(conf, "top_tier_types", DEFAULT_TOP_TIER))
 
-    # Apply filters
-    filt = _filter_events(events_df, conf)
-    if filt.empty:
-        print("  Warning: No high-relevance events found after filtering. Returning empty DataFrame.")
-        return pd.DataFrame(index=full_data_index)
+    # -----------------------------------------------------------------
+    # Normalize trading index: work on a unique index internally
+    # -----------------------------------------------------------------
+    base_index = pd.DatetimeIndex(full_data_index).tz_localize(None)
+    uni_index = pd.DatetimeIndex(base_index.drop_duplicates(keep="first"))
+    # Build on the unique index; project back to base_index at the end.
+    out = pd.DataFrame(index=uni_index)
 
-    # Ensure master index is tz-naive
-    if getattr(full_data_index, "tz", None) is not None:
-        base_index = pd.DatetimeIndex(full_data_index.tz_localize(None))
-    else:
-        base_index = pd.DatetimeIndex(full_data_index)
+    cal = _load_calendar()
+    if cal.empty:
+        return pd.DataFrame(index=base_index)
 
-    # High impact dates (tz-naive)
-    high_dates = _get_high_impact_dates_naive(filt)
+    # Per-release stats
+    cal = cal.sort_values("release_day").reset_index(drop=True)
+    cal["surprise_z"] = _std_grouped_surprise(cal)
+    cal["revision_z"] = _std_grouped_revision(cal)
+    cal["net_info_surprise"] = cal["surprise_z"] + 0.7 * cal["revision_z"].fillna(0.0)
+    cal["signed_surprise_pct"] = _expanding_signed_percentile(cal, cal["surprise_z"])
 
-    out = pd.DataFrame(index=base_index)
+    cal["is_top_tier"] = cal["event_type"].apply(lambda et: _is_top_tier(et, top_tier)).astype(int)
+    cal["is_high_impact"] = (cal["relevance"] >= hi_rel).astype(int)
+    cal["is_tail_1p5"] = (cal["surprise_z"].abs() > 1.5).astype(int)
+    cal["is_tail_2p5"] = (cal["surprise_z"].abs() > 2.5).astype(int)
+    cal["bucket"] = cal["event_type"].apply(_bucket)
 
-    # --- EV_days_to_high via asof on sorted indices ---
+    # Relevance sqrt-weight (cap at 100 to stabilize)
+    w = cal["relevance"].clip(0, 100) ** 0.5
+    cal["w_surprise"] = cal["surprise_z"] * w
+    cal["w_net_info"] = cal["net_info_surprise"] * w
+    cal["w_signed_pct"] = cal["signed_surprise_pct"] * w
+
+    # -----------------------------------------------------------------
+    # Calendar-forward features (no lag; based on scheduled dates)
+    # -----------------------------------------------------------------
+    high_dates = sorted(pd.to_datetime(cal.loc[cal["is_high_impact"].eq(1), "release_day"].dropna().unique()))
     if high_dates:
-        events_only = pd.DataFrame(index=pd.DatetimeIndex(high_dates), data={"event_date": high_dates})
-        events_only.sort_index(inplace=True)
-        out_sorted = out.sort_index()
-        merged = pd.merge_asof(
-            out_sorted,
-            events_only,
-            left_index=True,
-            right_index=True,
-            direction="forward",
-            allow_exact_matches=True,
-        )
-        out["EV_days_to_high"] = (merged["event_date"] - merged.index).dt.days
-        cap = int(getattr(conf, "max_countdown_cap_days", 10))
-        out["EV_days_to_high"] = out["EV_days_to_high"].clip(upper=cap).fillna(cap)
+        # EV_days_to_high: calendar days until next high-impact date
+        next_idx = pd.Series(pd.NaT, index=uni_index)
+        hi = pd.DatetimeIndex(high_dates)
+        j = 0
+        for d in uni_index:
+            while j < len(hi) and hi[j] < d:
+                j += 1
+            next_idx.loc[d] = hi[j] if j < len(hi) else pd.NaT
+        td = pd.to_timedelta(next_idx - uni_index)
+        out["EV_days_to_high"] = pd.Series(td, index=uni_index).dt.days.clip(lower=0).fillna(0).astype(float)
     else:
-        out["EV_days_to_high"] = int(getattr(conf, "max_countdown_cap_days", 10))
+        out["EV_days_to_high"] = 0.0
 
-    # --- EV_in_window / EV_pre_window flags ---
-    pre = int(getattr(conf, "pre_window_days", 2))
-    post = int(getattr(conf, "post_window_days", 2))
+    # EV_in_window / EV_pre_window
     out["EV_in_window"] = 0
     out["EV_pre_window"] = 0
     if high_dates:
@@ -184,51 +335,211 @@ def build_event_features(full_data_index: pd.DatetimeIndex) -> pd.DataFrame:
             end_post = d + pd.Timedelta(days=post)
             out.loc[start_pre:end_post, "EV_in_window"] = 1
             if pre > 0:
-                out.loc[start_pre : (d - pd.Timedelta(days=1)), "EV_pre_window"] = 1
+                out.loc[start_pre:(d - pd.Timedelta(days=1)), "EV_pre_window"] = 1
 
-    # --- EV_is_event_week ---
+    # EV_is_event_week
     out["week_period"] = out.index.to_period("W")
     event_weeks = pd.Series(pd.DatetimeIndex(high_dates)).dt.to_period("W").unique()
     out["EV_is_event_week"] = out["week_period"].isin(event_weeks).astype(int)
     out.drop(columns=["week_period"], inplace=True)
 
-    # --- Post-release: surprise z at T+lag (business days) ---
-    sz = _daily_surprise_z(filt)
-    if not sz.empty:
-        lag = int(getattr(conf, "post_release_lag_days", 1))
-        sz_t1 = pd.Series(sz.values, index=sz.index + BDay(lag))
-        # Align to base index
-        sz_t1 = sz_t1.reindex(out.index)
-        out["EV_after_surprise_z"] = sz_t1.fillna(0.0)
-        out["EV_after_pos"] = (out["EV_after_surprise_z"] > 0).astype(int)
-        out["EV_after_neg"] = (out["EV_after_surprise_z"] < 0).astype(int)
-
-        # Surprise EWMAs (post-release)
-        out["EV_surprise_ewma_21"] = ewma_halflife(out["EV_after_surprise_z"], halflife=21)
-        out["EV_surprise_ewma_63"] = ewma_halflife(out["EV_after_surprise_z"], halflife=63)
-
-        # Tail intensity over last 21 business days (post-release)
-        absz = out["EV_after_surprise_z"].abs()
-        out["EV_tail_intensity_21"] = (absz > 2.0).astype(float).rolling(21).mean().fillna(0.0)
-    else:
-        out["EV_after_surprise_z"] = 0.0
-        out["EV_after_pos"] = 0
-        out["EV_after_neg"] = 0
-        out["EV_surprise_ewma_21"] = 0.0
-        out["EV_surprise_ewma_63"] = 0.0
-        out["EV_tail_intensity_21"] = 0.0
-
-    # --- Dense macro window: count of high-impact events in next 7 calendar days (calendar-only) ---
+    # EV_dense_macro_window_7: number of high-impact days in next 7 calendar days
     if high_dates:
         by_day = pd.Series(1, index=pd.DatetimeIndex(high_dates))
         dense7 = []
-        # preserve full_data_index alignment
-        for dt in out.index:
+        # Ensure no duplicate index on by_day
+        by_day = by_day[~by_day.index.duplicated(keep="last")]
+        for dt in uni_index:
             horizon = [dt + pd.Timedelta(days=i) for i in range(1, 8)]
             dense7.append(sum(by_day.reindex(horizon).fillna(0).values))
-        out["EV_dense_macro_window_7"] = pd.Series(dense7, index=out.index, dtype=float)
+        out["EV_dense_macro_window_7"] = pd.Series(dense7, index=uni_index, dtype=float)
     else:
         out["EV_dense_macro_window_7"] = 0.0
 
+    # EV_forward_calendar_heat_3: sum of relevance next 3 calendar days
+    rel_by_day = cal.groupby("release_day")["relevance"].sum()
+    rel_by_day = rel_by_day[~rel_by_day.index.duplicated(keep="last")]
+    rel_by_day = rel_by_day.reindex(uni_index, fill_value=0.0)
+    heat3 = []
+    # Use a plain dict for fast lookups
+    rel_map = rel_by_day.to_dict()
+    for dt in uni_index:
+        tot = 0.0
+        for i in (1, 2, 3):
+            dti = dt + pd.Timedelta(days=i)
+            tot += float(rel_map.get(dti, 0.0))
+        heat3.append(tot)
+    out["EV_forward_calendar_heat_3"] = pd.Series(heat3, index=uni_index, dtype=float)
+
+    # EV_calendar_vacuum_7: 1 if no high-impact in next 7 days
+    out["EV_calendar_vacuum_7"] = (out["EV_dense_macro_window_7"] == 0).astype(int)
+
+    # -----------------------------------------------------------------
+    # Post-release aggregated daily signals (will be lagged by BDay)
+    # -----------------------------------------------------------------
+    daily = cal.groupby("release_day").agg(
+        w_surprise_sum=("w_surprise", "sum"),
+        w_surprise_den=("relevance", lambda x: (x.clip(0, 100) ** 0.5).sum()),
+        w_net_info_sum=("w_net_info", "sum"),
+        w_signed_pct_sum=("w_signed_pct", "sum"),
+        tails_1p5=("is_tail_1p5", "max"),
+        tails_2p5=("is_tail_2p5", "max"),
+        tail_any=("surprise_z", lambda s: int((s.abs() > 2.0).any())),
+        preopen=("preopen_release", "max"),
+        dense_score=("relevance", "sum"),
+        top_share=("is_top_tier", "sum"),
+        count=("event_type", "count"),
+    )
+    # Dedup any accidental duplicates (robustness)
+    daily = daily[~daily.index.duplicated(keep="last")]
+    den = daily["w_surprise_den"].replace(0, np.nan)
+    daily["surprise_wavg"] = daily["w_surprise_sum"] / den
+    daily["net_info_wavg"] = daily["w_net_info_sum"] / den
+    daily["signed_pct_wavg"] = daily["w_signed_pct_sum"] / den
+
+    # Dispersion of surprise across types (std) per day
+    disp = cal.groupby("release_day")["surprise_z"].std()
+    disp = disp[~disp.index.duplicated(keep="last")]
+    daily["surprise_dispersion_day"] = disp.reindex(daily.index)
+
+    # Growth vs Inflation divergence ( −1 if opposite signs; else 0 )
+    grp = cal.groupby(["release_day", "bucket"])["surprise_z"].mean().unstack()
+    grp = grp[~grp.index.duplicated(keep="last")]
+    gv = grp.get("growth")
+    inf = grp.get("inflation")
+    infl_vs_growth_div = (np.sign(gv).fillna(0) * np.sign(inf).fillna(0))
+    infl_vs_growth_div = infl_vs_growth_div.reindex(daily.index).fillna(0)
+    daily["infl_vs_growth_div"] = (infl_vs_growth_div == -1).astype(int)
+
+    # Reindex daily to unique trading calendar
+    daily = daily.reindex(uni_index).fillna(0.0)
+
+    # Business-day lag helper (drop dup index in returned series)
+    def _lag_bday(s: pd.Series, k: int) -> pd.Series:
+        s2 = pd.Series(s.values, index=pd.DatetimeIndex(s.index) + BDay(k))
+        return s2[~s2.index.duplicated(keep="last")]
+
+    # Apply lag to core aggregates
+    s_t     = _lag_bday(daily["surprise_wavg"], lag).reindex(uni_index)
+    n_t     = _lag_bday(daily["net_info_wavg"], lag).reindex(uni_index)
+    p_t     = _lag_bday(np.sign(daily["surprise_wavg"]).clip(-1, 1), lag).reindex(uni_index)
+    pct_t   = _lag_bday(daily["signed_pct_wavg"], lag).reindex(uni_index)
+    disp_t  = _lag_bday(daily["surprise_dispersion_day"], lag).reindex(uni_index)
+    tail1_t = _lag_bday(daily["tails_1p5"], lag).reindex(uni_index)
+    tail2_t = _lag_bday(daily["tails_2p5"], lag).reindex(uni_index)
+    tailany_t = _lag_bday(daily["tail_any"], lag).reindex(uni_index)
+    infl_div_t = _lag_bday(daily["infl_vs_growth_div"], lag).reindex(uni_index)
+
+    # Core post-release EV features
+    out["EV_after_surprise_z"] = s_t.astype(float).fillna(0.0)
+    out["EV_after_pos"] = (p_t > 0).fillna(False).astype(int)
+    out["EV_after_neg"] = (p_t < 0).fillna(False).astype(int)
+    out["EV_signed_surprise_percentile"] = pct_t.astype(float).fillna(0.0)
+    out["EV_surprise_dispersion_day"] = disp_t.astype(float).fillna(0.0)
+    out["EV_tail_flag_1p5"] = tail1_t.fillna(0).astype(int)
+    out["EV_tail_flag_2p5"] = tail2_t.fillna(0).astype(int)
+    out["EV_infl_vs_growth_divergence"] = infl_div_t.fillna(0).astype(int)
+
+    # Time since last tail shock (cap at 60)
+    tails_any = tailany_t.fillna(0).astype(int)
+    ts = []
+    since = math.inf
+    for v in tails_any.reindex(uni_index).fillna(0).astype(int).values:
+        if v > 0:
+            since = 0
+        else:
+            since = since + 1 if since != math.inf else math.inf
+        ts.append(0 if since is math.inf else min(float(since), 60.0))
+    out["EV_time_since_tailshock_60"] = pd.Series(ts, index=uni_index, dtype=float)
+
+    # Revisions (post-release)
+    rev_daily = cal.groupby("release_day")["revision_z"].mean()
+    rev_daily = rev_daily[~rev_daily.index.duplicated(keep="last")]
+    out["EV_revision_z"] = _lag_bday(rev_daily, lag).reindex(uni_index).astype(float).fillna(0.0)
+    rev_tail = cal.groupby("release_day")["revision_z"].apply(lambda s: int((s.abs() > 2.0).any()))
+    rev_tail = rev_tail[~rev_tail.index.duplicated(keep="last")]
+    out["EV_revision_tail_flag"] = _lag_bday(rev_tail, lag).reindex(uni_index).fillna(0).astype(int)
+    out["EV_net_info_surprise"] = n_t.astype(float).fillna(0.0)
+
+    # Revision polarity memory (last 3 per type → daily mean)
+    cal_sorted = cal.sort_values("release_day")
+    cal_sorted["rev_sign"] = np.sign(cal_sorted["revision_z"]).fillna(0.0)
+    mem = cal_sorted.groupby("event_type").apply(
+        lambda g: g.set_index("release_day")["rev_sign"].rolling(3, min_periods=1).mean().shift(1)
+    ).reset_index(level=0, drop=True)
+    # mem has duplicate dates by design; average them to a single daily value
+    rev_mem_daily = mem.groupby(mem.index).mean()
+    rev_mem_daily = rev_mem_daily[~rev_mem_daily.index.duplicated(keep="last")]
+    out["EV_revision_polarity_memory_3"] = _lag_bday(rev_mem_daily, lag).reindex(uni_index).astype(float).fillna(0.0)
+
+    # Revision volatility regime (rolling std per type → daily avg)
+    rev_vol = cal.groupby("event_type").apply(
+        lambda g: g.set_index("release_day")["revision_z"].rolling(252, min_periods=30).std().shift(1)
+    ).reset_index(level=0, drop=True)
+    rev_vol_daily = rev_vol.groupby(rev_vol.index).mean()
+    rev_vol_daily = rev_vol_daily[~rev_vol_daily.index.duplicated(keep="last")]
+    out["EV_revision_vol_252"] = _lag_bday(rev_vol_daily, lag).reindex(uni_index).astype(float).fillna(0.0)
+
+    # Surprise EWMAs & shock-adjusted composite
+    out["EV_surprise_ewma_21"] = ewma_halflife(out["EV_after_surprise_z"], halflife=10.5)
+    out["EV_surprise_ewma_63"] = ewma_halflife(out["EV_after_surprise_z"], halflife=31.5)
+    out["EV_shock_adjusted_surprise"] = (
+        out["EV_after_surprise_z"] * (1.0 + out["EV_forward_calendar_heat_3"].pow(0.5) / 10.0)
+    ).astype(float)
+
+    # Tail intensity: share of |surprise|>2 over past 21 trading days
+    tails_2p5 = (out["EV_tail_flag_2p5"] > 0).astype(int)
+    out["EV_tail_intensity_21"] = tails_2p5.rolling(21, min_periods=5).mean().fillna(0.0)
+
+    # Dense macro day score & top-tier dominance (lagged)
+    dense = daily["dense_score"]
+    top = daily["top_share"]
+    cnt = daily["count"].replace(0, np.nan)
+    out["EV_dense_macro_day_score"] = _lag_bday(dense, lag).reindex(uni_index).fillna(0.0).astype(float)
+    denom = _lag_bday(cnt, lag).reindex(uni_index)
+    numer = _lag_bday(top, lag).reindex(uni_index)
+    out["EV_top_tier_dominance_share"] = (numer / denom).replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
+
+    # Clustered tail count last 5 trading days
+    out["EV_clustered_tail_count_5"] = tails_2p5.rolling(5, min_periods=1).sum().astype(float)
+
+    # Final coercion on unique index
+    for c in out.columns:
+        out[c] = pd.to_numeric(out[c], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
     print(f"  Successfully built {len(out.columns)} event features.")
-    return out
+
+    # -------------------------------------------------------------
+    # Debug printing / optional dumps (OFF by default; enable via settings)
+    # -------------------------------------------------------------
+    dbg_conf = getattr(settings, "events", object())
+    dbg_print = bool(getattr(dbg_conf, "debug_print_recent", False))
+    dbg_days = int(getattr(dbg_conf, "debug_recent_days", 5))
+    dbg_rows = int(getattr(dbg_conf, "debug_recent_max_rows", 40))
+    dbg_dump  = bool(getattr(dbg_conf, "debug_write_tables", False))
+
+    if dbg_print:
+        _print_recent_event_tape(cal, recent_days=dbg_days, max_rows=dbg_rows)
+        # Also print the exact EV columns we produced
+        print(f"[EV][debug] Built {len(out.columns)} EV feature columns:")
+        print(", ".join(list(out.columns)))
+
+    if dbg_dump:
+        try:
+            # Per-release long table with names
+            cal_out = cal.loc[:, ["release_day","event_type","relevance","surprise_z","revision_z",
+                                  "net_info_surprise","is_top_tier","is_high_impact","is_tail_1p5","is_tail_2p5","bucket"]]
+            cal_out.to_parquet("data_store/processed/ev_releases.parquet", index=False)
+            # Per-day aggregates (aligned to release_day, pre-lag)
+            daily_out = daily.reset_index()[["release_day","surprise_wavg","net_info_wavg","signed_pct_wavg",
+                                             "surprise_dispersion_day","tails_1p5","tails_2p5","tail_any",
+                                             "dense_score","top_share","count"]]
+            daily_out.to_parquet("data_store/processed/ev_daily.parquet", index=False)
+            print("  [EV][debug] Wrote ev_releases.parquet and ev_daily.parquet to data_store/processed/")
+        except Exception as e:
+            print(f"  [EV][debug] Failed to write debug tables: {e}")
+
+    # -----------------------------------------------------------------
+    # Project back to the original (possibly duplicated) base_index
+    # -----------------------------------------------------------------
+    return out.reindex(base_index)

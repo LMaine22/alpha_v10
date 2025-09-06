@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict, Any
+from typing import Optional, List, Tuple, Dict, cast
 import math
+import hashlib
 import numpy as np
 import pandas as pd
 
@@ -12,11 +13,13 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [5, 8, 12]
+TRADE_HORIZONS_DAYS = [3]
+
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
     """Inclusive business-day add (entry day = 0)."""
     return pd.bdate_range(start_date, periods=bd + 1, freq="C")[-1]
+
 
 def _get_eod_value(df: pd.DataFrame, col: str, d: pd.Timestamp) -> Optional[float]:
     """As-of lookup (no future peeking): last known value <= d."""
@@ -34,11 +37,13 @@ def _get_eod_value(df: pd.DataFrame, col: str, d: pd.Timestamp) -> Optional[floa
         pass
     return None
 
+
 def _find_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     for c in candidates:
         if c in df.columns:
             return c
     return None
+
 
 def _ensure_df_token(df: pd.DataFrame) -> str:
     tok = df.attrs.get("_cache_token", None)
@@ -74,6 +79,7 @@ def _first_true_index(mask: np.ndarray) -> Optional[int]:
     idxs = np.nonzero(mask)[0]
     return int(idxs[0]) if idxs.size > 0 else None
 
+
 def _policy_id(policy: ExitPolicy, horizon_days: int) -> str:
     active = {
         "pt": policy.pt_multiple,
@@ -87,8 +93,8 @@ def _policy_id(policy: ExitPolicy, horizon_days: int) -> str:
         "sf": policy.scale_out_frac,
     }
     s = "|".join(f"{k}={v}" for k, v in active.items() if v is not None)
-    import hashlib
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10] if s else ""
+
 
 def _decide_exit_with_scale_out(price_path: pd.Series,
                                 entry_exec_price: float,
@@ -146,10 +152,6 @@ def _decide_exit_with_scale_out(price_path: pd.Series,
         sl2_mask = p2 <= sl_thresh
 
     # earliest of (trailing, stop) after PT; otherwise time/horizon
-    def _first_true_index(mask: np.ndarray) -> Optional[int]:
-        idxs = np.nonzero(mask)[0]
-        return int(idxs[0]) if idxs.size > 0 else None
-
     day_ts2 = _first_true_index(ts2_mask)
     day_sl2 = _first_true_index(sl2_mask)
 
@@ -169,6 +171,7 @@ def _decide_exit_with_scale_out(price_path: pd.Series,
     return True, {"pt_idx": pt_idx, "pt_reason": "profit_target_partial",
                   "final_idx": final_idx, "final_reason": final_reason}
 
+
 def _decide_exit_from_path(price_path: pd.Series,
                            entry_exec_price: float,
                            horizon_days: int,
@@ -183,7 +186,7 @@ def _decide_exit_from_path(price_path: pd.Series,
     Returns:
         exit_idx (int): 0-based index into price_path where we exit
         exit_reason (str): 'profit_target' | 'trailing_stop' | 'stop_loss' | 'time_stop' | 'horizon'
-        holding_days_actual (int): equals exit_idx (0..len(path)-1)
+        holding_days_actual (int): equals exit_idx (0...len(path)-1)
     """
     n = len(price_path)
     if n == 0:
@@ -221,7 +224,7 @@ def _decide_exit_from_path(price_path: pd.Series,
         sl_hits = np.nonzero(p <= sl_thresh)[0]
         sl_idx = int(sl_hits[0]) if sl_hits.size > 0 else None
 
-    # Choose earliest event; on same-day ties, PT beats TS, TS beats SL
+    # Choose the earliest event; on same-day ties, PT beats TS, TS beats SL
     candidates = []
     if pt_idx is not None: candidates.append((pt_idx, "profit_target", 0))
     if ts_idx is not None: candidates.append((ts_idx, "trailing_stop", 1))
@@ -237,7 +240,6 @@ def _decide_exit_from_path(price_path: pd.Series,
     return int(final_idx), final_reason, int(final_idx)
 
 
-
 # ---------------- Pricing bridge (delegates to options.pricing if present) ----------------
 
 def _call_if_exists(func_name: str, *args, **kwargs):
@@ -246,47 +248,53 @@ def _call_if_exists(func_name: str, *args, **kwargs):
         return fn(*args, **kwargs)
     return None
 
+
 def _get_risk_free_rate(date: pd.Timestamp, df: Optional[pd.DataFrame]) -> float:
-    r = _call_if_exists("get_risk_free_rate", date, df=df)
+    r = cast(Optional[float], _call_if_exists("get_risk_free_rate", date, df=df))
     if r is not None:
         return float(r)
     return float(getattr(settings.options, "constant_r", 0.0))
 
+
 def _has_iv_for_ticker(ticker: str, df: pd.DataFrame) -> bool:
     if getattr(settings.options, "allow_nonoptionable", False):
         return True
-    ok = _call_if_exists("has_required_iv_series", ticker, df)
+    ok = cast(Optional[bool], _call_if_exists("has_required_iv_series", ticker, df))
     if ok is not None:
         return bool(ok)
     iv_candidates = [f"{ticker}_IVOL_3M", f"{ticker}_IV_3M", f"{ticker}_IV3M", f"{ticker}_IVOL"]
     return _find_col(df, iv_candidates) is not None
 
+
 def _get_underlier_eod_raw(ticker: str, date: pd.Timestamp, df: pd.DataFrame) -> Optional[float]:
     for fn in ["get_price_on_entry", "get_underlier_on_entry", "get_underlying_eod", "get_underlying_price"]:
-        v = _call_if_exists(fn, ticker, date, df)
+        v = cast(Optional[float], _call_if_exists(fn, ticker, date, df))
         if v is not None:
             return float(v)
     price_col = _find_col(df, [f"{ticker}_PX_LAST", f"{ticker}_Close", f"{ticker}_AdjClose", f"{ticker}_PX_LAST_USD"])
     return _get_eod_value(df, price_col, date) if price_col else None
 
+
 def _get_iv3m_eod_raw(ticker: str, date: pd.Timestamp, direction: str, df: pd.DataFrame,
                       fallback_sigma: Optional[float] = None) -> Optional[float]:
-    v = _call_if_exists("get_entry_iv_3m", ticker, date, direction, df)
+    v = cast(Optional[float], _call_if_exists("get_entry_iv_3m", ticker, date, direction, df))
     if v is not None:
         return float(v)
-    v = _call_if_exists("get_exit_iv_3m", ticker, date, direction, df, fallback_sigma=fallback_sigma)
+    v = cast(Optional[float], _call_if_exists("get_exit_iv_3m", ticker, date, direction, df, fallback_sigma=fallback_sigma))
     if v is not None:
         return float(v)
     iv_col = _find_col(df, [f"{ticker}_IVOL_3M", f"{ticker}_IV_3M", f"{ticker}_IV3M", f"{ticker}_IVOL"])
     return _get_eod_value(df, iv_col, date) if iv_col else fallback_sigma
 
-def _build_option_strike(S0: float, direction: str) -> float:
-    K = _call_if_exists("build_option_strike", S0, direction)
-    return float(K) if K is not None else float(S0)
+
+def _build_option_strike(s0: float, direction: str) -> float:
+    k = cast(Optional[float], _call_if_exists("build_option_strike", s0, direction))
+    return float(k) if k is not None else float(s0)
+
 
 def _map_sigma_from_3m_to_T_raw(sigma_3m: float, tenor_bd: int, ticker: str,
                                 date: pd.Timestamp, df: pd.DataFrame) -> Optional[float]:
-    sig = _call_if_exists("map_sigma_from_3m_to_T", sigma_3m, tenor_bd, ticker, date, df)
+    sig = cast(Optional[float], _call_if_exists("map_sigma_from_3m_to_T", sigma_3m, tenor_bd, ticker, date, df))
     if sig is not None:
         return float(sig)
     if sigma_3m is None or not np.isfinite(sigma_3m) or sigma_3m <= 0:
@@ -297,23 +305,31 @@ def _map_sigma_from_3m_to_T_raw(sigma_3m: float, tenor_bd: int, ticker: str,
     mapped = float(sigma_3m) * (t_days / base_days) ** beta
     return max(1e-4, min(5.0, mapped))
 
+
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
-def _bs_price(S: float, K: float, T: float, r: float, sigma: float, option_type: str = "call", q: float = 0.0) -> float:
-    S = float(S); K = float(K); T = max(1e-6, float(T)); r = float(r); sigma = max(1e-6, float(sigma)); q = float(q)
-    d1 = (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
-    d2 = d1 - sigma * math.sqrt(T)
-    if option_type.lower().startswith("c"):
-        return S * math.exp(-q * T) * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
-    else:
-        return K * math.exp(-r * T) * _norm_cdf(-d2) - S * math.exp(-q * T) * _norm_cdf(-d1)
 
-def _price_entry_exit_fallback(S0: float, S1: float, K: float, T0_years: float, h_days: int, r: float,
+def _bs_price(s: float, k: float, t: float, r: float, sigma: float, option_type: str = "call", q: float = 0.0) -> float:
+    s = float(s)
+    k = float(k)
+    t = max(1e-6, float(t))
+    r = float(r)
+    sigma = max(1e-6, float(sigma))
+    q = float(q)
+    d1 = (math.log(s / k) + (r - q + 0.5 * sigma * sigma) * t) / (sigma * math.sqrt(t))
+    d2 = d1 - sigma * math.sqrt(t)
+    if option_type.lower().startswith("c"):
+        return s * math.exp(-q * t) * _norm_cdf(d1) - k * math.exp(-r * t) * _norm_cdf(d2)
+    else:
+        return k * math.exp(-r * t) * _norm_cdf(-d2) - s * math.exp(-q * t) * _norm_cdf(-d1)
+
+
+def _price_entry_exit_fallback(s0: float, s1: float, k: float, t0_years: float, h_days: int, r: float,
                                option_type: str, entry_sigma: float, exit_sigma: float, q: float = 0.0) -> Dict[str, float]:
-    T1_years = max(1e-6, (max(0, int(round(T0_years * 252))) - h_days) / 252.0)
-    entry_price = _bs_price(S0, K, T0_years, r, entry_sigma, option_type, q)
-    exit_price = _bs_price(S1, K, T1_years, r, exit_sigma, option_type, q)
+    t1_years = max(1e-6, (max(0, int(round(t0_years * 252))) - h_days) / 252.0)
+    entry_price = _bs_price(s0, k, t0_years, r, entry_sigma, option_type, q)
+    exit_price = _bs_price(s1, k, t1_years, r, exit_sigma, option_type, q)
     return {
         "entry_price": float(entry_price),
         "exit_price": float(exit_price),
@@ -322,7 +338,8 @@ def _price_entry_exit_fallback(S0: float, S1: float, K: float, T0_years: float, 
         "option_type": "C" if option_type.lower().startswith("c") else "P",
     }
 
-def _price_entry_exit(S0: float, S1: float, K: float, T0_years: float, h_days: int, r: float,
+
+def _price_entry_exit(s0: float, s1: float, k: float, t0_years: float, h_days: int, r: float,
                       direction: str, entry_sigma: float, exit_sigma: float, q: float = 0.0) -> Optional[Dict[str, float]]:
     """Try user pricing.price_entry_exit; else Black–Scholes fallback."""
     try:
@@ -333,11 +350,11 @@ def _price_entry_exit(S0: float, S1: float, K: float, T0_years: float, h_days: i
         except Exception:
             h_days_num = 0
 
-    result = _call_if_exists(
+    result = cast(Optional[Dict], _call_if_exists(
         "price_entry_exit",
-        S0=S0, S1=S1, K=K, T0=T0_years, h_days=h_days_num, r=r,
+        S0=s0, S1=s1, K=k, T0=t0_years, h_days=h_days_num, r=r,
         direction=direction, entry_sigma=entry_sigma, exit_sigma=exit_sigma, q=q
-    )
+    ))
     if result is not None:
         try:
             return {
@@ -351,4 +368,4 @@ def _price_entry_exit(S0: float, S1: float, K: float, T0_years: float, h_days: i
             pass
 
     opt_type = "call" if direction == "long" else "put"
-    return _price_entry_exit_fallback(S0, S1, K, T0_years, h_days_num, r, opt_type, entry_sigma, exit_sigma, q)
+    return _price_entry_exit_fallback(s0, s1, k, t0_years, h_days_num, r, opt_type, entry_sigma, exit_sigma, q)

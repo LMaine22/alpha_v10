@@ -10,12 +10,12 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 50
-    generations: int = 5
+    population_size: int = 60
+    generations: int = 6
     elitism_rate: float = 0.1
     mutation_rate: float = 0.2
-    seed: int = 31
-    setup_lengths_to_explore: List[int] = [2]
+    seed: int = 38
+    setup_lengths_to_explore: List[int] = [1,2]
 
     # Verbosity & debugging used by NSGA layer (added)
     verbose: int = 2              # 0..3 (2 = extra progress summaries)
@@ -29,14 +29,14 @@ class DataConfig(BaseModel):
     """Data Source and Ticker Configuration"""
     excel_file_path: str = 'data_store/raw/bb_data.xlsx'
     parquet_file_path: str = 'data_store/processed/bb_data.parquet'
-    start_date: date = date(2010, 1, 1)
-    end_date: date = date(2025, 9, 2)
+    start_date: date = date(2018, 1, 1)
+    end_date: date = date(2025, 9, 4)
     holdout_start_date: date = date(2023, 8, 27)
 
     # Finalized ticker lists
     tradable_tickers: List[str] = [
         'TSLA US Equity', 'CRWV US Equity', 'AMZN US Equity', 'QQQ US Equity',
-        'GOOGL US Equity', 'MSFT US Equity', 'AAPL US Equity', 'LLY US Equity',
+        'GOOGL US Equity', 'MSFT US Equity', 'AAPL US Equity', #'LLY US Equity',
         'AMD US Equity', 'MSTR US Equity', 'COIN US Equity', 'ARM US Equity'
         #'XLE US Equity', 'XLK US Equity', 'XLRE US Equity', 'XLC US Equity',
         #'XLV US Equity', 'XLP US Equity', 'SPY US Equity', 'QQQ US Equity',

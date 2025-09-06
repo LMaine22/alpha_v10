@@ -383,7 +383,7 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
                     corr_features[base] = delta
                     corr_features[f"{t}_invcorrDelta20_60__{_name_safe(lhs_name)}__{_name_safe(rhs_name)}"] = -delta
 
-    print(f" Built {len(corr_features)} correlation features (Option A).")
+    print(f" Built {len(corr_features)} correlation features.")
     all_features.update(corr_features)
 
     # --- Combine to DataFrame ---

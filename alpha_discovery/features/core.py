@@ -108,6 +108,7 @@ def get_realized_vol(price_series: pd.Series, window: int = 21) -> pd.Series:
     return log_returns.rolling(window).std() * np.sqrt(252)
 
 
+
 def garman_klass_vol(px_open, px_high, px_low, px_close, window: int = 21) -> pd.Series:
     O = pd.to_numeric(px_open, errors="coerce").clip(lower=1e-12)
     H = pd.to_numeric(px_high, errors="coerce").clip(lower=1e-12)
