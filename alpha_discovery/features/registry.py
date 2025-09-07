@@ -4,7 +4,7 @@ from typing import Dict, Callable, List, Tuple
 
 from ..config import settings
 from . import core as fcore  # fcore for "feature core"
-from ..data.events import build_event_features
+from ..data.events import build_event_features, build_per_event_type_features
 
 
 def _get_series(df: pd.DataFrame, ticker: str, column: str) -> pd.Series:
@@ -318,21 +318,34 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     print(f" Built {len(cross_asset_features)} cross-asset features.")
     all_features.update(cross_asset_features)
 
-    # --- EV_* Event Features (added once, then replicated per ticker) ---
+    # --- Event Features (consolidated) ---
     print("Building event features from economic calendar...")
     try:
+        # Standard EV features
         ev_df = build_event_features(df.index)
         if isinstance(ev_df, pd.DataFrame) and not ev_df.empty:
             ev_cols = ev_df.columns.tolist()
             for t in settings.data.tradable_tickers:
                 for col in ev_cols:
                     all_features[f"{t}_EV__{col}"] = pd.to_numeric(ev_df[col], errors="coerce").shift(1)
-            print(f"  Successfully built {len(ev_cols)} event features.")
-            print(f" Added {len(ev_cols) * len(settings.data.tradable_tickers)} EV_* per-ticker columns.")
+            print(f"  Built {len(ev_cols)} standard event features.")
         else:
-            print(" No EV_* features added (empty calendar or load issue).")
+            print("  No standard event features added.")
     except Exception as e:
-        print(f" Could not build EV_* features: {e}")
+        print(f"  Could not build standard event features: {e}")
+    
+    try:
+        # Per-event-type features
+        per_event_df = build_per_event_type_features(df.index, top_n_events=20)
+        if isinstance(per_event_df, pd.DataFrame) and not per_event_df.empty:
+            per_event_cols = per_event_df.columns.tolist()
+            for col in per_event_cols:
+                all_features[col] = pd.to_numeric(per_event_df[col], errors="coerce").shift(1)
+            print(f"  Built {len(per_event_cols)} per-event-type features.")
+        else:
+            print("  No per-event-type features added.")
+    except Exception as e:
+        print(f"  Could not build per-event-type features: {e}")
 
     # --- Option A: Correlation features (within-ticker + SPY driver) ---
     corr_features: Dict[str, pd.Series] = {}

@@ -161,6 +161,7 @@ def run_setup_backtest_options(
             if not _has_iv_for_ticker(ticker, master_df):
                 continue
 
+            # Regular multi-day horizons
             for h in TRADE_HORIZONS_DAYS:
                 tenor_bd = _choose_tenor_bd(h)
 
@@ -227,10 +228,13 @@ def run_setup_backtest_options(
                     time_cap_days=(exit_policy or {}).get("time_cap_days", getattr(settings.options, "exit_time_cap_days", None))
                         if isinstance(exit_policy, dict) else getattr(settings.options, "exit_time_cap_days", None),
                     # behavior knobs
-                    pt_behavior=(exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "exit")),
+                    pt_behavior=(exit_policy or {}).get("pt_behavior", "regime_aware") if exit_policy is None else (exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "regime_aware")),
                     armed_trail_frac=(exit_policy or {}).get("armed_trail_frac", getattr(settings.options, "armed_trail_frac", None)),
                     scale_out_frac=float((exit_policy or {}).get("scale_out_frac", getattr(settings.options, "scale_out_frac", 0.50))),
+                    # regime-aware settings
+                    regime_aware=(exit_policy or {}).get("regime_aware", True) if isinstance(exit_policy, dict) else True,
                 )
+                
 
                 # --- Build a stable policy id string up front
                 policy_str = _policy_id(pol, int(h))
@@ -364,7 +368,7 @@ def run_setup_backtest_options(
                 # ==============================
                 if not did_scale:
                     # --- NEW policy gate: Timebox → BE → Trail ---
-                    policy_mode = (exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "exit"))
+                    policy_mode = (exit_policy or {}).get("pt_behavior", "regime_aware") if exit_policy is None else (exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "exit"))
                     if str(policy_mode).lower() == "timebox_be_trail":
                         # Build safe parameter defaults for the new policy
                         be_mult = float((exit_policy or {}).get(
@@ -394,7 +398,8 @@ def run_setup_backtest_options(
                             price_path=price_path,
                             entry_exec_price=float(entry_exec),
                             horizon_days=int(h),
-                            policy=pol
+                            policy=pol,
+                            direction=direction
                         )
 
                     chosen_exit_date = price_path.index[min(exit_idx, len(price_path) - 1)]
@@ -438,8 +443,128 @@ def run_setup_backtest_options(
                         "holding_days_actual": int(holding_days_actual),
                     })
 
+            # Intraday patterns (if enabled)
+            if getattr(settings.options, "enable_intraday_patterns", False):
+                use_regular_horizons = getattr(settings.options, "intraday_use_regular_horizons", False)
+                
+                if use_regular_horizons:
+                    # Test intraday patterns with all regular horizons
+                    for pattern in getattr(settings.options, "intraday_patterns", []):
+                        for h in TRADE_HORIZONS_DAYS:
+                            _add_intraday_trade(rows, master_df, ticker, trigger_date, direction, pattern, h)
+                else:
+                    # Test intraday patterns with only 1-day horizon
+                    for pattern in getattr(settings.options, "intraday_patterns", []):
+                        _add_intraday_trade(rows, master_df, ticker, trigger_date, direction, pattern, 1)
+
     if not rows:
         return pd.DataFrame()
 
     ledger = pd.DataFrame(rows).sort_values(by=["trigger_date", "ticker", "horizon_days"]).reset_index(drop=True)
     return ledger
+
+
+def _add_intraday_trade(rows: list, master_df: pd.DataFrame, ticker: str, trigger_date: pd.Timestamp, 
+                       direction: str, pattern: str, horizon_days: int = 1) -> None:
+    """Add intraday trading patterns to the ledger."""
+    
+    if pattern == 'overnight':
+        # EOD entry → Next day open exit
+        entry_date = trigger_date
+        exit_date = _add_bdays(trigger_date, horizon_days)
+        entry_time = 'close'
+        exit_time = 'open'
+        horizon_desc = 'overnight'
+        
+    elif pattern == 'intraday':
+        # Open entry → Next day open exit  
+        entry_date = trigger_date
+        exit_date = _add_bdays(trigger_date, horizon_days)
+        entry_time = 'open'
+        exit_time = 'open'
+        horizon_desc = 'intraday'
+        
+    else:
+        return  # Unknown pattern
+    
+    # Get entry and exit underlying prices
+    S0 = _cached_underlier(master_df, ticker, entry_date)
+    S1 = _cached_underlier(master_df, ticker, exit_date)
+    
+    if S0 is None or S1 is None:
+        return
+        
+    # Get IV data
+    entry_iv3m = _cached_iv3m(master_df, ticker, entry_date, direction, fallback=None)
+    exit_iv3m = _cached_iv3m(master_df, ticker, exit_date, direction, fallback=entry_iv3m)
+    
+    if entry_iv3m is None or exit_iv3m is None:
+        return
+    
+    # Use 1-day tenor for intraday trades
+    tenor_bd = 1
+    K = _build_option_strike(S0, direction)
+    T0_years = tenor_bd / 252.0
+    slip = _slippage_for_tenor(tenor_bd)
+    
+    # Map sigma from 3M to 1-day
+    entry_sigma_T0 = _cached_sigma_map(master_df, ticker, entry_date, tenor_bd, entry_iv3m)
+    exit_sigma_T1 = _cached_sigma_map(master_df, ticker, exit_date, tenor_bd, exit_iv3m)
+    
+    if entry_sigma_T0 is None or exit_sigma_T1 is None:
+        return
+    
+    # Price the option
+    priced = _cached_price_entry_exit(
+        S0=S0, S1=S1, K=K, T0_years=T0_years, h_days=1, r=0.0,
+        direction="long" if direction == "long" else "short",
+        entry_sigma=entry_sigma_T0, exit_sigma=exit_sigma_T1, q=0.0
+    )
+    
+    if priced is None:
+        return
+    
+    # Calculate costs and P&L
+    entry_exec = float(priced["entry_price"]) * (1.0 + slip)
+    exit_exec = float(priced["exit_price"]) * (1.0 - slip)
+    
+    if entry_exec < getattr(settings.options, "min_premium", 0.30):
+        return
+    
+    # Simple position sizing
+    capital = getattr(settings.options, "capital_per_trade", 10000.0)
+    contract_mult = getattr(settings.options, "contract_multiplier", 100)
+    contracts = int(capital / (entry_exec * contract_mult))
+    
+    if contracts <= 0:
+        return
+    
+    cost_per_contract = entry_exec * contract_mult
+    capital_used = float(contracts) * cost_per_contract
+    pnl_dlr = (exit_exec - float(entry_exec)) * contracts * contract_mult
+    pnl_pc = pnl_dlr / capital if capital > 0 else 0.0
+    
+    # Add to ledger
+    rows.append({
+        "trigger_date": pd.Timestamp(trigger_date),
+        "exit_date": pd.Timestamp(exit_date),
+        "ticker": ticker,
+        "horizon_days": horizon_days,  # Use the specified horizon
+        "direction": direction,
+        "option_type": priced.get("option_type", "C" if direction == "long" else "P"),
+        "strike": float(K),
+        "entry_underlying": float(S0),
+        "exit_underlying": float(S1),
+        "entry_iv": float(priced["entry_iv"]),
+        "exit_iv": float(priced["exit_iv"]),
+        "entry_option_price": float(priced["entry_price"]),
+        "exit_option_price": float(priced["exit_price"]),
+        "contracts": contracts,
+        "capital_allocated": capital,
+        "capital_allocated_used": capital_used,
+        "pnl_dollars": pnl_dlr,
+        "pnl_pct": pnl_pc,
+        "exit_reason": f"{pattern}_pattern",  # Special exit reason for intraday patterns
+        "exit_policy_id": f"intraday_{pattern}",
+        "holding_days_actual": 1,
+    })

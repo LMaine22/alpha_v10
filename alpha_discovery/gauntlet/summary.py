@@ -189,3 +189,287 @@ def write_gauntlet_summary(
     _write_csv(out_path, final_df)
     print(f"Definitive gauntlet summary successfully generated at: {out_path}")
     return out_path
+
+
+def write_all_setups_summary(
+    run_dir: str,
+    full_oos_ledger: pd.DataFrame,
+) -> str:
+    """
+    Generate summary for ALL setups in the trade ledger, regardless of whether they passed gauntlet stages.
+    This provides visibility into all backtested strategies, not just the survivors.
+    """
+    if full_oos_ledger is None or full_oos_ledger.empty:
+        raise ValueError("No trade ledger data provided to write_all_setups_summary.")
+
+    gaunt_dir = os.path.join(run_dir, "gauntlet")
+    os.makedirs(gaunt_dir, exist_ok=True)
+
+    # Ledger normalization
+    led = full_oos_ledger.copy()
+    for dc in ["trigger_date", "entry_date", "exit_date"]:
+        if dc in led.columns:
+            led[dc] = pd.to_datetime(led[dc], errors="coerce")
+
+    # Recency key
+    recency_col = "trigger_date" if ("trigger_date" in led.columns and led["trigger_date"].notna().any()) else "entry_date"
+
+    # Setup key
+    setup_col = None
+    for c in ["setup_id", "Setup", "strategy_id", "StrategyID"]:
+        if c in led.columns:
+            setup_col = c
+            break
+    if setup_col is None:
+        led["_tmp_setup_id"] = "unknown"
+        setup_col = "_tmp_setup_id"
+
+    # Per-setup recency
+    recency = (
+        led.groupby(setup_col)[recency_col]
+        .agg(oos_first_trigger="min", oos_last_trigger="max")
+        .reset_index()
+        .rename(columns={setup_col: "setup_id"})
+    )
+
+    # Open/closed counts
+    led["is_open"] = led["exit_date"].isna() if "exit_date" in led.columns else False
+    counts = (
+        led.groupby(setup_col)["is_open"].agg(oos_open_trades="sum", oos_total_trades="count")
+        .reset_index().rename(columns={setup_col: "setup_id"})
+    )
+    counts["oos_closed_trades"] = counts["oos_total_trades"] - counts["oos_open_trades"]
+
+    # Data end (for days-since-last-trigger)
+    data_end_candidates = [led[dc].max() for dc in ["trigger_date", "entry_date", "exit_date"] if dc in led.columns]
+    data_end = max([d for d in data_end_candidates if pd.notnull(d)]) if data_end_candidates else pd.NaT
+
+    # OOS performance aggregates per setup (include unrealized PnL for OPEN)
+    realized = pd.to_numeric(led.get("pnl_dollars", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    unreal = pd.to_numeric(led.get("unrealized_pnl", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    is_open = led["is_open"].astype(bool)
+    led["_oos_total_pnl"] = realized + (unreal.where(is_open, 0.0))
+
+    agg = led.groupby(setup_col).agg(
+        oos_sum_pnl_dollars=("_oos_total_pnl", "sum"),
+        origin_fold=("fold", "first") if "fold" in led.columns else (setup_col, "size"),
+    ).reset_index().rename(columns={setup_col: "setup_id"})
+
+    # NAV base capital — use REPORTING config
+    oos_initial_nav = float(getattr(settings.reporting, "base_capital_for_portfolio", 100000.0))
+    agg["oos_final_nav"] = oos_initial_nav + agg["oos_sum_pnl_dollars"].astype(float)
+    agg["oos_nav_total_return_pct"] = (agg["oos_final_nav"] / oos_initial_nav - 1.0) * 100.0
+    if "origin_fold" in agg.columns:
+        agg = agg.rename(columns={"origin_fold": "fold"})
+        try:
+            agg["fold"] = agg["fold"].astype(int)
+        except Exception:
+            pass
+
+    # Merge TRAIN artifacts to get additional setup information
+    pareto_df, _ = read_global_artifacts(run_dir)
+    if not pareto_df.empty:
+        pareto_df["setup_id"] = pareto_df["setup_id"].astype(str)
+        # Only join on 'fold' if BOTH sides have it
+        if ("fold" in agg.columns) and ("fold" in pareto_df.columns):
+            final_df = agg.merge(pareto_df, on=["setup_id", "fold"], how="left", suffixes=("", ""))
+        else:
+            final_df = agg.merge(pareto_df, on="setup_id", how="left", suffixes=("", ""))
+    else:
+        final_df = agg
+
+    # Final join with recency and counts
+    final_df = (
+        final_df.merge(recency, on="setup_id", how="left")
+        .merge(counts, on="setup_id", how="left")
+    )
+
+    # Days since last trigger
+    if "oos_last_trigger" in final_df.columns and pd.notnull(data_end):
+        final_df["oos_days_since_last_trigger"] = (
+            pd.to_datetime(data_end) - pd.to_datetime(final_df["oos_last_trigger"]).dt.tz_localize(None)
+        ).dt.days
+
+    # Column order - prioritize OOS performance metrics since this is about all setups
+    col_order = [
+        # IDs / meta
+        "setup_id", "fold", "rank", "specialized_ticker", "direction", "description", "signal_ids",
+        # OOS activity + performance (most important for all-setups view)
+        "oos_first_trigger", "oos_last_trigger", "oos_days_since_last_trigger",
+        "oos_total_trades", "oos_open_trades", "oos_closed_trades",
+        "oos_sum_pnl_dollars", "oos_final_nav", "oos_nav_total_return_pct",
+        # TRAIN perf snapshot
+        "support", "trades_count", "sum_pnl_dollars", "nav_total_return_pct", "final_nav",
+        "first_trigger_date", "last_trigger_date", "best_performing_ticker",
+        "sharpe_lb", "sharpe_median", "sharpe_ub", "sortino_lb", "sortino_median", "sortino_ub",
+        "omega_ratio", "max_drawdown", "sum_capital_allocated",
+    ]
+    existing_cols = [c for c in col_order if c in final_df.columns]
+    final_df = final_df[existing_cols + [c for c in final_df.columns if c not in existing_cols]]
+
+    # Sort by OOS performance (descending PnL, then by recency)
+    sort_cols = []
+    if "oos_sum_pnl_dollars" in final_df.columns:
+        sort_cols.append(("oos_sum_pnl_dollars", False))  # Descending
+    if "oos_days_since_last_trigger" in final_df.columns:
+        sort_cols.append(("oos_days_since_last_trigger", True))  # Ascending (more recent first)
+    if sort_cols:
+        final_df = final_df.sort_values(by=[c for c, _ in sort_cols], ascending=[a for _, a in sort_cols])
+
+    out_path = os.path.join(gaunt_dir, "all_setups_summary.csv")
+    _write_csv(out_path, final_df)
+    print(f"All setups summary successfully generated at: {out_path}")
+    return out_path
+
+
+def write_open_trades_summary(
+    run_dir: str,
+    full_oos_ledger: pd.DataFrame,
+) -> str:
+    """
+    Generate summary for setups that currently have open trades.
+    This is a filtered version of the all_setups_summary showing only active positions.
+    """
+    if full_oos_ledger is None or full_oos_ledger.empty:
+        raise ValueError("No trade ledger data provided to write_open_trades_summary.")
+
+    gaunt_dir = os.path.join(run_dir, "gauntlet")
+    os.makedirs(gaunt_dir, exist_ok=True)
+
+    # Ledger normalization
+    led = full_oos_ledger.copy()
+    for dc in ["trigger_date", "entry_date", "exit_date"]:
+        if dc in led.columns:
+            led[dc] = pd.to_datetime(led[dc], errors="coerce")
+
+    # Setup key
+    setup_col = None
+    for c in ["setup_id", "Setup", "strategy_id", "StrategyID"]:
+        if c in led.columns:
+            setup_col = c
+            break
+    if setup_col is None:
+        led["_tmp_setup_id"] = "unknown"
+        setup_col = "_tmp_setup_id"
+
+    # Identify setups with open trades
+    led["is_open"] = led["exit_date"].isna() if "exit_date" in led.columns else False
+    setups_with_open_trades = led[led["is_open"]][setup_col].unique()
+    
+    if len(setups_with_open_trades) == 0:
+        print("No setups have open trades. Creating empty open trades summary.")
+        # Create empty summary with same structure as all_setups_summary
+        empty_df = pd.DataFrame(columns=[
+            "setup_id", "fold", "rank", "specialized_ticker", "direction", "description", "signal_ids",
+            "oos_first_trigger", "oos_last_trigger", "oos_days_since_last_trigger",
+            "oos_total_trades", "oos_open_trades", "oos_closed_trades",
+            "oos_sum_pnl_dollars", "oos_final_nav", "oos_nav_total_return_pct"
+        ])
+        out_path = os.path.join(gaunt_dir, "open_trades_summary.csv")
+        _write_csv(out_path, empty_df)
+        print(f"Empty open trades summary generated at: {out_path}")
+        return out_path
+
+    # Filter ledger to only setups with open trades
+    led_open = led[led[setup_col].isin(setups_with_open_trades)].copy()
+    
+    # Recency key
+    recency_col = "trigger_date" if ("trigger_date" in led_open.columns and led_open["trigger_date"].notna().any()) else "entry_date"
+
+    # Per-setup recency
+    recency = (
+        led_open.groupby(setup_col)[recency_col]
+        .agg(oos_first_trigger="min", oos_last_trigger="max")
+        .reset_index()
+        .rename(columns={setup_col: "setup_id"})
+    )
+
+    # Open/closed counts
+    counts = (
+        led_open.groupby(setup_col)["is_open"].agg(oos_open_trades="sum", oos_total_trades="count")
+        .reset_index().rename(columns={setup_col: "setup_id"})
+    )
+    counts["oos_closed_trades"] = counts["oos_total_trades"] - counts["oos_open_trades"]
+
+    # Data end (for days-since-last-trigger)
+    data_end_candidates = [led_open[dc].max() for dc in ["trigger_date", "entry_date", "exit_date"] if dc in led_open.columns]
+    data_end = max([d for d in data_end_candidates if pd.notnull(d)]) if data_end_candidates else pd.NaT
+
+    # OOS performance aggregates per setup (include unrealized PnL for OPEN)
+    realized = pd.to_numeric(led_open.get("pnl_dollars", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    unreal = pd.to_numeric(led_open.get("unrealized_pnl", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    is_open = led_open["is_open"].astype(bool)
+    led_open["_oos_total_pnl"] = realized + (unreal.where(is_open, 0.0))
+
+    agg = led_open.groupby(setup_col).agg(
+        oos_sum_pnl_dollars=("_oos_total_pnl", "sum"),
+        origin_fold=("fold", "first") if "fold" in led_open.columns else (setup_col, "size"),
+    ).reset_index().rename(columns={setup_col: "setup_id"})
+
+    # NAV base capital — use REPORTING config
+    oos_initial_nav = float(getattr(settings.reporting, "base_capital_for_portfolio", 100000.0))
+    agg["oos_final_nav"] = oos_initial_nav + agg["oos_sum_pnl_dollars"].astype(float)
+    agg["oos_nav_total_return_pct"] = (agg["oos_final_nav"] / oos_initial_nav - 1.0) * 100.0
+    if "origin_fold" in agg.columns:
+        agg = agg.rename(columns={"origin_fold": "fold"})
+        try:
+            agg["fold"] = agg["fold"].astype(int)
+        except Exception:
+            pass
+
+    # Merge TRAIN artifacts to get additional setup information
+    pareto_df, _ = read_global_artifacts(run_dir)
+    if not pareto_df.empty:
+        pareto_df["setup_id"] = pareto_df["setup_id"].astype(str)
+        # Only join on 'fold' if BOTH sides have it
+        if ("fold" in agg.columns) and ("fold" in pareto_df.columns):
+            final_df = agg.merge(pareto_df, on=["setup_id", "fold"], how="left", suffixes=("", ""))
+        else:
+            final_df = agg.merge(pareto_df, on="setup_id", how="left", suffixes=("", ""))
+    else:
+        final_df = agg
+
+    # Final join with recency and counts
+    final_df = (
+        final_df.merge(recency, on="setup_id", how="left")
+        .merge(counts, on="setup_id", how="left")
+    )
+
+    # Days since last trigger
+    if "oos_last_trigger" in final_df.columns and pd.notnull(data_end):
+        final_df["oos_days_since_last_trigger"] = (
+            pd.to_datetime(data_end) - pd.to_datetime(final_df["oos_last_trigger"]).dt.tz_localize(None)
+        ).dt.days
+
+    # Column order - prioritize OOS performance metrics and open trade info
+    col_order = [
+        # IDs / meta
+        "setup_id", "fold", "rank", "specialized_ticker", "direction", "description", "signal_ids",
+        # OOS activity + performance (most important for open trades view)
+        "oos_first_trigger", "oos_last_trigger", "oos_days_since_last_trigger",
+        "oos_total_trades", "oos_open_trades", "oos_closed_trades",
+        "oos_sum_pnl_dollars", "oos_final_nav", "oos_nav_total_return_pct",
+        # TRAIN perf snapshot
+        "support", "trades_count", "sum_pnl_dollars", "nav_total_return_pct", "final_nav",
+        "first_trigger_date", "last_trigger_date", "best_performing_ticker",
+        "sharpe_lb", "sharpe_median", "sharpe_ub", "sortino_lb", "sortino_median", "sortino_ub",
+        "omega_ratio", "max_drawdown", "sum_capital_allocated",
+    ]
+    existing_cols = [c for c in col_order if c in final_df.columns]
+    final_df = final_df[existing_cols + [c for c in final_df.columns if c not in existing_cols]]
+
+    # Sort by open trades count (descending) then by OOS performance
+    sort_cols = []
+    if "oos_open_trades" in final_df.columns:
+        sort_cols.append(("oos_open_trades", False))  # Descending (most open trades first)
+    if "oos_sum_pnl_dollars" in final_df.columns:
+        sort_cols.append(("oos_sum_pnl_dollars", False))  # Descending
+    if "oos_days_since_last_trigger" in final_df.columns:
+        sort_cols.append(("oos_days_since_last_trigger", True))  # Ascending (more recent first)
+    if sort_cols:
+        final_df = final_df.sort_values(by=[c for c, _ in sort_cols], ascending=[a for _, a in sort_cols])
+
+    out_path = os.path.join(gaunt_dir, "open_trades_summary.csv")
+    _write_csv(out_path, final_df)
+    print(f"Open trades summary successfully generated at: {out_path} ({len(final_df)} setups with open trades)")
+    return out_path

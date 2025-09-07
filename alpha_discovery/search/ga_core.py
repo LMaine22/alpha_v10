@@ -29,39 +29,16 @@ JOBLIB_VERBOSE: int = 0
 # Exit policy: read directly from config (NO GA grids / mutation here).
 # ---------------------------------------------------------------------
 def _exit_policy_from_settings() -> Optional[Dict]:
-    """Build a per-eval exit_policy dict straight from settings.options."""
+    """Build exit policy with regime-aware options enabled."""
     if not getattr(settings.options, "exit_policies_enabled", True):
         return None
 
-    pb = str(getattr(settings.options, "pt_behavior", "arm_trail")).lower()
-
-    # Common keys
+    # Enable regime-aware exits
     pol: Dict = {
-        "pt_behavior": pb,
-        "sl_multiple": getattr(settings.options, "exit_sl_multiple", None),
-        "time_cap_days": getattr(settings.options, "exit_time_cap_days", None),
+        "pt_behavior": "regime_aware",
+        "regime_aware": True,
+        "enabled": True,
     }
-
-    if pb == "timebox_be_trail":
-        # New policy keys
-        pol.update({
-            "be_trigger_multiple": float(getattr(settings.options, "be_trigger_multiple", 1.25)),
-            "trail_arm_multiple": float(getattr(settings.options, "trail_arm_multiple", 1.40)),
-            # Use config trail if provided; otherwise safe default 0.80
-            "trail_frac": (
-                getattr(settings.options, "exit_trail_frac", None)
-                if getattr(settings.options, "exit_trail_frac", None) is not None
-                else 0.80
-            ),
-        })
-    else:
-        # Legacy PT+Trail family keys
-        pol.update({
-            "pt_multiple": getattr(settings.options, "exit_pt_multiple", None),
-            "trail_frac": getattr(settings.options, "exit_trail_frac", None),
-            "armed_trail_frac": getattr(settings.options, "armed_trail_frac", None),
-            "scale_out_frac": float(getattr(settings.options, "scale_out_frac", 0.0)),
-        })
 
     return pol
 

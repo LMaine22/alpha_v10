@@ -12,11 +12,15 @@ Event calendar loader + daily EV_* feature builder (expanded).
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Tuple, Optional
 
 import numpy as np
 import pandas as pd
 from pandas.tseries.offsets import BDay
+
+# Suppress pandas FutureWarnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
 
 # ---------------------------------------------------------------------
 # Project settings and helpers (safe fallbacks if imports missing)
@@ -267,7 +271,7 @@ def build_event_features(full_data_index: pd.DatetimeIndex) -> pd.DataFrame:
       EV_clustered_tail_count_5,
       EV_infl_vs_growth_divergence
     """
-    print("Building event features from economic calendar...")
+    # Building event features from economic calendar...
 
     # Settings / thresholds (with safe defaults)
     conf = getattr(settings, "events", object())
@@ -464,18 +468,22 @@ def build_event_features(full_data_index: pd.DatetimeIndex) -> pd.DataFrame:
     # Revision polarity memory (last 3 per type → daily mean)
     cal_sorted = cal.sort_values("release_day")
     cal_sorted["rev_sign"] = np.sign(cal_sorted["revision_z"]).fillna(0.0)
-    mem = cal_sorted.groupby("event_type").apply(
-        lambda g: g.set_index("release_day")["rev_sign"].rolling(3, min_periods=1).mean().shift(1)
-    ).reset_index(level=0, drop=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        mem = cal_sorted.groupby("event_type").apply(
+            lambda g: g.set_index("release_day")["rev_sign"].rolling(3, min_periods=1).mean().shift(1)
+        ).reset_index(level=0, drop=True)
     # mem has duplicate dates by design; average them to a single daily value
     rev_mem_daily = mem.groupby(mem.index).mean()
     rev_mem_daily = rev_mem_daily[~rev_mem_daily.index.duplicated(keep="last")]
     out["EV_revision_polarity_memory_3"] = _lag_bday(rev_mem_daily, lag).reindex(uni_index).astype(float).fillna(0.0)
 
     # Revision volatility regime (rolling std per type → daily avg)
-    rev_vol = cal.groupby("event_type").apply(
-        lambda g: g.set_index("release_day")["revision_z"].rolling(252, min_periods=30).std().shift(1)
-    ).reset_index(level=0, drop=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        rev_vol = cal.groupby("event_type").apply(
+            lambda g: g.set_index("release_day")["revision_z"].rolling(252, min_periods=30).std().shift(1)
+        ).reset_index(level=0, drop=True)
     rev_vol_daily = rev_vol.groupby(rev_vol.index).mean()
     rev_vol_daily = rev_vol_daily[~rev_vol_daily.index.duplicated(keep="last")]
     out["EV_revision_vol_252"] = _lag_bday(rev_vol_daily, lag).reindex(uni_index).astype(float).fillna(0.0)
@@ -507,7 +515,7 @@ def build_event_features(full_data_index: pd.DatetimeIndex) -> pd.DataFrame:
     for c in out.columns:
         out[c] = pd.to_numeric(out[c], errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    print(f"  Successfully built {len(out.columns)} event features.")
+    # Successfully built event features
 
     # -------------------------------------------------------------
     # Debug printing / optional dumps (OFF by default; enable via settings)
@@ -543,3 +551,209 @@ def build_event_features(full_data_index: pd.DatetimeIndex) -> pd.DataFrame:
     # Project back to the original (possibly duplicated) base_index
     # -----------------------------------------------------------------
     return out.reindex(base_index)
+
+
+def build_per_event_type_features(full_data_index: pd.DatetimeIndex, top_n_events: int = 20) -> pd.DataFrame:
+    """
+    Build per-event-type EV features for the top N most frequent event types.
+    
+    Creates features like:
+    - CPI_tail_flag_1p5
+    - Nonfarm Payrolls_surprise_dispersion_day
+    - FOMC Rate Decision_revision_z
+    etc.
+    
+    Args:
+        full_data_index: Trading calendar index
+        top_n_events: Number of top event types to include (default 20)
+    
+    Returns:
+        DataFrame with per-event-type features for each ticker
+    """
+    # Building per-event-type features for top N event types
+    
+    # Get top event types
+    cal = _load_calendar()
+    if cal.empty:
+        return pd.DataFrame(index=full_data_index)
+    
+    top_events = cal['event_type'].value_counts().head(top_n_events).index.tolist()
+    
+    # Normalize trading index
+    base_index = pd.DatetimeIndex(full_data_index).tz_localize(None)
+    uni_index = pd.DatetimeIndex(base_index.drop_duplicates(keep="first"))
+    
+    # Get all tradable tickers from config
+    try:
+        from ..config import settings
+        tickers = getattr(settings.data, "tradable_tickers", [])
+    except:
+        tickers = ['AAPL US Equity', 'MSFT US Equity', 'QQQ US Equity']  # fallback
+    
+    # Build features for each ticker
+    all_features = {}
+    
+    for ticker in tickers:
+        ticker_features = {}
+        
+        for event_type in top_events:
+            # Filter calendar for this event type
+            event_cal = cal[cal['event_type'] == event_type].copy()
+            if event_cal.empty:
+                continue
+                
+            # Process this event type
+            event_features = _build_single_event_type_features(
+                event_cal, event_type, uni_index, ticker
+            )
+            ticker_features.update(event_features)
+        
+        # Add ticker prefix to all features
+        for feature_name, feature_series in ticker_features.items():
+            all_features[f"{ticker}_{feature_name}"] = feature_series
+    
+    # Combine all features
+    result_df = pd.DataFrame(all_features, index=uni_index)
+    return result_df.reindex(base_index).fillna(0.0)
+
+
+def _build_single_event_type_features(event_cal: pd.DataFrame, event_type: str, 
+                                    uni_index: pd.DatetimeIndex, ticker: str) -> dict:
+    """Build EV features for a single event type."""
+    
+    # Clean event type name for feature naming
+    clean_name = event_type.replace(" ", "_").replace(".", "").replace(",", "").replace("(", "").replace(")", "")
+    
+    # Settings
+    conf = getattr(settings, "events", object())
+    pre = int(getattr(conf, "pre_window_days", DEFAULT_PRE_WINDOW))
+    post = int(getattr(conf, "post_window_days", DEFAULT_POST_WINDOW))
+    lag = int(getattr(conf, "post_release_lag_days", DEFAULT_POST_LAG))
+    hi_rel = float(getattr(conf, "high_relevance_threshold", DEFAULT_HIGH_RELEVANCE))
+    
+    # Process the event data
+    event_cal = event_cal.sort_values("release_day").reset_index(drop=True)
+    
+    # For single event type, we need to handle the grouped functions differently
+    if len(event_cal) > 0:
+        # Calculate surprise_z for single event type
+        surprise_series = _std_grouped_surprise(event_cal)
+        if isinstance(surprise_series, pd.Series):
+            event_cal["surprise_z"] = surprise_series
+        else:
+            event_cal["surprise_z"] = 0.0
+            
+        # Calculate revision_z for single event type  
+        revision_series = _std_grouped_revision(event_cal)
+        if isinstance(revision_series, pd.Series):
+            event_cal["revision_z"] = revision_series
+        else:
+            event_cal["revision_z"] = 0.0
+    else:
+        event_cal["surprise_z"] = 0.0
+        event_cal["revision_z"] = 0.0
+    event_cal["net_info_surprise"] = event_cal["surprise_z"] + 0.7 * event_cal["revision_z"].fillna(0.0)
+    
+    # Handle signed_surprise_pct for single event type
+    if len(event_cal) > 0:
+        signed_pct_series = _expanding_signed_percentile(event_cal, event_cal["surprise_z"])
+        if isinstance(signed_pct_series, pd.Series):
+            event_cal["signed_surprise_pct"] = signed_pct_series
+        else:
+            event_cal["signed_surprise_pct"] = 0.0
+    else:
+        event_cal["signed_surprise_pct"] = 0.0
+    
+    event_cal["is_high_impact"] = (event_cal["relevance"] >= hi_rel).astype(int)
+    event_cal["is_tail_1p5"] = (event_cal["surprise_z"].abs() > 1.5).astype(int)
+    event_cal["is_tail_2p5"] = (event_cal["surprise_z"].abs() > 2.5).astype(int)
+    
+    # Relevance weighting
+    w = event_cal["relevance"].clip(0, 100) ** 0.5
+    event_cal["w_surprise"] = event_cal["surprise_z"] * w
+    event_cal["w_net_info"] = event_cal["net_info_surprise"] * w
+    event_cal["w_signed_pct"] = event_cal["signed_surprise_pct"] * w
+    
+    # Daily aggregation
+    daily = event_cal.groupby("release_day").agg({
+        "w_surprise": "sum",
+        "w_net_info": "sum", 
+        "w_signed_pct": "sum",
+        "surprise_z": "mean",
+        "is_high_impact": "sum",
+        "is_tail_1p5": "sum",
+        "is_tail_2p5": "sum",
+        "relevance": "mean"
+    }).fillna(0.0)
+    
+    # Normalize weights
+    daily["surprise_wavg"] = daily["w_surprise"] / daily["relevance"].clip(1.0)
+    daily["net_info_wavg"] = daily["w_net_info"] / daily["relevance"].clip(1.0)
+    daily["signed_pct_wavg"] = daily["w_signed_pct"] / daily["relevance"].clip(1.0)
+    
+    # Additional features
+    daily["surprise_dispersion_day"] = event_cal.groupby("release_day")["surprise_z"].std()
+    daily["tail_any"] = (daily["is_tail_1p5"] > 0).astype(int)
+    
+    # Reindex to trading calendar
+    daily = daily.reindex(uni_index).fillna(0.0)
+    
+    # Business-day lag helper
+    def _lag_bday(s: pd.Series, k: int) -> pd.Series:
+        s2 = pd.Series(s.values, index=pd.DatetimeIndex(s.index) + BDay(k))
+        return s2[~s2.index.duplicated(keep="last")]
+    
+    # Apply lag and create features
+    features = {}
+    
+    # Core features
+    features[f"{clean_name}_after_surprise_z"] = _lag_bday(daily["surprise_wavg"], lag).reindex(uni_index).fillna(0.0)
+    features[f"{clean_name}_after_pos"] = (_lag_bday(daily["surprise_wavg"], lag).reindex(uni_index) > 0).fillna(False).astype(int)
+    features[f"{clean_name}_after_neg"] = (_lag_bday(daily["surprise_wavg"], lag).reindex(uni_index) < 0).fillna(False).astype(int)
+    features[f"{clean_name}_signed_surprise_percentile"] = _lag_bday(daily["signed_pct_wavg"], lag).reindex(uni_index).fillna(0.0)
+    features[f"{clean_name}_surprise_dispersion_day"] = _lag_bday(daily["surprise_dispersion_day"], lag).reindex(uni_index).fillna(0.0)
+    features[f"{clean_name}_tail_flag_1p5"] = _lag_bday(daily["is_tail_1p5"], lag).reindex(uni_index).fillna(0).astype(int)
+    features[f"{clean_name}_tail_flag_2p5"] = _lag_bday(daily["is_tail_2p5"], lag).reindex(uni_index).fillna(0).astype(int)
+    features[f"{clean_name}_net_info_surprise"] = _lag_bday(daily["net_info_wavg"], lag).reindex(uni_index).fillna(0.0)
+    
+    # Revision features
+    if "revision_z" in event_cal.columns:
+        rev_daily = event_cal.groupby("release_day")["revision_z"].mean()
+        rev_daily = rev_daily[~rev_daily.index.duplicated(keep="last")]
+        features[f"{clean_name}_revision_z"] = _lag_bday(rev_daily, lag).reindex(uni_index).fillna(0.0)
+        
+        rev_tail = event_cal.groupby("release_day")["revision_z"].apply(lambda s: int((s.abs() > 2.0).any()))
+        rev_tail = rev_tail[~rev_tail.index.duplicated(keep="last")]
+        features[f"{clean_name}_revision_tail_flag"] = _lag_bday(rev_tail, lag).reindex(uni_index).fillna(0).astype(int)
+    
+    # Calendar features
+    high_dates = sorted(pd.to_datetime(event_cal.loc[event_cal["is_high_impact"].eq(1), "release_day"].dropna().unique()))
+    if high_dates:
+        # Days to next high-impact event
+        next_idx = pd.Series(pd.NaT, index=uni_index)
+        hi = pd.DatetimeIndex(high_dates)
+        j = 0
+        for d in uni_index:
+            while j < len(hi) and hi[j] < d:
+                j += 1
+            next_idx.loc[d] = hi[j] if j < len(hi) else pd.NaT
+        td = pd.to_timedelta(next_idx - uni_index)
+        features[f"{clean_name}_days_to_high"] = pd.Series(td, index=uni_index).dt.days.clip(lower=0).fillna(0).astype(float)
+        
+        # Event window flags
+        in_window = pd.Series(0, index=uni_index)
+        pre_window = pd.Series(0, index=uni_index)
+        for d in high_dates:
+            start_pre = d - pd.Timedelta(days=pre)
+            end_post = d + pd.Timedelta(days=post)
+            in_window.loc[start_pre:end_post] = 1
+            if pre > 0:
+                pre_window.loc[start_pre:(d - pd.Timedelta(days=1))] = 1
+        features[f"{clean_name}_in_window"] = in_window
+        features[f"{clean_name}_pre_window"] = pre_window
+    else:
+        features[f"{clean_name}_days_to_high"] = pd.Series(0.0, index=uni_index)
+        features[f"{clean_name}_in_window"] = pd.Series(0, index=uni_index)
+        features[f"{clean_name}_pre_window"] = pd.Series(0, index=uni_index)
+    
+    return features

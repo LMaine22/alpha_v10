@@ -13,7 +13,7 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [3]
+TRADE_HORIZONS_DAYS = [1, 3, 5, 10]
 
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
@@ -64,9 +64,11 @@ class ExitPolicy:
     time_cap_days: int | None = None  # if None, defaults to horizon
 
     # NEW behavior knobs (read from settings or GA policy dict)
-    pt_behavior: str = "exit"         # 'exit' | 'arm_trail' | 'scale_out'
+    pt_behavior: str = "exit"         # 'exit' | 'arm_trail' | 'scale_out' | 'regime_aware'
     armed_trail_frac: float | None = None
     scale_out_frac: float = 0.50
+    # regime-aware settings
+    regime_aware: bool = False
 
     def is_noop(self) -> bool:
         return (self.pt_multiple is None and
@@ -175,17 +177,19 @@ def _decide_exit_with_scale_out(price_path: pd.Series,
 def _decide_exit_from_path(price_path: pd.Series,
                            entry_exec_price: float,
                            horizon_days: int,
-                           policy: ExitPolicy) -> Tuple[int, str, int]:
+                           policy: ExitPolicy,
+                           direction: str = "long") -> Tuple[int, str, int]:
     """
     Single-leg exit decision on an option price path with:
       - Profit Target (PT)
       - Trailing Stop (TS)
       - Stop-Loss (SL)
       - Time cap / Horizon fallback
+      - Regime-aware exits (if enabled)
 
     Returns:
         exit_idx (int): 0-based index into price_path where we exit
-        exit_reason (str): 'profit_target' | 'trailing_stop' | 'stop_loss' | 'time_stop' | 'horizon'
+        exit_reason (str): 'profit_target' | 'trailing_stop' | 'stop_loss' | 'time_stop' | 'horizon' | regime-aware reasons
         holding_days_actual (int): equals exit_idx (0...len(path)-1)
     """
     n = len(price_path)
@@ -201,7 +205,16 @@ def _decide_exit_from_path(price_path: pd.Series,
     # Slice path up to cap
     p = price_path.iloc[: last_idx + 1].astype(float).values
 
-    # Tripwires (None => disabled)
+    # Regime-aware exits (if enabled) - check FIRST
+    if policy.regime_aware or policy.pt_behavior == "regime_aware":
+        regime_exit_idx, regime_reason = _check_regime_aware_exit_options(
+            price_path, entry_exec_price, horizon_days, policy, direction
+        )
+        if regime_exit_idx is not None:
+            return int(regime_exit_idx), regime_reason, int(regime_exit_idx)
+        # If regime-aware exits are enabled but none triggered, fall through to traditional logic
+
+    # Traditional tripwires (only if regime-aware not enabled or no regime-aware exits triggered)
     # Profit Target
     pt_idx = None
     if policy.enabled and policy.pt_multiple is not None and policy.pt_multiple > 0:
@@ -238,6 +251,81 @@ def _decide_exit_from_path(price_path: pd.Series,
     final_idx = last_idx
     final_reason = "horizon" if time_cap == int(horizon_days) else "time_stop"
     return int(final_idx), final_reason, int(final_idx)
+
+
+def _check_regime_aware_exit_options(
+    price_path: pd.Series,
+    entry_exec_price: float,
+    horizon_days: int,
+    policy: ExitPolicy,
+    direction: str = "long"
+) -> Tuple[Optional[int], str]:
+    """
+    Check for regime-aware exit conditions on option prices.
+    
+    This function implements regime-aware exit logic specifically for options trading,
+    considering volatility regimes, time decay, and market conditions.
+    
+    Returns:
+        exit_idx (Optional[int]): Index where to exit, or None if no exit
+        exit_reason (str): Reason for exit
+    """
+    p = np.asarray(price_path, dtype=float)
+    n = len(p)
+    if n == 0:
+        return None, "horizon"
+    
+    entry = float(entry_exec_price)
+    
+    # Process each day in the price path
+    for i in range(n):
+        current_date = price_path.index[i]
+        option_price = p[i]
+        days_held = i
+        
+        # 1. Gap stop (large overnight moves AGAINST position in option price)
+        if i > 0:
+            prev_price = p[i-1]
+            gap_pct = (option_price - prev_price) / prev_price if prev_price > 0 else 0
+            
+            # Only gap stop on adverse moves (gaps down for long positions)
+            if direction == "long" and gap_pct < -0.30:  # 30% gap down for long positions
+                return i, "gap_stop"
+            elif direction == "short" and gap_pct > 0.30:  # 30% gap up for short positions
+                return i, "gap_stop"
+        
+        # 2. Profit target based on option price appreciation
+        profit_pct = (option_price - entry) / entry if entry > 0 else 0
+        if profit_pct >= 0.50:  # 50% profit target
+            return i, "pt_hit_legA"
+        
+        # 3. ATR-based trailing stop (simplified for options)
+        if i > 0:
+            # Simple trailing stop: if option price drops below 70% of entry
+            trail_threshold = entry * 0.70
+            if option_price <= trail_threshold:
+                return i, "atr_trail_hit"
+        
+        # 4. Time-based exit (theta decay)
+        if days_held >= 5:  # Exit after 5 days to avoid theta decay
+            return i, "theta_stop"
+        
+        # 5. Volatility spike detection (simplified)
+        if i > 0:
+            price_change_pct = abs(option_price - p[i-1]) / p[i-1] if p[i-1] > 0 else 0
+            if price_change_pct > 0.25:  # 25% daily change threshold
+                return i, "panic"
+        
+        # 6. Momentum failure (simplified)
+        if i >= 3:  # After 3 days, check for momentum
+            recent_prices = p[max(0, i-2):i+1]
+            if len(recent_prices) >= 3:
+                # Check if price is declining
+                if recent_prices[-1] < recent_prices[-2] < recent_prices[-3]:
+                    return i, "momentum_fail"
+    
+    # No regime-aware exit triggered
+    return None, "horizon"
 
 
 # ---------------- Pricing bridge (delegates to options.pricing if present) ----------------

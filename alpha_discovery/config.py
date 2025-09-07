@@ -10,12 +10,12 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 60
-    generations: int = 6
+    population_size: int = 100
+    generations: int = 10
     elitism_rate: float = 0.1
     mutation_rate: float = 0.2
-    seed: int = 38
-    setup_lengths_to_explore: List[int] = [1,2]
+    seed: int = 47
+    setup_lengths_to_explore: List[int] = [2]
 
     # Verbosity & debugging used by NSGA layer (added)
     verbose: int = 2              # 0..3 (2 = extra progress summaries)
@@ -103,8 +103,13 @@ class OptionsConfig(BaseModel):
     allow_nonoptionable: bool = False
 
     # Tenor selection (business days to expiry)
-    tenor_grid_bd: List[int] = [7, 14, 21, 30, 45, 63]
+    tenor_grid_bd: List[int] = [3, 5, 7]
     tenor_buffer_k: float = 1.25
+    
+    # Intraday trading patterns
+    enable_intraday_patterns: bool = False
+    intraday_patterns: List[str] = ['overnight', 'intraday']  # EOD→Open, Open→Open
+    intraday_use_regular_horizons: bool = False  # If True, intraday patterns test all horizons; if False, only 1-day
 
     # Enable exit policies
     exit_policies_enabled: bool = True
@@ -220,6 +225,46 @@ class Stage3Config(BaseModel):
     fdr_q: float = 0.10              # BH–FDR level
 
 
+# -----------------------------
+# Regime-Aware Exit Configuration
+# -----------------------------
+class RegimeAwareConfig(BaseModel):
+    """Configuration for regime-aware exit strategies"""
+    
+    # Regime detection thresholds
+    risk_on_threshold: float = 0.5
+    risk_off_threshold: float = -0.5
+    
+    # Default exit profiles
+    risk_on_profile: Dict[str, float] = {
+        "atr_len": 14, "k_atr_base": 2.5, "k_atr_slope": 0.8, "theta_frac": 0.55,
+        "epsilon": 0.03, "m_em": 1.4, "alpha_vol": 0.25, "z_panic": 2.3, "g_atr": 1.0,
+        "d_pre_hi": 2, "d_pre_lo": 1, "z_pc_tighten": 1.5, "iv_z_cut": 1.0
+    }
+    
+    neutral_profile: Dict[str, float] = {
+        "atr_len": 14, "k_atr_base": 2.0, "k_atr_slope": 0.8, "theta_frac": 0.50,
+        "epsilon": 0.03, "m_em": 1.2, "alpha_vol": 0.15, "z_panic": 2.3, "g_atr": 1.0,
+        "d_pre_hi": 2, "d_pre_lo": 1, "z_pc_tighten": 1.5, "iv_z_cut": 1.0
+    }
+    
+    risk_off_profile: Dict[str, float] = {
+        "atr_len": 14, "k_atr_base": 1.6, "k_atr_slope": 1.0, "theta_frac": 0.45,
+        "epsilon": 0.03, "m_em": 1.0, "alpha_vol": 0.10, "z_panic": 2.3, "g_atr": 1.2,
+        "d_pre_hi": 3, "d_pre_lo": 2, "z_pc_tighten": 1.2, "iv_z_cut": 1.0
+    }
+    
+    # Position management
+    cooldown_days: int = 3
+    max_positions_per_setup: int = 1
+    
+    # Enhanced ledger tracking
+    enable_enhanced_ledger: bool = True
+    track_mfe_mae: bool = True
+    track_regime_data: bool = True
+    track_event_data: bool = True
+
+
 
 
 # -----------------------------
@@ -238,6 +283,7 @@ class Settings(BaseModel):
     stage1: Stage1Config = Stage1Config()
     stage2: Stage2Config = Stage2Config()
     stage3: Stage3Config = Stage3Config()
+    regime_aware: RegimeAwareConfig = RegimeAwareConfig()
 
 
 

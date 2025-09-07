@@ -10,10 +10,10 @@ from tqdm.auto import tqdm
 
 from ..config import Settings  # type: ignore
 from .io import find_latest_run_dir, read_global_artifacts
-from .stage1_recency import run_stage1_recency_liveness
-from .stage2_mbb import run_stage2_mbb_on_ledger
-from .stage3_fdr_dsr import stage3_cohort_oos
-from .summary import write_gauntlet_summary
+from .stage1_health import run_stage1_health_check
+from .stage2_profitability import run_stage2_profitability_on_ledger
+from .stage3_robustness import run_stage3_robustness_on_ledger
+from .summary import write_gauntlet_summary, write_all_setups_summary, write_open_trades_summary
 from .backtester import run_gauntlet_backtest
 from .reporting import write_stage_csv
 from .io import ensure_dir
@@ -136,18 +136,24 @@ def run_gauntlet(
     ensure_dir(gaunt_dir)
     aligned_ledger.to_csv(os.path.join(gaunt_dir, "gauntlet_ledger.csv"), index=False)
     print(f"\nOut-of-sample backtesting complete. Generated OOS ledgers for {len(oos_ledgers)} strategies.")
+    
+    # Generate summary for ALL setups in the trade ledger (regardless of gauntlet performance)
+    write_all_setups_summary(run_dir, full_oos_ledger)
+    
+    # Generate summary for setups with open trades (filtered from all setups)
+    write_open_trades_summary(run_dir, full_oos_ledger)
 
     # -----------------------------------------------------------------
     # Phase 3: Stage-1/2 per setup, then cohort-wide Stage-3 on OOS set
     # -----------------------------------------------------------------
-    print("\n--- Phase 3: OOS Stage-1/2 per-setup, then cohort-wide Stage-3 ---")
+    print("\n--- Phase 3: OOS Stage-1/2/3 per-setup ---")
     stage1_rows: List[Dict[str, Any]] = []
     stage2_rows: List[Dict[str, Any]] = []
-    ret_map: Dict[str, pd.Series] = {}
+    stage3_rows: List[Dict[str, Any]] = []
 
     for setup_id, oos_ledger in oos_ledgers.items():
-        # Stage-1 per setup: recency/liveness gates
-        s1 = run_stage1_recency_liveness(
+        # Stage-1 per setup: health check (recency + activity + momentum)
+        s1 = run_stage1_health_check(
             run_dir=run_dir,
             fold_num=0,
             settings=settings,
@@ -159,8 +165,8 @@ def run_gauntlet(
         if not bool(s1["pass_stage1"].iloc[0]):
             continue
 
-        # Stage-2 per setup: block bootstrap p-values
-        s2 = run_stage2_mbb_on_ledger(
+        # Stage-2 per setup: profitability check (NAV + PnL + win rate)
+        s2 = run_stage2_profitability_on_ledger(
             fold_ledger=oos_ledger,
             settings=settings,
             config=cfg,
@@ -172,33 +178,38 @@ def run_gauntlet(
         rec["setup_id"] = setup_id
         stage2_rows.append(rec)
 
-        # Daily returns for Stage-3 cohort calc
-        from ..eval.nav import nav_daily_returns_from_ledger
-        base_cap = float(getattr(getattr(settings, "reporting", object()), "base_capital_for_portfolio", 100_000.0))
-        ret_map[setup_id] = nav_daily_returns_from_ledger(oos_ledger, base_capital=base_cap)
+        # Stage-3 per setup: robustness check (DSR + bootstrap + stability)
+        s3 = run_stage3_robustness_on_ledger(
+            fold_ledger=oos_ledger,
+            settings=settings,
+            config=cfg,
+            stage2_df=s2,
+        )
+        if s3 is None or s3.empty:
+            continue
+        s3_rec = s3.iloc[0].to_dict()
+        s3_rec["setup_id"] = setup_id
+        stage3_rows.append(s3_rec)
 
-    # Write Stage-1/2 diagnostics
+    # Write Stage diagnostics
     if stage1_rows:
         write_stage_csv(run_dir, "stage1_oos", pd.DataFrame(stage1_rows))
     if stage2_rows:
         write_stage_csv(run_dir, "stage2_oos", pd.DataFrame(stage2_rows))
+    if stage3_rows:
+        write_stage_csv(run_dir, "stage3_oos", pd.DataFrame(stage3_rows))
 
-    if not stage2_rows:
-        print("No candidates reached Stage-2 on OOS; gauntlet complete.")
+    if not stage3_rows:
+        print("No candidates reached Stage-3 on OOS; gauntlet complete.")
         return
 
-    # Cohort Stage-3
-    oos_s2_all = pd.DataFrame(stage2_rows)
-    cohort_s3 = stage3_cohort_oos(oos_s2_all, ret_map, base_capital, cfg)
-    write_stage_csv(run_dir, "stage3_cohort_oos", cohort_s3)
-
-    # Survivors & summary
-    survivor_ids = set(cohort_s3.loc[cohort_s3["fdr_pass"], "setup_id"].astype(str))
-    print(f"Cohort Stage-3 survivors: {len(survivor_ids)}")
+    # Survivors & summary (all Stage-3 passers are survivors)
+    survivor_ids = set([str(d["setup_id"]) for d in stage3_rows if d.get("pass_stage3", False)])
+    print(f"Stage-3 survivors: {len(survivor_ids)}")
 
     by_id_s1 = {str(d["setup_id"]): d for d in stage1_rows if "setup_id" in d}
     by_id_s2 = {str(d["setup_id"]): d for d in stage2_rows if "setup_id" in d}
-    by_id_s3 = cohort_s3.set_index("setup_id").to_dict(orient="index")
+    by_id_s3 = {str(d["setup_id"]): d for d in stage3_rows if "setup_id" in d}
 
     final_survivors: List[Dict[str, Any]] = []
     for sid in survivor_ids:
@@ -212,4 +223,4 @@ def run_gauntlet(
     if final_survivors:
         write_gauntlet_summary(run_dir, final_survivors, full_oos_ledger)
     else:
-        print("No strategies survived cohort-wide Stage-3.")
+        print("No strategies survived Stage-3.")

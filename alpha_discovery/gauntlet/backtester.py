@@ -7,7 +7,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Any
 
 from ..config import Settings  # type: ignore
-from ..engine.backtester import run_setup_backtest_options
+from ..engine.bt_core import run_setup_backtest_options
 from ..engine.bt_runtime import _enforce_exclusivity_by_setup, _parse_bt_env_flag
 
 # ----------------- small helpers -----------------
