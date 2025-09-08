@@ -151,25 +151,14 @@ def write_gauntlet_summary(
             pd.to_datetime(data_end) - pd.to_datetime(final_df["oos_last_trigger"]).dt.tz_localize(None)
         ).dt.days
 
-    # Column order
+    # Column order - Clean OOS-focused summary
     col_order = [
         # IDs / meta
-        "setup_id", "fold", "rank", "specialized_ticker", "direction", "description", "signal_ids",
-        # TRAIN perf snapshot
-        "support", "trades_count", "sum_pnl_dollars", "nav_total_return_pct", "final_nav",
-        "first_trigger_date", "last_trigger_date", "best_performing_ticker",
-        "sharpe_lb", "sharpe_median", "sharpe_ub", "sortino_lb", "sortino_median", "sortino_ub",
-        "omega_ratio", "max_drawdown", "sum_capital_allocated",
-        # Gauntlet stages
-        "s1_pass_stage1", "s1_rank", "s1_days_since_last_trigger", "s1_short_window_days",
-        "s1_trades_in_short_window", "s1_max_dd_short", "s1_recency_max_days", "s1_min_trades_short",
-        "s1_max_dd_short_cap", "s1_reason",
-        "oos_pvalue", "s2_T", "s2_mbb_block_len", "s2_sr_train", "s2_pvalue_sharpe_gt0",
-        "oos_dsr", "oos_N_eff", "s3_fdr_pass",
-        # OOS activity + performance
+        "setup_id", "specialized_ticker", "direction", "description", "signal_ids",
+        # OOS activity + performance (most important)
         "oos_first_trigger", "oos_last_trigger", "oos_days_since_last_trigger",
-        "oos_total_trades", "oos_open_trades", "oos_closed_trades",
-        "oos_sum_pnl_dollars", "oos_final_nav", "oos_nav_total_return_pct",
+        "oos_total_trades", "oos_open_trades", "oos_sum_pnl_dollars", 
+        "oos_final_nav", "oos_nav_total_return_pct", "oos_dsr", "expectancy",
     ]
     existing_cols = [c for c in col_order if c in final_df.columns]
     final_df = final_df[existing_cols + [c for c in final_df.columns if c not in existing_cols]]
@@ -290,19 +279,14 @@ def write_all_setups_summary(
             pd.to_datetime(data_end) - pd.to_datetime(final_df["oos_last_trigger"]).dt.tz_localize(None)
         ).dt.days
 
-    # Column order - prioritize OOS performance metrics since this is about all setups
+    # Column order - Clean OOS-focused summary for all setups
     col_order = [
         # IDs / meta
-        "setup_id", "fold", "rank", "specialized_ticker", "direction", "description", "signal_ids",
+        "setup_id", "specialized_ticker", "direction", "description", "signal_ids",
         # OOS activity + performance (most important for all-setups view)
         "oos_first_trigger", "oos_last_trigger", "oos_days_since_last_trigger",
-        "oos_total_trades", "oos_open_trades", "oos_closed_trades",
-        "oos_sum_pnl_dollars", "oos_final_nav", "oos_nav_total_return_pct",
-        # TRAIN perf snapshot
-        "support", "trades_count", "sum_pnl_dollars", "nav_total_return_pct", "final_nav",
-        "first_trigger_date", "last_trigger_date", "best_performing_ticker",
-        "sharpe_lb", "sharpe_median", "sharpe_ub", "sortino_lb", "sortino_median", "sortino_ub",
-        "omega_ratio", "max_drawdown", "sum_capital_allocated",
+        "oos_total_trades", "oos_open_trades", "oos_sum_pnl_dollars", 
+        "oos_final_nav", "oos_nav_total_return_pct", "oos_dsr", "expectancy",
     ]
     existing_cols = [c for c in col_order if c in final_df.columns]
     final_df = final_df[existing_cols + [c for c in final_df.columns if c not in existing_cols]]
@@ -358,12 +342,12 @@ def write_open_trades_summary(
     
     if len(setups_with_open_trades) == 0:
         print("No setups have open trades. Creating empty open trades summary.")
-        # Create empty summary with same structure as all_setups_summary
+        # Create empty summary with clean OOS-focused structure
         empty_df = pd.DataFrame(columns=[
-            "setup_id", "fold", "rank", "specialized_ticker", "direction", "description", "signal_ids",
+            "setup_id", "specialized_ticker", "direction", "description", "signal_ids",
             "oos_first_trigger", "oos_last_trigger", "oos_days_since_last_trigger",
-            "oos_total_trades", "oos_open_trades", "oos_closed_trades",
-            "oos_sum_pnl_dollars", "oos_final_nav", "oos_nav_total_return_pct"
+            "oos_total_trades", "oos_open_trades", "oos_sum_pnl_dollars", 
+            "oos_final_nav", "oos_nav_total_return_pct", "oos_dsr", "expectancy"
         ])
         out_path = os.path.join(gaunt_dir, "open_trades_summary.csv")
         _write_csv(out_path, empty_df)
@@ -441,19 +425,14 @@ def write_open_trades_summary(
             pd.to_datetime(data_end) - pd.to_datetime(final_df["oos_last_trigger"]).dt.tz_localize(None)
         ).dt.days
 
-    # Column order - prioritize OOS performance metrics and open trade info
+    # Column order - Clean OOS-focused summary for open trades
     col_order = [
         # IDs / meta
-        "setup_id", "fold", "rank", "specialized_ticker", "direction", "description", "signal_ids",
+        "setup_id", "specialized_ticker", "direction", "description", "signal_ids",
         # OOS activity + performance (most important for open trades view)
         "oos_first_trigger", "oos_last_trigger", "oos_days_since_last_trigger",
-        "oos_total_trades", "oos_open_trades", "oos_closed_trades",
-        "oos_sum_pnl_dollars", "oos_final_nav", "oos_nav_total_return_pct",
-        # TRAIN perf snapshot
-        "support", "trades_count", "sum_pnl_dollars", "nav_total_return_pct", "final_nav",
-        "first_trigger_date", "last_trigger_date", "best_performing_ticker",
-        "sharpe_lb", "sharpe_median", "sharpe_ub", "sortino_lb", "sortino_median", "sortino_ub",
-        "omega_ratio", "max_drawdown", "sum_capital_allocated",
+        "oos_total_trades", "oos_open_trades", "oos_sum_pnl_dollars", 
+        "oos_final_nav", "oos_nav_total_return_pct", "oos_dsr", "expectancy",
     ]
     existing_cols = [c for c in col_order if c in final_df.columns]
     final_df = final_df[existing_cols + [c for c in final_df.columns if c not in existing_cols]]
