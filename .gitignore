@@ -8,3 +8,6 @@ __pycache__/
 runs/
 data_store/
 *.parquet
+data_store/
+runs_predict/
+*.parquet
