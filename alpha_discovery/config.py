@@ -10,11 +10,11 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 150
-    generations: int = 10
+    population_size: int = 100
+    generations: int = 8
     elitism_rate: float = 0.1
     mutation_rate: float = 0.2
-    seed: int = 51
+    seed: int = 67
     setup_lengths_to_explore: List[int] = [2]
 
     # Verbosity & debugging used by NSGA layer (added)
@@ -39,12 +39,12 @@ class DataConfig(BaseModel):
     # Finalized ticker lists
     tradable_tickers: List[str] = [
         'TSLA US Equity', 'CRWV US Equity', 'AMZN US Equity', 'QQQ US Equity',
-        'GOOGL US Equity', 'MSFT US Equity', 'AAPL US Equity', #'LLY US Equity',
-        'AMD US Equity', 'MSTR US Equity', 'COIN US Equity', 'ARM US Equity'
-        #'XLE US Equity', 'XLK US Equity', 'XLRE US Equity', 'XLC US Equity',
-        #'XLV US Equity', 'XLP US Equity', 'SPY US Equity', 'QQQ US Equity',
-        #'JPM US Equity', 'C US Equity', 'PLTR US Equity',
-        #'BMY US Equity', 'PEPS US Equity', 'NKE US Equity',
+        'GOOGL US Equity', 'MSFT US Equity', 'AAPL US Equity', 'LLY US Equity', 
+        'AMD US Equity', 'MSTR US Equity', 'COIN US Equity', 'ARM US Equity', 
+        'SPY US Equity',  'PLTR US Equity','XLE US Equity', 'XLK US Equity',
+        'XLRE US Equity', 'XLC US Equity',
+        'XLV US Equity', 'XLP US Equity', 'JPM US Equity', 'C US Equity', 
+        'BMY US Equity', 'PEPS US Equity', 'NKE US Equity',
     ]
     macro_tickers: List[str] = [
         'RTY Index', 'MXWO Index', 'USGG10YR Index', 'USGG2YR Index',

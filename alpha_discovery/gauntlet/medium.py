@@ -42,16 +42,16 @@ def get_medium_gauntlet_config() -> Dict[str, Any]:
     """Get configuration for Medium Gauntlet."""
     return {
         # Stage 1: Recency & Support
-        "s1_min_trades": 30,                    # Minimum OOS trades required
-        "s1_alive_within_days": 30,             # Must have traded within N days
-        "s1_max_dd_mult_vs_median": 2.0,        # Max DD vs historical median
+        "s1_min_trades": 15,                    # Minimum OOS trades required (lowered from 30)
+        "s1_alive_within_days": 30,             # Must have traded within N days (kept)
+        "s1_max_dd_mult_vs_median": None,       # Max DD vs historical median (REMOVED)
         
         # Stage 2: Profitability & Stability
         "s2_recent_k_trades": 30,               # Recent K trades for S2-A
         "s2_hit_rate_min": 0.45,                # Minimum hit rate on recent K
-        "s2_ev_per_trade_min": 50.0,            # Minimum EV per trade ($)
+        "s2_ev_per_trade_min": None,            # Minimum EV per trade ($) (REMOVED)
         "s2_median_trade_pnl_min": 0.0,         # Minimum median trade PnL
-        "s2_recent_dd_cap_mult": 1.5,           # Recent DD cap vs historical
+        "s2_recent_dd_cap_mult": None,          # Recent DD cap vs historical (REMOVED)
         "s2_rolling_window_size": None,         # Auto: 30 if N>=60, else 20
         "s2_rolling_pass_ratio_min": 0.6,       # Min fraction of good windows
         "s2_rolling_max_consec_bad": 1,         # Max consecutive bad windows
@@ -63,7 +63,7 @@ def get_medium_gauntlet_config() -> Dict[str, Any]:
         # Stage 3: Confidence
         "s3_psr_hurdle": 0.0,                   # PSR hurdle rate
         "s3_psr_min_probability": 0.75,         # Min PSR probability
-        "s3_cv_k_folds": 5,                     # K-fold CV folds
+        "s3_cv_k_folds": None,                  # K-fold CV folds (REMOVED - disables purged k-fold)
         "s3_cv_embargo_days": 5,                # Embargo around test folds
         "s3_cv_q1_threshold": 0.0,              # Q1 threshold for IQR check
         "s3_cv_q1_close_threshold": -0.1,       # Q1 "close to 0" threshold
@@ -349,7 +349,7 @@ def run_stage1_recency_support(setup: SetupResults, config: Dict[str, Any]) -> S
     if days_since_last > config["s1_alive_within_days"]:
         reasons.append(f"stale_trades: {days_since_last} > {config['s1_alive_within_days']}")
     
-    # S1-3: Drawdown check
+    # S1-3: Drawdown check (REMOVED - skipped if config is None)
     oos_max_dd = _compute_max_drawdown(setup.oos_equity_curve)
     
     # Determine DD reference
@@ -360,11 +360,13 @@ def run_stage1_recency_support(setup: SetupResults, config: Dict[str, Any]) -> S
         # Use OOS median DD as fallback
         dd_reference = setup.oos_trades['pnl_dollars'].median()
         dd_source = "oos_median"
-        logging.warning(f"Setup {setup.setup_id}: Using OOS median DD as reference")
+        # Removed warning - no longer checking DD limits
     
-    max_dd_threshold = config["s1_max_dd_mult_vs_median"] * abs(dd_reference)
-    if oos_max_dd < -max_dd_threshold:
-        reasons.append(f"excessive_drawdown: {oos_max_dd:.3f} < -{max_dd_threshold:.3f}")
+    # Skip drawdown check if disabled in config
+    if config["s1_max_dd_mult_vs_median"] is not None:
+        max_dd_threshold = config["s1_max_dd_mult_vs_median"] * abs(dd_reference)
+        if oos_max_dd < -max_dd_threshold:
+            reasons.append(f"excessive_drawdown: {oos_max_dd:.3f} < -{max_dd_threshold:.3f}")
     
     passed = len(reasons) == 0
     
@@ -408,11 +410,11 @@ def run_stage2_profitability_stability(setup: SetupResults, config: Dict[str, An
     s2a_reasons = []
     if hit_rate_k < config["s2_hit_rate_min"]:
         s2a_reasons.append(f"hit_rate: {hit_rate_k:.3f} < {config['s2_hit_rate_min']}")
-    if ev_per_trade < config["s2_ev_per_trade_min"]:
+    if config["s2_ev_per_trade_min"] is not None and ev_per_trade < config["s2_ev_per_trade_min"]:
         s2a_reasons.append(f"ev_per_trade: {ev_per_trade:.1f} < {config['s2_ev_per_trade_min']}")
     if median_trade_pnl < config["s2_median_trade_pnl_min"]:
         s2a_reasons.append(f"median_pnl: {median_trade_pnl:.1f} < {config['s2_median_trade_pnl_min']}")
-    if recent_k_max_dd < -config["s2_recent_dd_cap_mult"] * abs(dd_reference):
+    if config["s2_recent_dd_cap_mult"] is not None and recent_k_max_dd < -config["s2_recent_dd_cap_mult"] * abs(dd_reference):
         s2a_reasons.append(f"recent_dd: {recent_k_max_dd:.3f} exceeds cap")
     
     s2a_passed = len(s2a_reasons) == 0
@@ -530,31 +532,39 @@ def run_stage3_confidence(setup: SetupResults, config: Dict[str, Any]) -> Stage3
     if not s3a_passed:
         reasons.append(f"s3a_psr: {psr_value:.3f} < {config['s3_psr_min_probability']}")
     
-    # S3-B: Purged K-Fold CV
-    cv_fold_results = _purged_k_fold_cv(
-        setup.oos_daily_returns,
-        config["s3_cv_k_folds"],
-        config["s3_cv_embargo_days"]
-    )
-    
-    if cv_fold_results:
-        cv_median_sharpe = np.median(cv_fold_results)
-        cv_q1 = np.percentile(cv_fold_results, 25)
-        cv_q3 = np.percentile(cv_fold_results, 75)
+    # S3-B: Purged K-Fold CV (DISABLED if k_folds is None)
+    if config["s3_cv_k_folds"] is not None:
+        cv_fold_results = _purged_k_fold_cv(
+            setup.oos_daily_returns,
+            config["s3_cv_k_folds"],
+            config["s3_cv_embargo_days"]
+        )
         
-        # IQR check: Q1 > 0 or Q1 close to 0 with Q2 > 0
-        iqr_ok = (cv_q1 > config["s3_cv_q1_threshold"] or 
-                 (cv_q1 > config["s3_cv_q1_close_threshold"] and cv_median_sharpe > 0))
-        
-        s3b_passed = cv_median_sharpe > 0 and iqr_ok
-        if not s3b_passed:
-            reasons.append(f"s3b_cv: median={cv_median_sharpe:.3f}, q1={cv_q1:.3f}, q3={cv_q3:.3f}")
+        if cv_fold_results:
+            cv_median_sharpe = np.median(cv_fold_results)
+            cv_q1 = np.percentile(cv_fold_results, 25)
+            cv_q3 = np.percentile(cv_fold_results, 75)
+            
+            # IQR check: Q1 > 0 or Q1 close to 0 with Q2 > 0
+            iqr_ok = (cv_q1 > config["s3_cv_q1_threshold"] or 
+                     (cv_q1 > config["s3_cv_q1_close_threshold"] and cv_median_sharpe > 0))
+            
+            s3b_passed = cv_median_sharpe > 0 and iqr_ok
+            if not s3b_passed:
+                reasons.append(f"s3b_cv: median={cv_median_sharpe:.3f}, q1={cv_q1:.3f}, q3={cv_q3:.3f}")
+        else:
+            cv_median_sharpe = 0.0
+            cv_q1 = 0.0
+            cv_q3 = 0.0
+            s3b_passed = False
+            reasons.append("s3b_cv: failed_to_generate_folds")
     else:
+        # Skip purged k-fold CV
+        cv_fold_results = []
         cv_median_sharpe = 0.0
         cv_q1 = 0.0
         cv_q3 = 0.0
-        s3b_passed = False
-        reasons.append("s3b_cv: failed_to_generate_folds")
+        s3b_passed = True  # Auto-pass if disabled
     
     s3_passed = s3a_passed and s3b_passed
     

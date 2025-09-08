@@ -15,9 +15,16 @@ def _coerce_dt(x: pd.Series) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(x):
         return x.dt.normalize()
     try:
-        return pd.to_datetime(x, errors="coerce").dt.normalize()
+        # Suppress warnings about format inference
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return pd.to_datetime(x, errors="coerce").dt.normalize()
     except Exception:
-        return pd.to_datetime(x.astype(str), errors="coerce").dt.normalize()
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return pd.to_datetime(x.astype(str), errors="coerce").dt.normalize()
 
 def _find_col(df: pd.DataFrame, names: Sequence[str]) -> Optional[str]:
     cols_lower = {c.lower(): c for c in df.columns}
