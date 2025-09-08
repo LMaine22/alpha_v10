@@ -228,7 +228,7 @@ def run_setup_backtest_options(
                     time_cap_days=(exit_policy or {}).get("time_cap_days", getattr(settings.options, "exit_time_cap_days", None))
                         if isinstance(exit_policy, dict) else getattr(settings.options, "exit_time_cap_days", None),
                     # behavior knobs
-                    pt_behavior=(exit_policy or {}).get("pt_behavior", "regime_aware") if exit_policy is None else (exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "regime_aware")),
+                    pt_behavior=(exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "regime_aware")),
                     armed_trail_frac=(exit_policy or {}).get("armed_trail_frac", getattr(settings.options, "armed_trail_frac", None)),
                     scale_out_frac=float((exit_policy or {}).get("scale_out_frac", getattr(settings.options, "scale_out_frac", 0.50))),
                     # regime-aware settings
@@ -367,8 +367,8 @@ def run_setup_backtest_options(
                 # SINGLE-LEG path (default/NEW)
                 # ==============================
                 if not did_scale:
-                    # --- NEW policy gate: Timebox → BE → Trail ---
-                    policy_mode = (exit_policy or {}).get("pt_behavior", "regime_aware") if exit_policy is None else (exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "exit"))
+                    # --- Policy selection: Timebox → BE → Trail OR Regime-Aware ---
+                    policy_mode = (exit_policy or {}).get("pt_behavior", getattr(settings.options, "pt_behavior", "regime_aware"))
                     if str(policy_mode).lower() == "timebox_be_trail":
                         # Build safe parameter defaults for the new policy
                         be_mult = float((exit_policy or {}).get(

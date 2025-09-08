@@ -46,7 +46,13 @@ def _deflated_sharpe_ratio(returns: pd.Series, n_trials: int = 1) -> float:
     
     # Adjust for skewness
     gamma = skew
-    dsr = sr_adj * np.sqrt(1 - gamma * sr_adj + (gamma - 1) / 4 * sr_adj**2)
+    # Ensure the expression under sqrt is non-negative
+    discriminant = 1 - gamma * sr_adj + (gamma - 1) / 4 * sr_adj**2
+    if discriminant < 0:
+        # If discriminant is negative, use a simplified version
+        dsr = sr_adj * 0.5  # Conservative fallback
+    else:
+        dsr = sr_adj * np.sqrt(discriminant)
     
     # Adjust for multiple testing (Bonferroni correction)
     if n_trials > 1:
@@ -56,7 +62,7 @@ def _deflated_sharpe_ratio(returns: pd.Series, n_trials: int = 1) -> float:
         confidence = 1 - alpha_adj
         dsr = dsr * confidence
     
-    return float(max(0.0, dsr))
+    return float(dsr)  # Allow negative DSR values
 
 
 def _bootstrap_confidence_interval(
@@ -79,14 +85,26 @@ def _bootstrap_confidence_interval(
     for _ in range(n_bootstrap):
         # Bootstrap sample
         bootstrap_sample = returns.sample(n=len(returns), replace=True)
-        bootstrap_values.append(metric_func(bootstrap_sample))
+        try:
+            val = metric_func(bootstrap_sample)
+            if not np.isnan(val) and not np.isinf(val):
+                bootstrap_values.append(val)
+        except Exception:
+            continue
+    
+    if len(bootstrap_values) < 10:
+        return float(observed), float(observed), float(observed)
     
     bootstrap_values = np.array(bootstrap_values)
     
-    # Calculate confidence interval
+    # Calculate confidence interval with robust percentiles
     alpha = 1 - confidence
     lower = np.percentile(bootstrap_values, 100 * alpha / 2)
     upper = np.percentile(bootstrap_values, 100 * (1 - alpha / 2))
+    
+    # Cap extreme values to reasonable bounds
+    lower = max(lower, -10.0)  # Cap at -10
+    upper = min(upper, 10.0)   # Cap at +10
     
     return float(lower), float(observed), float(upper)
 

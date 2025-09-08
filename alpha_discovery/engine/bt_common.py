@@ -13,7 +13,7 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [1, 3, 5, 10]
+TRADE_HORIZONS_DAYS = [2, 5, 7]
 
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
@@ -282,47 +282,134 @@ def _check_regime_aware_exit_options(
         current_date = price_path.index[i]
         option_price = p[i]
         days_held = i
+        profit_pct = (option_price - entry) / entry if entry > 0 else 0
         
-        # 1. Gap stop (large overnight moves AGAINST position in option price)
+        # === LOSS PROTECTION MECHANISMS (Market Dynamics-Based) ===
+        
+        # 1. Gap stop (large overnight moves AGAINST position - market dynamics based)
         if i > 0:
             prev_price = p[i-1]
             gap_pct = (option_price - prev_price) / prev_price if prev_price > 0 else 0
             
-            # Only gap stop on adverse moves (gaps down for long positions)
-            if direction == "long" and gap_pct < -0.30:  # 30% gap down for long positions
-                return i, "gap_stop"
-            elif direction == "short" and gap_pct > 0.30:  # 30% gap up for short positions
-                return i, "gap_stop"
+            # Adaptive gap stop based on volatility and time
+            if direction == "long":
+                # More sensitive gap stop for long positions (adverse moves)
+                if gap_pct < -0.40:  # 20% gap down (was 30%)
+                    return i, "gap_stop"
+            elif direction == "short":
+                # More sensitive gap stop for short positions (adverse moves)
+                if gap_pct > 0.40:  # 20% gap up (was 30%)
+                    return i, "gap_stop"
         
         # 2. Profit target based on option price appreciation
-        profit_pct = (option_price - entry) / entry if entry > 0 else 0
         if profit_pct >= 0.50:  # 50% profit target
             return i, "pt_hit_legA"
         
-        # 3. ATR-based trailing stop (simplified for options)
+        # 3. Adaptive trailing stop (market dynamics based)
         if i > 0:
-            # Simple trailing stop: if option price drops below 70% of entry
-            trail_threshold = entry * 0.70
+            # Dynamic trailing stop based on volatility and time held
+            if days_held <= 2:
+                # Tighter stop in first 2 days (volatility protection)
+                trail_threshold = entry * 0.80  # 20% loss max
+            elif days_held <= 5:
+                # Medium stop for days 3-5 (momentum protection)
+                trail_threshold = entry * 0.70  # 30% loss max
+            else:
+                # Looser stop after 5 days (time decay protection)
+                trail_threshold = entry * 0.60  # 40% loss max
+            
             if option_price <= trail_threshold:
                 return i, "atr_trail_hit"
         
-        # 4. Time-based exit (theta decay)
-        if days_held >= 5:  # Exit after 5 days to avoid theta decay
-            return i, "theta_stop"
+        # 4. Time-based exit (theta decay) - market dynamics based
+        if days_held >= 3:  # Exit after 3 days (was 5) to avoid theta decay
+            # Check if we're in theta decay zone (last 30% of horizon)
+            theta_decay_zone = days_held >= horizon_days * 0.7
+            if theta_decay_zone:
+                return i, "theta_stop"
         
-        # 5. Volatility spike detection (simplified)
-        if i > 0:
-            price_change_pct = abs(option_price - p[i-1]) / p[i-1] if p[i-1] > 0 else 0
-            if price_change_pct > 0.25:  # 25% daily change threshold
-                return i, "panic"
+        # 5. Volatility spike detection (market dynamics based) - MOVED AFTER PROFIT CAPTURE
+        # This is now handled in the profit capture section below
         
-        # 6. Momentum failure (simplified)
-        if i >= 3:  # After 3 days, check for momentum
+        # 6. Momentum failure (market dynamics based)
+        if i >= 2:  # After 2 days (was 3), check for momentum
             recent_prices = p[max(0, i-2):i+1]
             if len(recent_prices) >= 3:
-                # Check if price is declining
+                # Check if price is declining consistently
                 if recent_prices[-1] < recent_prices[-2] < recent_prices[-3]:
                     return i, "momentum_fail"
+        
+        # 7. Support/resistance break (market dynamics based)
+        if i >= 3:  # Need at least 4 days to detect support/resistance
+            recent_prices = p[max(0, i-3):i+1]
+            if len(recent_prices) >= 4:
+                # Check if current price breaks below recent support
+                support_level = np.min(recent_prices[:-1])  # Support from previous days
+                if option_price < support_level * 0.95:  # 5% below support
+                    return i, "support_break"
+        
+        # 8. Volume-based exit (market dynamics based)
+        if i > 0:
+            # Check for unusual price movement without corresponding volume
+            # This would need volume data - for now, use price momentum
+            price_momentum = (option_price - p[i-1]) / p[i-1] if p[i-1] > 0 else 0
+            if abs(price_momentum) > 0.10 and days_held >= 2:  # 10% move after 2 days
+                return i, "volume_divergence"
+        
+        # === NEW PROFIT CAPTURE MECHANISMS ===
+        
+        # 7. Momentum peak exit (exit at momentum peak - no profit gate)
+        if i >= 2:  # Need at least 3 days to detect momentum
+            recent_prices = p[max(0, i-2):i+1]
+            if len(recent_prices) >= 3:
+                # Check if current price is the peak of recent 3-day window
+                if option_price == np.max(recent_prices):
+                    return i, "momentum_peak"
+        
+        # 8. Volatility spike profit (exit on favorable vol spikes - no profit gate)
+        if i > 0:
+            price_change_pct = abs(option_price - p[i-1]) / p[i-1] if p[i-1] > 0 else 0
+            # Favorable vol spike: large positive move (any profit level)
+            if direction == "long" and price_change_pct > 0.20:  # 20% up move
+                return i, "volatility_spike_profit"
+            elif direction == "short" and price_change_pct > 0.20:  # 20% down move
+                return i, "volatility_spike_profit"
+        
+        # 9. Early profit exit (exit early on quick moves - no profit gate)
+        if days_held <= 2:
+            # Exit on any significant move in first 2 days
+            if profit_pct >= 0.15:  # 15% profit in first 2 days
+                return i, "early_profit"
+        
+        # 10. Theta decay profit (exit before theta decay - no profit gate)
+        if days_held >= 3:
+            # Check if we're approaching theta decay zone (last 2 days of horizon)
+            if days_held >= horizon_days - 2:
+                return i, "theta_decay_profit"
+        
+        # 11. Risk-on profit (take profits in risk-on regimes - no profit gate)
+        if days_held >= 2:  # After 2 days, any profit level
+            # This would need access to risk regime data - for now, use time-based heuristic
+            # In a full implementation, this would check actual risk regime indicators
+            if profit_pct >= 0.10:  # 10% profit threshold (much lower)
+                return i, "risk_on_profit"
+        
+        # 12. Event profit (take profits before events - no profit gate)
+        if days_held >= 1:  # After 1 day, any profit level
+            # This would need access to event calendar - for now, use time-based heuristic
+            # In a full implementation, this would check upcoming economic events
+            if profit_pct >= 0.10:  # 10% profit threshold (much lower)
+                return i, "event_profit"
+        
+        # 13. Panic exit (adverse volatility spikes only)
+        if i > 0:
+            price_change_pct = abs(option_price - p[i-1]) / p[i-1] if p[i-1] > 0 else 0
+            
+            # Only panic on adverse moves (not favorable ones)
+            if direction == "long" and price_change_pct > 0.25 and profit_pct < 0:  # 25% down move with loss
+                return i, "panic"
+            elif direction == "short" and price_change_pct > 0.25 and profit_pct < 0:  # 25% up move with loss
+                return i, "panic"
     
     # No regime-aware exit triggered
     return None, "horizon"

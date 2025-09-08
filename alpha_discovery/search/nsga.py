@@ -124,6 +124,40 @@ def _dedup_individuals(seq: List[Tuple[str, List[str]]]) -> List[Tuple[str, List
 # ---------- Evolution loop ----------
 def evolve(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd.DataFrame) -> List[Dict]:
     """NSGA-II evolution for specialized (ticker, setup) individuals."""
+    
+    # Check if island model is enabled
+    if settings.ga.islands and settings.ga.islands.enabled:
+        return _evolve_with_islands(signals_df, signals_metadata, master_df)
+    else:
+        return _evolve_single_population(signals_df, signals_metadata, master_df)
+
+
+def _evolve_with_islands(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd.DataFrame) -> List[Dict]:
+    """Evolve using island model."""
+    from .island_model import IslandManager
+    
+    tqdm.write("\n--- Starting Island Model Evolution ---")
+    
+    # Create island manager
+    island_manager = IslandManager(signals_df, signals_metadata, master_df)
+    
+    # Run evolution
+    final_population = island_manager.evolve()
+    
+    # Log migration summary
+    migration_summary = island_manager.get_migration_summary()
+    diversity_metrics = island_manager.get_island_diversity_metrics()
+    
+    tqdm.write(f"\nIsland Model Evolution Complete:")
+    tqdm.write(f"  Total Migrations: {migration_summary['total_migrations']}")
+    tqdm.write(f"  Final Diversity: {diversity_metrics['final_diversity']:.3f}")
+    tqdm.write(f"  Final Population Size: {len(final_population)}")
+    
+    return final_population
+
+
+def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd.DataFrame) -> List[Dict]:
+    """Original single population evolution."""
     rng = np.random.default_rng(settings.ga.seed)
     all_signal_ids = list(signals_df.columns)
 

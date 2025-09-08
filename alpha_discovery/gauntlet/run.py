@@ -18,6 +18,9 @@ from .backtester import run_gauntlet_backtest
 from .reporting import write_stage_csv
 from .io import ensure_dir
 from .backtester import _align_to_pareto_schema_auto
+from .config_new import get_permissive_gauntlet_config
+from .medium import run_medium_gauntlet, SetupResults, write_gauntlet_artifacts
+from ..meta_labeling import MetaLabelingSystem
 
 
 
@@ -29,6 +32,7 @@ def run_gauntlet(
     signals_df: Optional[pd.DataFrame] = None,
     signals_metadata: Optional[List[Dict[str, Any]]] = None,
     splits: Optional[List[Tuple[pd.DatetimeIndex, pd.DatetimeIndex]]] = None,
+    mode: str = "legacy",  # "legacy", "medium", "heavy"
 ) -> None:
     """
     Gauntlet pipeline:
@@ -37,7 +41,11 @@ def run_gauntlet(
       3) Stage-1/Stage-2 per setup, then Stage-3 cohort across survivors.
       4) Write summary & artifacts.
     """
-    cfg = dict(config or {})
+    # Use permissive configuration by default to allow more strategies through
+    default_config = get_permissive_gauntlet_config()
+    cfg = dict(default_config)
+    if config:
+        cfg.update(config)
 
     # Resolve run_dir
     if run_dir is None:
@@ -108,7 +116,7 @@ def run_gauntlet(
     oos_ledgers: Dict[str, pd.DataFrame] = {}
     if tasks:
         with tqdm(total=len(tasks), desc="Running OOS Backtests", dynamic_ncols=True) as pbar:
-            with Parallel(n_jobs=-1, backend="loky") as parallel:
+            with Parallel(n_jobs=4, backend="loky", timeout=300) as parallel:
                 results = parallel(tasks)
                 for i, ledger in enumerate(results):
                     if isinstance(ledger, pd.DataFrame) and not ledger.empty:
@@ -144,8 +152,20 @@ def run_gauntlet(
     write_open_trades_summary(run_dir, full_oos_ledger)
 
     # -----------------------------------------------------------------
-    # Phase 3: Stage-1/2 per setup, then cohort-wide Stage-3 on OOS set
+    # Phase 3: Mode-specific gauntlet execution
     # -----------------------------------------------------------------
+    if mode == "medium":
+        print("\n--- Phase 3: Medium Gauntlet (Statistical Rigor) ---")
+        _run_medium_gauntlet_mode(run_dir, oos_ledgers, settings, cfg)
+        return
+    elif mode == "heavy":
+        print("\n--- Phase 3: Heavy Gauntlet (Academic Rigor) ---")
+        # TODO: Implement heavy mode with DSR, BH-FDR, SPA, etc.
+        print("Heavy mode not yet implemented, falling back to legacy mode")
+        mode = "legacy"
+    
+    # Legacy mode (existing implementation)
+    print("\n--- Phase 3: Legacy Gauntlet (Stage-1/2/3 per setup) ---")
     print("\n--- Phase 3: OOS Stage-1/2/3 per-setup ---")
     stage1_rows: List[Dict[str, Any]] = []
     stage2_rows: List[Dict[str, Any]] = []
@@ -224,3 +244,131 @@ def run_gauntlet(
         write_gauntlet_summary(run_dir, final_survivors, full_oos_ledger)
     else:
         print("No strategies survived Stage-3.")
+
+
+def _run_medium_gauntlet_mode(run_dir: str, oos_ledgers: Dict[str, pd.DataFrame], 
+                             settings: Settings, config: Dict[str, Any]) -> None:
+    """Run Medium Gauntlet mode."""
+    from .medium import get_medium_gauntlet_config
+    
+    # Get medium gauntlet config
+    medium_config = get_medium_gauntlet_config()
+    if config:
+        medium_config.update(config)
+    
+    # Convert OOS ledgers to SetupResults
+    setup_results = []
+    for setup_id, ledger in oos_ledgers.items():
+        if ledger.empty:
+            continue
+            
+        # Get base capital
+        try:
+            base_cap = float(getattr(getattr(settings, "reporting", object()), "base_capital_for_portfolio", 100_000.0))
+        except Exception:
+            base_cap = 100_000.0
+        
+        # Compute daily returns and equity curve
+        daily_returns = nav_daily_returns_from_ledger(ledger, base_capital=base_cap)
+        equity_curve = (1 + daily_returns).cumprod() * base_cap
+        
+        # Extract setup info
+        ticker = ledger.get('specialized_ticker', ['Unknown']).iloc[0] if not ledger.empty else 'Unknown'
+        direction = ledger.get('direction', ['long']).iloc[0] if not ledger.empty else 'long'
+        
+        # Create SetupResults
+        setup_result = SetupResults(
+            setup_id=setup_id,
+            ticker=ticker,
+            direction=direction,
+            oos_trades=ledger,
+            oos_daily_returns=daily_returns,
+            oos_equity_curve=equity_curve,
+            historical_median_drawdown=None  # Would need historical data
+        )
+        setup_results.append(setup_result)
+    
+    if not setup_results:
+        print("No valid setups found for Medium Gauntlet.")
+        return
+    
+    print(f"Running Medium Gauntlet on {len(setup_results)} setups...")
+    
+    # Run medium gauntlet
+    results = run_medium_gauntlet(setup_results, settings, medium_config)
+    
+    # Write artifacts
+    output_dir = os.path.join(run_dir, "gauntlet_medium")
+    write_gauntlet_artifacts(results, output_dir, medium_config)
+    
+    # Run meta-labeling on survivors
+    if settings.meta_labeling.enabled:
+        print("\n--- Phase 4: Meta-Labeling (Post-Gauntlet Filter) ---")
+        _run_meta_labeling(run_dir, results, oos_ledgers, settings, config)
+    
+    # Print summary
+    deploy_count = len([r for r in results if r.final_decision == "Deploy"])
+    monitor_count = len([r for r in results if r.final_decision == "Monitor"])
+    retire_count = len([r for r in results if r.final_decision == "Retire"])
+    
+    print(f"\nMedium Gauntlet Results:")
+    print(f"  Deploy: {deploy_count}")
+    print(f"  Monitor: {monitor_count}")
+    print(f"  Retire: {retire_count}")
+    print(f"  Artifacts written to: {output_dir}")
+
+
+def _run_meta_labeling(run_dir: str, gauntlet_results: List, oos_ledgers: Dict[str, pd.DataFrame],
+                      settings: Any, config: Dict[str, Any]) -> None:
+    """Run meta-labeling on gauntlet survivors."""
+    from ..meta_labeling import MetaLabelingSystem
+    
+    # Get gauntlet survivors (Deploy and Monitor decisions)
+    survivors = []
+    for result in gauntlet_results:
+        if result.final_decision in ["Deploy", "Monitor"]:
+            survivors.append({
+                'setup_id': result.setup_id,
+                'ticker': result.ticker,
+                'direction': result.direction,
+                'final_decision': result.final_decision
+            })
+    
+    if not survivors:
+        print("No gauntlet survivors for meta-labeling")
+        return
+    
+    print(f"Running meta-labeling on {len(survivors)} gauntlet survivors...")
+    
+    # Initialize meta-labeling system
+    meta_system = MetaLabelingSystem(config.get('meta_labeling', {}))
+    
+    # Load required data
+    from ..data.loader import load_master_data
+    from ..features.registry import build_feature_matrix
+    from ..signals.compiler import compile_signals
+    
+    print("Loading data for meta-labeling...")
+    master_df = load_master_data()
+    feature_matrix = build_feature_matrix(master_df)
+    signals_df, signals_metadata = compile_signals(feature_matrix)
+    
+    # Run meta-labeling
+    meta_results = meta_system.run_meta_labeling(
+        survivors, oos_ledgers, master_df, signals_df, signals_metadata
+    )
+    
+    # Generate artifacts
+    meta_output_dir = os.path.join(run_dir, "meta_labeling")
+    meta_system.artifact_generator.generate_summary_artifacts(meta_results, meta_output_dir)
+    
+    # Print summary
+    summary_stats = meta_system.get_summary_statistics()
+    print(f"\nMeta-Labeling Results:")
+    print(f"  Total setups: {summary_stats.get('total_setups', 0)}")
+    print(f"  Successfully trained: {summary_stats.get('trained_count', 0)}")
+    print(f"  Average EV improvement: {summary_stats.get('avg_ev_improvement', 0):.4f}")
+    print(f"  Average Sharpe improvement: {summary_stats.get('avg_sharpe_improvement', 0):.4f}")
+    print(f"  Average retention rate: {summary_stats.get('avg_retention_rate', 0):.4f}")
+    print(f"  Average model accuracy: {summary_stats.get('avg_accuracy', 0):.4f}")
+    print(f"  Artifacts written to: {meta_output_dir}")

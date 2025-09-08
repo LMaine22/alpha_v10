@@ -1,7 +1,7 @@
 # alpha_discovery/config.py
 
 from pydantic import BaseModel
-from typing import List, Literal, Optional, Dict
+from typing import List, Literal, Optional, Dict, Any
 from datetime import date
 
 
@@ -10,16 +10,19 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 100
+    population_size: int = 150
     generations: int = 10
     elitism_rate: float = 0.1
     mutation_rate: float = 0.2
-    seed: int = 47
+    seed: int = 51
     setup_lengths_to_explore: List[int] = [2]
 
     # Verbosity & debugging used by NSGA layer (added)
     verbose: int = 2              # 0..3 (2 = extra progress summaries)
     debug_sequential: bool = False   # True = evaluate in-process (no joblib)
+    
+    # Island Model Configuration
+    islands: Optional['IslandConfig'] = None
 
 
 # -----------------------------
@@ -79,6 +82,86 @@ class GaDiversityConfig(BaseModel):
 
 
 # -----------------------------
+# Island Model Configuration
+# -----------------------------
+class IslandConfig(BaseModel):
+    """Island Model Parameters for Genetic Algorithm"""
+    enabled: bool = True
+    n_islands: int = 4
+    migration_interval: int = 5        # generations between migrations
+    migration_size: float = 0.1        # % of island population migrated
+    replace_strategy: str = "worst"    # "worst" | "random"
+    sync_final: bool = True            # merge all islands at end
+    
+    # Island-specific population sizes (if different from main)
+    island_population_size: Optional[int] = None  # None = use main population_size / n_islands
+    
+    # Migration topology
+    migration_topology: str = "ring"   # "ring" | "random" | "all_to_all"
+    
+    # Logging per island
+    log_island_metrics: bool = True
+
+
+# -----------------------------
+# Meta-Labeling Configuration
+# -----------------------------
+class MetaLabelingConfig(BaseModel):
+    """Meta-Labeling Filter Configuration"""
+    enabled: bool = False
+    
+    # Training parameters
+    min_trades_for_meta: int = 20          # Minimum trades needed to train meta-model
+    min_trades_per_ticker: int = 10        # Minimum trades per ticker for ticker-specific models
+    use_pooled_models: bool = True         # Pool across tickers if insufficient data
+    
+    # Cross-validation
+    cv_folds: int = 5                      # Number of CV folds
+    embargo_days: int = 10                 # Embargo period (≥ max hold period)
+    test_size: float = 0.2                 # Test set size for final evaluation
+    
+    # Meta-feature configuration
+    options_flow_features: List[str] = [
+        "3MO_CALL_IMP_VOL", "3MO_PUT_IMP_VOL", "IVOL_MONEYNESS",
+        "PUT_CALL_VOLUME_RATIO_CUR_DAY", "TOT_OPT_VOLUME_CUR_DAY",
+        "OPEN_INT_TOTAL_CALL", "OPEN_INT_TOTAL_PUT"
+    ]
+    
+    underlying_context_features: List[str] = [
+        "VOLATILITY_90D", "TURNOVER", "PX_LAST"
+    ]
+    
+    sentiment_features: List[str] = [
+        "TWITTER_COUNT", "NEWS_COUNT", "NET_SENTIMENT"
+    ]
+    
+    event_features: List[str] = [
+        "EV_pre_window", "EV_in_window", "EV_after_surprise"
+    ]
+    
+    setup_internal_features: List[str] = [
+        "trigger_z_score", "distance_to_threshold"
+    ]
+    
+    # Recent performance features
+    recent_hit_rate_window: int = 10       # Last K trades for hit rate calculation
+    
+    # Threshold optimization
+    min_trade_retention: float = 0.5       # Retain at least 50% of trades
+    max_trade_retention: float = 0.8       # Retain at most 80% of trades
+    threshold_optimization_metric: str = "expected_value"  # "expected_value" | "sharpe" | "sortino"
+    
+    # Model configuration
+    model_type: str = "logistic_regression"  # "logistic_regression" | "random_forest" | "xgboost"
+    model_params: Dict[str, Any] = {}       # Model-specific parameters
+    
+    # Evaluation
+    shadow_mode: bool = True               # Run in shadow mode (no changes to base system)
+    generate_artifacts: bool = True        # Generate detailed artifacts
+    log_meta_decisions: bool = True        # Log individual meta decisions
+
+
+# -----------------------------
 # Validation / splits
 # -----------------------------
 class ValidationConfig(BaseModel):
@@ -116,7 +199,7 @@ class OptionsConfig(BaseModel):
 
     # ===== Policy selection =====
     # 'timebox_be_trail' (new) OR 'arm_trail' / 'exit' / 'scale_out' (legacy family)
-    pt_behavior: Literal['exit', 'arm_trail', 'scale_out', 'timebox_be_trail'] = 'timebox_be_trail'
+    pt_behavior: Literal['exit', 'arm_trail', 'scale_out', 'timebox_be_trail', 'regime_aware'] = 'regime_aware'
 
     # ===== New policy knobs (used when pt_behavior == 'timebox_be_trail') =====
     be_trigger_multiple: float = 1.20   # arm breakeven at +25% on option price
@@ -284,11 +367,16 @@ class Settings(BaseModel):
     stage2: Stage2Config = Stage2Config()
     stage3: Stage3Config = Stage3Config()
     regime_aware: RegimeAwareConfig = RegimeAwareConfig()
+    meta_labeling: MetaLabelingConfig = MetaLabelingConfig()
 
 
 
 # Instantiate a global settings object for easy import
 settings = Settings()
+
+# Set default island config
+if settings.ga.islands is None:
+    settings.ga.islands = IslandConfig()
 
 def gauntlet_cfg(settings: Settings) -> dict:
     """Flattened config keys for gauntlet stages (Stage1, Stage2, Stage3)."""

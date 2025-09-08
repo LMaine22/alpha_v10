@@ -57,19 +57,28 @@ EVENT_FEATURE_MAPPING = {
 
 def _get_interpretable_event_name(feature_name: str) -> str:
     """Convert generic EV_* feature names to more interpretable event types."""
-    # Check if it's an event feature (look for EV__EV_ anywhere in the name)
-    if '_EV__EV_' in feature_name:
-        # Extract the base feature name (after EV__EV_)
-        base_name = feature_name.split('_EV__EV_')[-1]
-        # Create the full feature key for lookup
-        full_key = f"EV__EV_{base_name}"
-        mapped_name = EVENT_FEATURE_MAPPING.get(full_key, f"Event: {base_name}")
-        # Return with ticker prefix if present
-        if '_EV__EV_' in feature_name:
-            ticker_part = feature_name.split('_EV__EV_')[0]
-            return f"{ticker_part}: {mapped_name}"
-        return mapped_name
-    return feature_name
+    # Check if it's an event feature by looking for event-related patterns
+    event_patterns = [
+        '_in_window', '_pre_window', '_after_surprise', '_tail_flag', 
+        '_surprise_dispersion', '_revision_z', '_net_info_surprise',
+        '_days_to_high', '_is_event_week', '_dense_macro_window'
+    ]
+    
+    is_event_feature = any(pattern in feature_name for pattern in event_patterns)
+    
+    if is_event_feature:
+        # Event features are global - remove ticker prefix if present
+        # Look for ticker pattern: "TICKER Event_Feature_Name"
+        parts = feature_name.split('_', 1)
+        if len(parts) == 2 and ' ' in parts[0]:
+            # First part looks like a ticker (contains space), second part is the event feature
+            return parts[1]  # Return just the event feature name
+        else:
+            # No ticker prefix, return as-is
+            return feature_name
+    else:
+        # Non-event feature, keep ticker prefix
+        return feature_name
 
 # ===================================================================
 # PRIMITIVE SIGNAL GRAMMAR

@@ -1,7 +1,7 @@
 # alpha_discovery/search/population.py
 
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from ..config import settings
 
@@ -13,12 +13,14 @@ TICKER_MUTATION_PROB = 0.15 # 15% chance to mutate the ticker, 85% to mutate a s
 def initialize_population(
         rng: np.random.Generator,
         all_signal_ids: List[str],
+        population_size: Optional[int] = None,
 ) -> List[Tuple[str, List[str]]]:
     """
     Creates the initial random population of specialized setups.
     Each individual is now a tuple: (ticker, [signal_ids]).
     """
-    print(f"Initializing specialized population of size {settings.ga.population_size}...")
+    pop_size = population_size or settings.ga.population_size
+    print(f"Initializing specialized population of size {pop_size}...")
     population: List[Tuple[str, List[str]]] = []
     tradable_tickers = settings.data.tradable_tickers
     if not tradable_tickers:
@@ -27,7 +29,7 @@ def initialize_population(
     # Use a set to ensure we don't create duplicate setups in the first generation
     seen_dna = set()
 
-    while len(population) < settings.ga.population_size:
+    while len(population) < pop_size:
         # 1. Randomly choose a ticker for this individual
         ticker = rng.choice(tradable_tickers)
 

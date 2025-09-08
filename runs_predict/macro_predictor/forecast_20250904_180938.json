@@ -1,0 +1,76 @@
+{
+  "as_of": "2025-09-04 18:09:38.288752",
+  "event_types": [
+    "Change in Nonfarm Payrolls",
+    "Change in Private Payrolls",
+    "Change in Manufact. Payrolls",
+    "Nonfarm Payrolls 3-Mo Avg Chg",
+    "Two-Month Payroll Net Revision",
+    "Average Hourly Earnings MoM",
+    "Average Hourly Earnings YoY",
+    "Average Weekly Hours All Employees",
+    "Unemployment Rate",
+    "Labor Force Participation Rate",
+    "Underemployment Rate"
+  ],
+  "bb_ticker_whitelist": [
+    "NFP TCH Index",
+    "NFP PCH Index",
+    "USMMMNCH Index",
+    "NFPPTCH3 Index",
+    "ECONGECC Index",
+    "AHE MOM% Index",
+    "AHE YOY% Index",
+    "AWH TOTL Index",
+    "USURTOT Index",
+    "PRUSTOT Index",
+    "USUDMAER Index"
+  ],
+  "next_event_date": "2025-09-05",
+  "features_used": [
+    "regime.CL1 Comdty.volZ_126",
+    "RTY Index.mom_5",
+    "EUR Curncy.vol_126",
+    "RTY Index.mom_126",
+    "macro.risk_on_score",
+    "XAU Curncy.mom_5",
+    "EUR Curncy.vol_z_126",
+    "MXWO Index.mom_1",
+    "RTY Index.mom_1",
+    "regime.USGG10YR Index.volZ_21",
+    "RTY Index.mom_63",
+    "beta.CL1 Comdty~SPX.z_126",
+    "EV_surprise_ewma_21",
+    "xau_mom_21",
+    "regime.USGG10YR Index.volZ_126",
+    "USGG10YR Index.vol_z_63",
+    "JPY Curncy.vol_z_126"
+  ],
+  "validation_weighted_MAE": 8.253088010676702,
+  "forecast": {
+    "y2_bps": {
+      "point": -5.514501275134082,
+      "q5": -12.698710471688761,
+      "q25": -8.623995542487542,
+      "q75": -2.1889483616343153,
+      "q95": 2.906289829947545,
+      "p_up": 0.152
+    },
+    "y10_bps": {
+      "point": -2.127447970275977,
+      "q5": -6.88064567200749,
+      "q25": -4.388445613334808,
+      "q75": 0.04921730526599738,
+      "q95": 2.8933806301033163,
+      "p_up": 0.258
+    },
+    "spx_pct": {
+      "point": -0.029184458090361298,
+      "q5": -0.6505357016259887,
+      "q25": -0.27053156954059726,
+      "q75": 0.2223146322108177,
+      "q95": 0.7086151359620968,
+      "p_up": 0.472
+    }
+  }
+}

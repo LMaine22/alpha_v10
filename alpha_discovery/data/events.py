@@ -608,9 +608,11 @@ def build_per_event_type_features(full_data_index: pd.DatetimeIndex, top_n_event
             )
             ticker_features.update(event_features)
         
-        # Add ticker prefix to all features
+        # Event features are global - don't add ticker prefix
+        # Only add if not already present (to avoid duplicates across tickers)
         for feature_name, feature_series in ticker_features.items():
-            all_features[f"{ticker}_{feature_name}"] = feature_series
+            if feature_name not in all_features:
+                all_features[feature_name] = feature_series
     
     # Combine all features
     result_df = pd.DataFrame(all_features, index=uni_index)

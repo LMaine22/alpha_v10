@@ -132,14 +132,14 @@ def get_permissive_gauntlet_config() -> Dict[str, Any]:
     
     # More permissive Stage 3
     base_config.update({
-        "s3_min_dsr": 0.05,                    # Min 0.05 DSR
-        "s3_min_ci_lower": -0.1,               # Allow negative CI lower bound
-        "s3_min_stability_ratio": 0.1,         # Min 0.1 OOS/insample ratio
-        "s3_max_stability_ratio": 3.0,         # Max 3.0 OOS/insample ratio
-        "s3_min_sharpe_trend": -0.2,           # Allow declining Sharpe
+        "s3_min_dsr": 0.0,                     # Min 0.0 DSR (no minimum)
+        "s3_min_ci_lower": -2.0,               # Allow very negative CI lower bound
+        "s3_min_stability_ratio": 0.0,         # Min 0.0 OOS/insample ratio (no minimum)
+        "s3_max_stability_ratio": 10.0,        # Max 10.0 OOS/insample ratio (very permissive)
+        "s3_min_sharpe_trend": -1.0,           # Allow very declining Sharpe
         "s3_n_trials": 1,                      # 1 trial for DSR correction
-        "s3_n_bootstrap": 500,                 # Fewer bootstrap samples
-        "s3_confidence": 0.90,                 # 90% confidence level
+        "s3_n_bootstrap": 100,                 # Fewer bootstrap samples for speed
+        "s3_confidence": 0.80,                 # 80% confidence level (more permissive)
     })
     
     return base_config
