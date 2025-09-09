@@ -236,7 +236,7 @@ def run_gauntlet_backtest(
     ledger = _mark_open_positions_at_eod(ledger, oos_end=oos_end, last_mark=last_mark).copy()
     ledger["setup_id"] = setup_id
     ledger["origin_fold"] = int(origin_fold)
-    ledger["signal_ids"] = ",".join(signal_ids)
+    ledger["signal_ids"] = ", ".join(sorted(signal_ids))
     ledger["specialized_ticker"] = specialized_ticker
 
     if _parse_bt_env_flag("BT_ENFORCE_EXCLUSIVITY", True):

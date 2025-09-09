@@ -195,6 +195,24 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                     )
             if VERBOSE >= 2:
                 _summarize_evals("Parents", evaluated_parents)
+            
+            # Print best Sortino and expectancy for this generation
+            best_sortino = -99.0
+            best_expectancy = -9999.0
+            for ind in evaluated_parents:
+                metrics_dict = ind.get('metrics', {})
+                sortino = metrics_dict.get('sortino_lb', -99.0)
+                expectancy = metrics_dict.get('expectancy', -9999.0)
+                
+                if sortino > best_sortino:
+                    best_sortino = sortino
+                if expectancy > best_expectancy:
+                    best_expectancy = expectancy
+            
+            tqdm.write(f"Gen {gen}/{g} | "
+                      f"Best Sortino: {best_sortino:.3f} | "
+                      f"Best Expectancy: {best_expectancy:.1f} | "
+                      f"Pop: {len(evaluated_parents)}")
 
             # Children: build, dedup vs parents+children
             existing_keys = { _dna(ind) for ind in parent_population }
@@ -264,7 +282,7 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
 
             # De-duplicate survivors by DNA (keep first by crowding order)
             uniq = []
-            seen: Set[Tuple[str, Tuple[str, ...]]] = set()
+            seen: Set[Tuple[str, ...]] = set()
             for ind in next_gen_parents:
                 key = _dna(ind["individual"])
                 if key in seen:

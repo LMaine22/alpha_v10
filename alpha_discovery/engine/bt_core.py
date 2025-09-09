@@ -16,6 +16,7 @@ from .bt_common import (
     ExitPolicy,
     _decide_exit_from_path,
     _policy_id,
+    _price_entry_exit_enhanced,
 )
 from .bt_common import _decide_exit_with_scale_out
 
@@ -40,6 +41,8 @@ def _decide_exit_timebox_be_trail(
     trail_arm_multiple: float = 1.40,    # +40% arms trailing
     trail_frac: float = 0.80             # 20% giveback once trailing is armed
 ) -> tuple[int, str, int]:
+    # DISABLED - Only regime-aware exits should be used for extreme runners
+    return len(price_path) - 1, "horizon", len(price_path) - 1
     """
     Returns (exit_idx, exit_reason, holding_days_actual).
     Assumes long option price series (direction & PnL sign handled elsewhere).
@@ -131,13 +134,21 @@ def run_setup_backtest_options(
 
     _maybe_reset_caches(master_df)
 
-    # Rising-edge trigger from all selected signals
+    # Rising-edge trigger from all selected signals with reset mechanism
     try:
         trigger_df = signals_df[setup_signals].astype("boolean").fillna(False)
         trigger_mask = trigger_df.all(axis=1)
     except KeyError as e:
         print(f" Error: Missing signals in signals_df: {e}")
         return pd.DataFrame()
+
+    # Enhanced signal reset mechanism: force reset after signal has been true for too long
+    signal_reset_days = getattr(settings.options, "signal_reset_days", 5)
+    if signal_reset_days > 0:
+        # Create a mask that resets signals after they've been true for too long
+        signal_streak = trigger_mask.groupby((~trigger_mask).cumsum()).cumsum()
+        reset_mask = signal_streak > signal_reset_days
+        trigger_mask = trigger_mask & ~reset_mask
 
     prev = trigger_mask.shift(1, fill_value=False)
     edge = trigger_mask & ~prev
@@ -168,36 +179,59 @@ def run_setup_backtest_options(
                 S0 = _cached_underlier(master_df, ticker, trigger_date)
                 if S0 is None:
                     continue
-                entry_iv3m = _cached_iv3m(master_df, ticker, trigger_date, direction, fallback=None)
-                if entry_iv3m is None:
-                    continue
-
-                K = _build_option_strike(S0, direction)
-                T0_years = max(1, tenor_bd) / 252.0
-                slip = _slippage_for_tenor(tenor_bd)
-
+                # Try enhanced pricing first
                 horizon_date = _add_bdays(trigger_date, h)
-
                 S_hz = _cached_underlier(master_df, ticker, horizon_date)
                 if S_hz is None:
                     continue
-                exit_iv3m_hz = _cached_iv3m(master_df, ticker, horizon_date, direction, fallback=entry_iv3m)
-                if exit_iv3m_hz is None:
-                    continue
 
-                entry_sigma_T0 = _cached_sigma_map(master_df, ticker, trigger_date, tenor_bd, entry_iv3m)
-                T1_bd_hz = max(1, tenor_bd - h)
-                exit_sigma_T1_hz = _cached_sigma_map(master_df, ticker, horizon_date, T1_bd_hz, exit_iv3m_hz)
-                if entry_sigma_T0 is None or exit_sigma_T1_hz is None:
-                    continue
+                slip = _slippage_for_tenor(tenor_bd)
 
-                priced = _cached_price_entry_exit(
-                    S0=S0, S1=S_hz, K=K, T0_years=T0_years, h_days=h, r=r,
-                    direction="long" if direction == "long" else "short",
-                    entry_sigma=entry_sigma_T0, exit_sigma=exit_sigma_T1_hz, q=0.0
+                # Use enhanced pricing system
+                priced = _price_entry_exit_enhanced(
+                    s0=S0, s1=S_hz, t0_days=tenor_bd, h_days=h, r=r,
+                    direction=direction, ticker=ticker, 
+                    entry_date=trigger_date, exit_date=horizon_date,
+                    master_df=master_df, q=0.0
                 )
+
+                # Set variables needed for price path regardless of pricing method
                 if priced is None:
-                    continue
+                    # Fallback to traditional pricing
+                    entry_iv3m = _cached_iv3m(master_df, ticker, trigger_date, direction, fallback=None)
+                    if entry_iv3m is None:
+                        continue
+                    exit_iv3m_hz = _cached_iv3m(master_df, ticker, horizon_date, direction, fallback=entry_iv3m)
+                    if exit_iv3m_hz is None:
+                        continue
+
+                    K = _build_option_strike(S0, direction)
+                    T0_years = max(1, tenor_bd) / 252.0
+                    entry_sigma_T0 = _cached_sigma_map(master_df, ticker, trigger_date, tenor_bd, entry_iv3m)
+                    T1_bd_hz = max(1, tenor_bd - h)
+                    exit_sigma_T1_hz = _cached_sigma_map(master_df, ticker, horizon_date, T1_bd_hz, exit_iv3m_hz)
+                    if entry_sigma_T0 is None or exit_sigma_T1_hz is None:
+                        continue
+
+                    priced = _cached_price_entry_exit(
+                        S0=S0, S1=S_hz, K=K, T0_years=T0_years, h_days=h, r=r,
+                        direction="long" if direction == "long" else "short",
+                        entry_sigma=entry_sigma_T0, exit_sigma=exit_sigma_T1_hz, q=0.0
+                    )
+                    if priced is None:
+                        continue
+                else:
+                    # Enhanced pricing succeeded - extract values and set fallback values for price path
+                    K = priced.get("K_over_S", 1.0) * S0
+                    T0_years = max(1, tenor_bd) / 252.0
+                    
+                    # For price path compatibility, get 3M IV values as fallback
+                    entry_iv3m = _cached_iv3m(master_df, ticker, trigger_date, direction, fallback=None)
+                    if entry_iv3m is None:
+                        # If 3M IV not available, use enhanced pricing IV
+                        entry_iv3m = priced.get("sigma_entry", priced["entry_iv"])
+                    
+                    entry_sigma_T0 = priced.get("sigma_entry", priced["entry_iv"])
 
                 entry_exec = float(priced["entry_price"]) * (1.0 + slip)
                 if entry_exec < min_premium:
@@ -323,7 +357,8 @@ def run_setup_backtest_options(
                             )
                             pnl_pc = pnl_dlr / capital if capital > 0 else 0.0
 
-                            rows.append({
+                            # Build base row
+                            base_row = {
                                 "trigger_date": pd.Timestamp(trigger_date),
                                 "exit_date": pd.Timestamp(price_path.index[final_idx]),
                                 "ticker": ticker,
@@ -334,11 +369,27 @@ def run_setup_backtest_options(
                                 "entry_underlying": float(S0),
                                 "exit_underlying": float(_cached_underlier(master_df, ticker, price_path.index[final_idx]) or S0),
                                 "entry_iv": float(priced["entry_iv"]),
-                                "exit_iv": float(exit_sigma_T1_hz),
+                                "exit_iv": float(priced.get("exit_iv", priced["entry_iv"])),
 
                                 # Prices (exec)
                                 "entry_option_price": float(entry_exec),
                                 "exit_option_price": float(exit_exec_final),
+
+                                # NEW: Enhanced IV tracking fields
+                                "iv_anchor": str(priced.get("iv_anchor", "")),
+                                "delta_bucket": str(priced.get("delta_bucket", "")),
+                                "iv_ref_days": int(priced.get("iv_ref_days", 0)),
+                                "sigma_anchor": float(priced.get("sigma_anchor", 0.0)),
+                                "sigma_entry": float(priced.get("sigma_entry", 0.0)),
+                                "sigma_exit": float(priced.get("sigma_exit", 0.0)),
+                                "delta_target": priced.get("delta_target"),  # Can be None
+                                "delta_achieved": priced.get("delta_achieved"),  # Can be None  
+                                "K_over_S": float(priced.get("K_over_S", K / S0)),
+                                "fallback_to_3M": bool(priced.get("fallback_to_3M", False)),
+                            }
+                            
+                            rows.append({
+                                **base_row,
 
                                 # Partial exit info
                                 "partial_exit_date": pd.Timestamp(price_path.index[pt_idx]),
@@ -428,7 +479,7 @@ def run_setup_backtest_options(
                         "entry_underlying": float(S0),
                         "exit_underlying": float(_cached_underlier(master_df, ticker, chosen_exit_date) or S0),
                         "entry_iv": float(priced["entry_iv"]),
-                        "exit_iv": float(exit_sigma_T1_hz),
+                        "exit_iv": float(priced.get("exit_iv", priced["entry_iv"])),
                         "entry_option_price": float(entry_exec),
                         "exit_option_price": float(exit_exec),
 
@@ -441,6 +492,18 @@ def run_setup_backtest_options(
                         "exit_reason": exit_reason,
                         "exit_policy_id": policy_str,
                         "holding_days_actual": int(holding_days_actual),
+
+                        # NEW: Enhanced IV tracking fields
+                        "iv_anchor": str(priced.get("iv_anchor", "")),
+                        "delta_bucket": str(priced.get("delta_bucket", "")),
+                        "iv_ref_days": int(priced.get("iv_ref_days", 0)),
+                        "sigma_anchor": float(priced.get("sigma_anchor", 0.0)),
+                        "sigma_entry": float(priced.get("sigma_entry", 0.0)),
+                        "sigma_exit": float(priced.get("sigma_exit", 0.0)),
+                        "delta_target": priced.get("delta_target"),  # Can be None
+                        "delta_achieved": priced.get("delta_achieved"),  # Can be None  
+                        "K_over_S": float(priced.get("K_over_S", K / S0)),
+                        "fallback_to_3M": bool(priced.get("fallback_to_3M", False)),
                     })
 
             # Intraday patterns (if enabled)
@@ -567,4 +630,16 @@ def _add_intraday_trade(rows: list, master_df: pd.DataFrame, ticker: str, trigge
         "exit_reason": f"{pattern}_pattern",  # Special exit reason for intraday patterns
         "exit_policy_id": f"intraday_{pattern}",
         "holding_days_actual": 1,
+        
+        # NEW: Enhanced IV tracking fields (legacy pricing for intraday)
+        "iv_anchor": "3M",  # Intraday uses legacy pricing
+        "delta_bucket": "ATM",
+        "iv_ref_days": 63,
+        "sigma_anchor": float(priced["entry_iv"]),
+        "sigma_entry": float(priced["entry_iv"]),
+        "sigma_exit": float(priced["exit_iv"]),
+        "delta_target": None,
+        "delta_achieved": None,
+        "K_over_S": float(K / S0),
+        "fallback_to_3M": True,  # Intraday always uses fallback
     })

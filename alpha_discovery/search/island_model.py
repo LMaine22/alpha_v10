@@ -514,14 +514,40 @@ class IslandManager:
         if not self.config.log_island_metrics:
             return
         
-        logging.info(f"Generation {generation} - Island Metrics:")
-        for metrics in metrics:
-            logging.info(f"  Island {metrics.island_id}: "
-                        f"pop={metrics.population_size}, "
-                        f"best_fitness={metrics.best_fitness}, "
-                        f"diversity={metrics.diversity_metric:.3f}, "
-                        f"migrations_sent={metrics.migration_sent}, "
-                        f"migrations_received={metrics.migration_received}")
+        # Get best Sortino and expectancy across all islands
+        best_sortino = -99.0
+        best_expectancy = -9999.0
+        total_pop = 0
+        
+        for island in self.islands:
+            total_pop += len(island.evaluated_parents)
+            for ind in island.evaluated_parents:
+                metrics_dict = ind.get('metrics', {})
+                sortino = metrics_dict.get('sortino_lb', -99.0)
+                expectancy = metrics_dict.get('expectancy', -9999.0)
+                
+                if sortino > best_sortino:
+                    best_sortino = sortino
+                if expectancy > best_expectancy:
+                    best_expectancy = expectancy
+        
+        # Print per-generation summary line
+        from tqdm.auto import tqdm
+        tqdm.write(f"Gen {generation}/{settings.ga.generations} | "
+                  f"Best Sortino: {best_sortino:.3f} | "
+                  f"Best Expectancy: {best_expectancy:.1f} | "
+                  f"Total Pop: {total_pop}")
+        
+        # Detailed island metrics (only if verbose)
+        if settings.ga.verbose >= 3:
+            logging.info(f"Generation {generation} - Island Metrics:")
+            for island_metrics in metrics:
+                logging.info(f"  Island {island_metrics.island_id}: "
+                            f"pop={island_metrics.population_size}, "
+                            f"best_fitness={island_metrics.best_fitness}, "
+                            f"diversity={island_metrics.diversity_metric:.3f}, "
+                            f"migrations_sent={island_metrics.migration_sent}, "
+                            f"migrations_received={island_metrics.migration_received}")
     
     def get_migration_summary(self) -> Dict[str, Any]:
         """Get summary of migration events."""

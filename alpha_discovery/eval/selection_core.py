@@ -115,7 +115,10 @@ def _compute_metrics_from_returns(daily_returns: pd.Series) -> Dict[str, float]:
         one_plus = 1.0 + cleaned
         if (one_plus > 0).all():
             # geometric mean via log returns (safe, no invalid power)
-            annualized_return = float(np.exp(np.log1p(cleaned).mean() * 252.0) - 1.0)
+            log_mean = np.log1p(cleaned).mean() * 252.0
+            # Clip to prevent overflow in exp operation
+            log_mean_clipped = np.clip(log_mean, -20, 20)
+            annualized_return = float(np.exp(log_mean_clipped) - 1.0)
         else:
             # fallback: arithmetic scaling if any (1+r_t) <= 0
             annualized_return = float(cleaned.mean() * 252.0)

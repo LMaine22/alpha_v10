@@ -160,8 +160,23 @@ def write_gauntlet_summary(
         "oos_total_trades", "oos_open_trades", "oos_sum_pnl_dollars", 
         "oos_final_nav", "oos_nav_total_return_pct", "oos_dsr", "expectancy",
     ]
+    
+    # Fix description: use pareto description if available, otherwise generate from signal_ids
+    if "description" not in final_df.columns or final_df["description"].isna().all():
+        # Generate description from signal_ids if not available
+        def generate_description_from_signals(signal_ids_str):
+            if pd.isna(signal_ids_str) or not signal_ids_str:
+                return "Unknown setup"
+            # This is a simplified description - in practice you'd want to look up signal metadata
+            return f"Setup with signals: {signal_ids_str}"
+        
+        final_df["description"] = final_df.get("signal_ids", "").apply(generate_description_from_signals)
+    
     existing_cols = [c for c in col_order if c in final_df.columns]
-    final_df = final_df[existing_cols + [c for c in final_df.columns if c not in existing_cols]]
+    final_df = final_df[existing_cols]  # Only keep the clean columns, don't add extras
+
+    # Remove duplicates based on setup_id (keep first occurrence)
+    final_df = final_df.drop_duplicates(subset=["setup_id"], keep="first")
 
     # Sort — prioritize DSR, then pvalue, then recency
     sort_cols = []
@@ -288,8 +303,23 @@ def write_all_setups_summary(
         "oos_total_trades", "oos_open_trades", "oos_sum_pnl_dollars", 
         "oos_final_nav", "oos_nav_total_return_pct", "oos_dsr", "expectancy",
     ]
+    
+    # Fix description: use pareto description if available, otherwise generate from signal_ids
+    if "description" not in final_df.columns or final_df["description"].isna().all():
+        # Generate description from signal_ids if not available
+        def generate_description_from_signals(signal_ids_str):
+            if pd.isna(signal_ids_str) or not signal_ids_str:
+                return "Unknown setup"
+            # This is a simplified description - in practice you'd want to look up signal metadata
+            return f"Setup with signals: {signal_ids_str}"
+        
+        final_df["description"] = final_df.get("signal_ids", "").apply(generate_description_from_signals)
+    
     existing_cols = [c for c in col_order if c in final_df.columns]
-    final_df = final_df[existing_cols + [c for c in final_df.columns if c not in existing_cols]]
+    final_df = final_df[existing_cols]  # Only keep the clean columns, don't add extras
+
+    # Remove duplicates based on setup_id (keep first occurrence)
+    final_df = final_df.drop_duplicates(subset=["setup_id"], keep="first")
 
     # Sort by OOS performance (descending PnL, then by recency)
     sort_cols = []
@@ -435,7 +465,10 @@ def write_open_trades_summary(
         "oos_final_nav", "oos_nav_total_return_pct", "oos_dsr", "expectancy",
     ]
     existing_cols = [c for c in col_order if c in final_df.columns]
-    final_df = final_df[existing_cols + [c for c in final_df.columns if c not in existing_cols]]
+    final_df = final_df[existing_cols]  # Only keep the clean columns, don't add extras
+
+    # Remove duplicates based on setup_id (keep first occurrence)
+    final_df = final_df.drop_duplicates(subset=["setup_id"], keep="first")
 
     # Sort by open trades count (descending) then by OOS performance
     sort_cols = []

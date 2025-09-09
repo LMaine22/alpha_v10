@@ -146,7 +146,7 @@ def compile_signals(feature_matrix: pd.DataFrame) -> Tuple[pd.DataFrame, List[Di
             elif rule['type'] == 'z_score':
                 # Only apply this rule to features that aren't already z-scores
                 if 'zscore' not in feature_name:
-                    z_scores = fcore.zscore_rolling(feature_series, window=60)
+                    z_scores = fcore.zscore_rolling(feature_series, 60)
                     if rule['operator'] == '>':
                         signal_series = (z_scores > rule['threshold'])
                     else:

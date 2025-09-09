@@ -1,431 +1,369 @@
-import pandas as pd
+# registry.py  (drop-in, wired to your tickers/fields)
 import numpy as np
-from typing import Dict, Callable, List, Tuple
+import pandas as pd
+from typing import Dict, Callable, List
 
 from ..config import settings
-from . import core as fcore  # fcore for "feature core"
-from ..data.events import build_event_features, build_per_event_type_features
+from . import core as f
+from ..data.events import build_event_features  # daily EV_* features from your events.py
 
 
-def _get_series(df: pd.DataFrame, ticker: str, column: str) -> pd.Series:
-    """Extract a single ticker/column series from the main dataframe."""
-    col_name = f"{ticker}_{column}"
-    if col_name in df.columns:
-        return pd.to_numeric(df[col_name], errors="coerce")
-    # Empty series with the same index if the column is not found
-    return pd.Series(index=df.index, dtype=float)
+# ----------------------
+# Column helpers
+# ----------------------
+def _col(df: pd.DataFrame, tkr: str, field: str) -> pd.Series:
+    name = f"{tkr}_{field}"
+    return pd.to_numeric(df.get(name, pd.Series(index=df.index, dtype=float)), errors="coerce")
 
 
-# ===================================================================
-# FEATURE DEFINITION REGISTRY
-# Each entry defines HOW to build a feature.
-# - key: A descriptive feature name.
-# - value: lambda(df, t) or lambda(df, t1, t2) -> pd.Series
-# All features are lagged by 1 in build_feature_matrix to avoid lookahead.
-# ===================================================================
+def _ret1d(df: pd.DataFrame, t: str) -> pd.Series:
+    return f.pct_change_n(_col(df, t, "PX_LAST"), 1)
 
-FEATURE_SPECS: Dict[str, Callable] = {
-    # =========================
-    # A) CORE (Kept from your build)
-    # =========================
-    "px_zscore_90d": lambda df, t: fcore.zscore_rolling(
-        _get_series(df, t, "PX_LAST"), window=90
-    ),
-    "realized_vol_21d": lambda df, t: fcore.get_realized_vol(
-        _get_series(df, t, "PX_LAST"), window=21
-    ),
-    "news_pub_z_30d": lambda df, t: fcore.spike_z(
-        _get_series(df, t, "NEWS_PUBLICATION_COUNT"), 30
-    ),
-    "news_heat_z_30d": lambda df, t: fcore.spike_z(
-        _get_series(df, t, "NEWS_HEAT_READ_DMAX"), 30
-    ),
-    "tw_pub_z_30d": lambda df, t: fcore.spike_z(
-        _get_series(df, t, "TWITTER_PUBLICATION_COUNT"), 30
-    ),
-    "tw_sent_avg_dev_7d": lambda df, t: fcore.deviation_from_mean(
-        _get_series(df, t, "TWITTER_SENTIMENT_DAILY_AVG"), 7
-    ),
-    "vol_turnover_zscore_60d": lambda df, t: fcore.zscore_rolling(
-        _get_series(df, t, "TURNOVER"), window=60
-    ),
 
-    # =========================
-    # B) PRICE / MICROSTRUCTURE (Expanded)
-    # =========================
-    "price.mom_21":   lambda D, t: fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 21),
-    "price.mom_63":   lambda D, t: fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 63),
-    "price.mom_126":  lambda D, t: fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 126),
+def _dvol(df: pd.DataFrame, t: str) -> pd.Series:
+    sub = pd.DataFrame({
+        "TURNOVER": _col(df, t, "TURNOVER"),
+        "PX_LAST": _col(df, t, "PX_LAST"),
+        "PX_VOLUME": _col(df, t, "PX_VOLUME"),
+    })
+    return f.safe_dollar_volume(sub)
 
-    "price.vol_gk_21": lambda D, t: fcore.garman_klass_vol(
-        _get_series(D, t, "PX_OPEN"),
-        _get_series(D, t, "PX_HIGH"),
-        _get_series(D, t, "PX_LOW"),
-        _get_series(D, t, "PX_LAST"),
-        window=21
-    ),
 
-    "price.downside_semivar_21": lambda D, t: fcore.semivariance(
-        fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 1), window=21, downside=True
-    ),
+def _pcr(df: pd.DataFrame, t: str) -> pd.Series:
+    return _col(df, t, "PUT_CALL_VOLUME_RATIO_CUR_DAY")
 
-    "price.drawdown_63": lambda D, t: fcore.drawdown_from_high(
-        _get_series(D, t, "PX_LAST"), window=63
-    ),
 
-    "px_trend_5_20_z_60d": lambda df, t: fcore.zscore_rolling(
-        fcore.momentum_trend(_get_series(df, t, "PX_LAST"), 5, 20), window=60
-    ),
-    "px_range_polarity_z_60d": lambda df, t: fcore.zscore_rolling(
-        fcore.range_polarity(
-            _get_series(df, t, "PX_LAST"),
-            _get_series(df, t, "PX_LOW"),
-            _get_series(df, t, "PX_HIGH"),
-        ),
-        window=60,
-    ),
-    "turnover_minus_volume_z_60d": lambda df, t: (
-        fcore.zscore_rolling(_get_series(df, t, "TURNOVER"), 60)
-        - fcore.zscore_rolling(_get_series(df, t, "PX_VOLUME"), 60)
-    ),
+def _oi_skew(df: pd.DataFrame, t: str) -> pd.Series:
+    c = _col(df, t, "OPEN_INT_TOTAL_CALL")
+    p = _col(df, t, "OPEN_INT_TOTAL_PUT")
+    return f.safe_div(c - p, c + p)
 
-    # =========================
-    # C) DERIVATIVES / VOL (IVOL-Aware)
-    # =========================
-    "iv_call3m_shock_1d_z_30d": lambda df, t: fcore.zscore_rolling(
-        fcore.diff_n(_get_series(df, t, "3MO_CALL_IMP_VOL"), 1), window=30
-    ),
-    "iv_term_call3m_minus_rv21_z_60d": lambda df, t: fcore.zscore_rolling(
-        _get_series(df, t, "3MO_CALL_IMP_VOL") - fcore.get_realized_vol(_get_series(df, t, "PX_LAST"), 21),
-        window=60,
-    ),
-    "iv_skew_put_minus_call_3mo_z_60d": lambda df, t: fcore.zscore_rolling(
-        _get_series(df, t, "3MO_PUT_IMP_VOL") - _get_series(df, t, "3MO_CALL_IMP_VOL"),
-        window=60,
-    ),
-    "moneyness_tilt_call3m_minus_moneyness_z_60d": lambda df, t: fcore.zscore_rolling(
-        _get_series(df, t, "3MO_CALL_IMP_VOL") - _get_series(df, t, "IVOL_MONEYNESS"),
-        window=60,
-    ),
-    "iv_vs_newsheat_divergence_call3m_z_60d": lambda df, t: (
-        fcore.zscore_rolling(_get_series(df, t, "3MO_CALL_IMP_VOL"), 60)
-        - fcore.zscore_rolling(_get_series(df, t, "NEWS_HEAT_READ_DMAX"), 60)
-    ),
-    "options_total_volume_spike_z_30d": lambda df, t: fcore.zscore_rolling(
-        _get_series(df, t, "TOT_OPT_VOLUME_CUR_DAY"), window=30
-    ),
-    "options_vs_equity_flow_z_60d": lambda df, t: fcore.zscore_rolling(
-        fcore.safe_divide(
-            _get_series(df, t, "TOT_OPT_VOLUME_CUR_DAY"),
-            _get_series(df, t, "PX_VOLUME"),
-        ),
-        window=60,
-    ),
-    "oi_callput_skew_z_60d": lambda df, t: fcore.zscore_rolling(
-        fcore.safe_divide(
-            (_get_series(df, t, "OPEN_INT_TOTAL_CALL") - _get_series(df, t, "OPEN_INT_TOTAL_PUT")),
-            (_get_series(df, t, "OPEN_INT_TOTAL_CALL") + _get_series(df, t, "OPEN_INT_TOTAL_PUT")),
-        ),
-        window=60,
-    ),
-    "open_interest_call_pctchg_3d_z_60d": lambda df, t: fcore.zscore_rolling(
-        fcore.pct_change_n(_get_series(df, t, "OPEN_INT_TOTAL_CALL"), 3), window=60
-    ),
 
-    # Additionally, clean options bundle
-    "opt.iv_percentile_252": lambda D, t: fcore.percentile(_get_series(D, t, "3MO_CALL_IMP_VOL"), 252),
-    "opt.vrp_21": lambda D, t: (_get_series(D, t, "3MO_CALL_IMP_VOL") - fcore.get_realized_vol(_get_series(D, t, "PX_LAST"), 21)),
-    "opt.pcr_z_21": lambda D, t: fcore.zscore_rolling(_get_series(D, t, "PUT_CALL_VOLUME_RATIO_CUR_DAY"), 21),
-    "opt.oi_mom_5": lambda D, t: fcore.pct_change_n(
-        _get_series(D, t, "OPEN_INT_TOTAL_CALL") + _get_series(D, t, "OPEN_INT_TOTAL_PUT"), 5
-    ),
+def _options_available(df: pd.DataFrame, t: str) -> pd.Series:
+    has = (
+        _col(df, t, "3MO_CALL_IMP_VOL").notna()
+        | _col(df, t, "PUT_IMP_VOL_30D").notna()
+        | _col(df, t, "CALL_IMP_VOL_30D").notna()
+    ).astype(float)
+    return has
 
-    # =========================
-    # D) SENTIMENT / NEWS COMPOSITES
-    # =========================
-    "tw_posneg_balance_z_60d": lambda df, t: fcore.zscore_rolling(
-        fcore.safe_divide(
-            (_get_series(df, t, "TWITTER_POS_SENTIMENT_COUNT") - _get_series(df, t, "TWITTER_NEG_SENTIMENT_COUNT")),
-            (_get_series(df, t, "TWITTER_POS_SENTIMENT_COUNT") + _get_series(df, t, "TWITTER_NEG_SENTIMENT_COUNT")),
-        ),
-        window=60,
-    ),
-    "px_vs_sentiment_divergence_z_60d": lambda df, t: fcore.zscore_rolling(
-        (fcore.pct_change_n(_get_series(df, t, "PX_LAST"), 7) - fcore.diff_n(_get_series(df, t, "TWITTER_SENTIMENT_DAILY_AVG"), 7)),
-        window=60,
-    ),
-    "sent.dispersion_21": lambda D, t: pd.concat([
-        _get_series(D, t, "TWITTER_POS_SENTIMENT_COUNT"),
-        _get_series(D, t, "TWITTER_NEG_SENTIMENT_COUNT"),
-        _get_series(D, t, "TWITTER_NEUTRAL_SENTIMENT_CNT"),
-        _get_series(D, t, "NEWS_PUBLICATION_COUNT"),
-    ], axis=1).pct_change(fill_method=None).rolling(21).std().mean(axis=1),
-    "sent.news_heat_tail_21": lambda D, t: fcore.zscore_rolling(_get_series(D, t, "NEWS_HEAT_READ_DMAX"), 21).clip(lower=0),
 
-    # =========================
-    # E) FLOW / PCR (Kept replacement style)
-    # =========================
-    "pcr_ema5_z_30d": lambda df, t: fcore.zscore_rolling(
-        _get_series(df, t, "PUT_CALL_VOLUME_RATIO_CUR_DAY").ewm(span=5, min_periods=2).mean(),
-        window=30,
-    ),
+# ----------------------
+# Universe
+# ----------------------
+TICKS_ALL: List[str] = [
+    "CRM US Equity","QQQ US Equity","SPY US Equity","TSLA US Equity","AMZN US Equity","GOOGL US Equity",
+    "MSFT US Equity","AAPL US Equity","LLY US Equity","CRWV US Equity","JPM US Equity","C US Equity",
+    "PLTR US Equity","ARM US Equity","AMD US Equity","BMY US Equity","PEP US Equity","NKE US Equity",
+    "WMT US Equity","DXY Curncy","JPY Curncy","EUR Curncy","XAU Curncy","XLE US Equity","CL1 Comdty",
+    "XLK US Equity","XLRE US Equity","XLC US Equity","XLV US Equity","MSTR US Equity","COIN US Equity",
+    "BTC Index","XLY US Equity","EFA US Equity","MXWO Index","EEM US Equity","USGG10YR Index",
+    "USGG2YR Index","XLP US Equity","SPX Index","NDX Index","RTY Index","HG1 Comdty"
+]
 
-    # =========================
-    # F) REGIME / INTERMARKET (uses macro tickers verbatim)
-    # =========================
-    "vol90d_regime_z_120d": lambda df, t: fcore.zscore_rolling(
-        _get_series(df, t, "VOLATILITY_90D"), window=120
-    ),
-    "inter.2s10s_slope": lambda D, _: (
-        _get_series(D, "USGG10YR Index", "PX_LAST") - _get_series(D, "USGG2YR Index", "PX_LAST")
-    ),
-    "inter.2s10s_slope_mom_21": lambda D, _: fcore.diff_n(
-        _get_series(D, "USGG10YR Index", "PX_LAST") - _get_series(D, "USGG2YR Index", "PX_LAST"), 21
-    ),
-    "inter.dxy_regime_percentile_252": lambda D, _: fcore.percentile(
-        _get_series(D, "DXY Curncy", "PX_LAST"), 252
-    ),
-    "inter.hgxau_ratio_mom_63": lambda D, _: fcore.pct_change_n(
-        fcore.safe_divide(_get_series(D, "HG1 Comdty", "PX_LAST"), _get_series(D, "XAU Curncy", "PX_LAST")), 63
-    ),
-    "inter.risk_on_score": lambda D, _: (
-        -fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "DXY Curncy", "PX_LAST"), 1), 63)
-        -fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "USGG10YR Index", "PX_LAST"), 1), 63)
-        +fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "HG1 Comdty", "PX_LAST"), 1), 63)
-        +fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "CL1 Comdty", "PX_LAST"), 1), 63)
-        -fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "XAU Curncy", "PX_LAST"), 1), 63)
-        +fcore.zscore_rolling(fcore.pct_change_n(_get_series(D, "BTC Index", "PX_LAST"), 1), 63)
-        +fcore.zscore_rolling(fcore.pct_change_n((_get_series(D, "RTY Index", "PX_LAST") - _get_series(D, "SPX Index", "PX_LAST")), 1), 63)
-    ),
+# Macro aliases
+SPY = "SPY US Equity"
+SPX = "SPX Index"
+NDX = "NDX Index"
+RTY = "RTY Index"
+QQQ = "QQQ US Equity"
+DXY = "DXY Curncy"
+EUR = "EUR Curncy"
+JPY = "JPY Curncy"
+XAU = "XAU Curncy"
+CL1 = "CL1 Comdty"
+HG1 = "HG1 Comdty"
+BTC = "BTC Index"
+US10 = "USGG10YR Index"
+US2  = "USGG2YR Index"
+# Sectors
+XLK = "XLK US Equity"; XLE = "XLE US Equity"; XLV = "XLV US Equity"; XLY = "XLY US Equity"; XLP = "XLP US Equity"
+XLRE = "XLRE US Equity"; XLC = "XLC US Equity"
 
-    # =========================
-    # G) CROSS-ASSET (vs SPY): Fisher-z corr + deltas, z-beta (Kept, patched)
-    # =========================
-    "corr_px_fisher20_z_60d": lambda df, t1, t2: fcore.zscore_rolling(
-        fcore.rolling_corr_fisher(
-            fcore.pct_change_n(_get_series(df, t1, "PX_LAST"), 1),
-            fcore.pct_change_n(_get_series(df, t2, "PX_LAST"), 1),
-            window=20,
-        )[1],
-        window=60,
-    ),
-    "corr_delta_fisher_20_60_z_60d": lambda df, t1, t2: fcore.zscore_rolling(
-        (
-            fcore.rolling_corr_fisher(
-                fcore.pct_change_n(_get_series(df, t1, "PX_LAST"), 1),
-                fcore.pct_change_n(_get_series(df, t2, "PX_LAST"), 1),
-                window=20,
-            )[1]
-            - fcore.rolling_corr_fisher(
-                fcore.pct_change_n(_get_series(df, t1, "PX_LAST"), 1),
-                fcore.pct_change_n(_get_series(df, t2, "PX_LAST"), 1),
-                window=60,
-            )[1]
-        ),
-        window=60,
-    ),
-    "beta_px_60d_z_120d": lambda df, t1, t2: fcore.zscore_rolling(
-        fcore.rolling_beta(
-            fcore.pct_change_n(_get_series(df, t1, "PX_LAST"), 1),
-            fcore.pct_change_n(_get_series(df, t2, "PX_LAST"), 1),
-            window=60,
-        ),
-        window=120,
-    ),
-
-    # =========================
-    # H) CRYPTO LINKAGE (for COIN, MSTR, etc.) — patched
-    # =========================
-    "crypto.beta_btc_63": lambda D, t: fcore.rolling_beta(
-        fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 1),
-        fcore.pct_change_n(_get_series(D, "BTC Index", "PX_LAST"), 1),
-        window=63,
-    ),
-    "crypto.resid_vs_btc_z_63": lambda D, t: fcore.zscore_rolling(
-        fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 1)
-        - fcore.rolling_beta(
-            fcore.pct_change_n(_get_series(D, t, "PX_LAST"), 1),
-            fcore.pct_change_n(_get_series(D, "BTC Index", "PX_LAST"), 1),
-            window=63,
-        ) * fcore.pct_change_n(_get_series(D, "BTC Index", "PX_LAST"), 1),
-        window=63,
-    ),
+# Sector map for single names
+SECTOR_MAP: Dict[str, str] = {
+    # Tech
+    "AAPL US Equity": XLK, "MSFT US Equity": XLK, "GOOGL US Equity": XLK,
+    "AMD US Equity": XLK, "ARM US Equity": XLK, "PLTR US Equity": XLK,
+    "CRM US Equity": XLK, "CRWV US Equity": XLK,
+    # Consumer Discretionary
+    "AMZN US Equity": XLY, "TSLA US Equity": XLY, "NKE US Equity": XLY,
+    # Consumer Staples
+    "WMT US Equity": XLP, "PEP US Equity": XLP,
+    # Health Care
+    "LLY US Equity": XLV, "BMY US Equity": XLV,
+    # Financials (fallback to SPY — no XLF in universe)
+    "JPM US Equity": SPY, "C US Equity": SPY,
+    # Crypto beta — use QQQ as peer proxy
+    "MSTR US Equity": QQQ, "COIN US Equity": QQQ,
 }
 
 
-# ---------- Small helpers for correlation block ----------
+# ----------------------
+# Macro features (once)
+# ----------------------
+MACRO_SPECS: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {
+    "macro.2s10s_slope":      lambda D: _col(D, US10, "PX_LAST") - _col(D, US2, "PX_LAST"),
+    "macro.2s10s_steepen_21": lambda D: f.diff_n(_col(D, US10, "PX_LAST") - _col(D, US2, "PX_LAST"), 21),
+    "macro.dxy_pctile_252":   lambda D: f.percentile(_col(D, DXY, "PX_LAST"), 252),
+    "macro.hgxau_mom_63":     lambda D: f.pct_change_n(f.safe_div(_col(D, HG1, "PX_LAST"), _col(D, XAU, "PX_LAST")), 63),
+    "macro.risk_on_score":    lambda D: (
+        -f.zscore_rolling(f.pct_change_n(_col(D, DXY, "PX_LAST"), 1), 63)
+        -f.zscore_rolling(f.pct_change_n(_col(D, US10, "PX_LAST"), 1), 63)
+        +f.zscore_rolling(f.pct_change_n(_col(D, HG1, "PX_LAST"), 1), 63)
+        +f.zscore_rolling(f.pct_change_n(_col(D, CL1, "PX_LAST"), 1), 63)
+        -f.zscore_rolling(f.pct_change_n(_col(D, XAU, "PX_LAST"), 1), 63)
+        +f.zscore_rolling(f.pct_change_n(_col(D, BTC, "PX_LAST"), 1), 63)
+        +f.zscore_rolling(f.pct_change_n((_col(D, RTY, "PX_LAST") - _col(D, SPX, "PX_LAST")), 1), 63)
+    ),
+    "macro.rty_over_spx":     lambda D: f.safe_div(_col(D, RTY, "PX_LAST"), _col(D, SPX, "PX_LAST")),
+    "macro.eem_over_mxwo":    lambda D: f.safe_div(_col(D, "EEM US Equity", "PX_LAST"), _col(D, "MXWO Index", "PX_LAST")),
+}
 
-def _ret_1d(df: pd.DataFrame, t: str) -> pd.Series:
-    return fcore.pct_change_n(_get_series(df, t, "PX_LAST"), 1)
 
-def _oi_skew_ratio(df: pd.DataFrame, t: str) -> pd.Series:
-    c = _get_series(df, t, "OPEN_INT_TOTAL_CALL")
-    p = _get_series(df, t, "OPEN_INT_TOTAL_PUT")
-    return fcore.safe_divide((c - p), (c + p))
+# ----------------------
+# Single-asset feature specs
+# ----------------------
+FEAT: Dict[str, Callable[[pd.DataFrame, str], pd.Series]] = {
+    # L1: Trend / Momentum / Reversal
+    "px.mom_5":               lambda D,t: f.pct_change_n(_col(D,t,"PX_LAST"),5),
+    "px.mom_21":              lambda D,t: f.pct_change_n(_col(D,t,"PX_LAST"),21),
+    "px.mom_63":              lambda D,t: f.pct_change_n(_col(D,t,"PX_LAST"),63),
+    "px.mom_126":             lambda D,t: f.pct_change_n(_col(D,t,"PX_LAST"),126),
+    "px.trend_slope_63":      lambda D,t: f.log_trend_slope(_col(D,t,"PX_LAST"),63),
+    "px.ma_gap_50_200_z":     lambda D,t: f.zscore_rolling(f.ma_gap(_col(D,t,"PX_LAST"),50,200),60),
+    "px.golden_cross":        lambda D,t: f.crossover_flags(_col(D,t,"PX_LAST"),50,200)[0],
+    "px.death_cross":         lambda D,t: f.crossover_flags(_col(D,t,"PX_LAST"),50,200)[1],
+    "px.breakout_high_126":   lambda D,t: f.breakout_flags(_col(D,t,"PX_LAST"),126)[0],
+    "px.breakout_low_126":    lambda D,t: f.breakout_flags(_col(D,t,"PX_LAST"),126)[1],
+    "px.trend_persist_21":    lambda D,t: f.trend_persistence(_ret1d(D,t),21),
+    "px.rsi14_z":             lambda D,t: f.zscore_rolling(f.rsi(_col(D,t,"PX_LAST"),14),60),
+    "px.stoch14_z":           lambda D,t: f.zscore_rolling(f.stochastic_k(_col(D,t,"PX_LAST"),_col(D,t,"PX_LOW"),_col(D,t,"PX_HIGH"),14),60),
+    "px.range_pos_63":        lambda D,t: f.close_to_range_pos(_col(D,t,"PX_LAST"),_col(D,t,"PX_LOW"),_col(D,t,"PX_HIGH"),63),
 
-def _pcr_ema5(df: pd.DataFrame, t: str) -> pd.Series:
-    return _get_series(df, t, "PUT_CALL_VOLUME_RATIO_CUR_DAY").ewm(span=5, min_periods=2).mean()
+    # L2: Volatility / Tails / Drawdown
+    "vol.rv_21":              lambda D,t: f.realized_vol(_col(D,t,"PX_LAST"),21),
+    "vol.rv_gk_21":           lambda D,t: f.garman_klass_vol(_col(D,t,"PX_OPEN"),_col(D,t,"PX_HIGH"),_col(D,t,"PX_LOW"),_col(D,t,"PX_LAST"),21),
+    "vol.vol_of_vol_21":      lambda D,t: f.vol_of_vol(f.realized_vol(_col(D,t,"PX_LAST"),21),21),
+    "vol.semivar_dn_21":      lambda D,t: f.semivariance(_ret1d(D,t),21,True),
+    "vol.updown_ratio_21":    lambda D,t: f.up_down_vol_ratio(_ret1d(D,t),21),
+    "vol.skew_63":            lambda D,t: f.realized_skew_kurt(_ret1d(D,t),63)[0],
+    "vol.kurt_63":            lambda D,t: f.realized_skew_kurt(_ret1d(D,t),63)[1],
+    "vol.left_tail_pr_252":   lambda D,t: f.tail_probs(_ret1d(D,t),252,0.05)[0],
+    "vol.right_tail_pr_252":  lambda D,t: f.tail_probs(_ret1d(D,t),252,0.05)[1],
+    "risk.drawdown_63":       lambda D,t: f.drawdown_from_high(_col(D,t,"PX_LAST"),63),
+    "risk.time_in_dd_63":     lambda D,t: f.time_in_drawdown(_col(D,t,"PX_LAST"),63),
 
-def _name_safe(s: str) -> str:
-    return s.replace(" ", "_")
+    # L3: Liquidity / Microstructure
+    "liq.amihud_21":          lambda D,t: f.amihud_illiquidity(_ret1d(D,t), _dvol(D,t), 21),
+    "liq.cs_spread_21":       lambda D,t: f.corwin_schultz_spread(_col(D,t,"PX_HIGH"),_col(D,t,"PX_LOW"),21),
+    "liq.roll_proxy_21":      lambda D,t: f.roll_spread_proxy(_ret1d(D,t),21),
+    "liq.turnover_z_63":      lambda D,t: f.zscore_rolling(_col(D,t,"TURNOVER"),63),
+
+    # L4: Options / IV / Flow
+    "opt.iv30_z_60":          lambda D,t: f.zscore_rolling(_col(D,t,"CALL_IMP_VOL_30D"),60),
+    "opt.iv3m_z_60":          lambda D,t: f.zscore_rolling(_col(D,t,"3MO_CALL_IMP_VOL"),60),
+    "opt.term_30d_3m":        lambda D,t: _col(D,t,"CALL_IMP_VOL_30D") - _col(D,t,"3MO_CALL_IMP_VOL"),
+    "opt.skew_30d":           lambda D,t: _col(D,t,"CALL_IMP_VOL_30D") - _col(D,t,"PUT_IMP_VOL_30D"),
+    "opt.rr25_1m_proxy":      lambda D,t: _col(D,t,"1M_CALL_IMP_VOL_25DELTA_DFLT") - _col(D,t,"1M_PUT_IMP_VOL_10DELTA_DFLT"),
+    "opt.fly_1m_40v25":       lambda D,t: 0.5*(_col(D,t,"1M_CALL_IMP_VOL_40DELTA_DFLT")+_col(D,t,"1M_PUT_IMP_VOL_40DELTA_DFLT")) - _col(D,t,"1M_CALL_IMP_VOL_25DELTA_DFLT"),
+    "opt.iv_mom_5_z60":       lambda D,t: f.zscore_rolling(f.diff_n(_col(D,t,"3MO_CALL_IMP_VOL"),5),60),
+    "opt.vrp_21":             lambda D,t: _col(D,t,"3MO_CALL_IMP_VOL") - f.realized_vol(_col(D,t,"PX_LAST"),21) * 100.0,
+    "opt.rv_minus_iv_21":     lambda D,t: f.realized_vol(_col(D,t,"PX_LAST"),21) * 100.0 - _col(D,t,"3MO_CALL_IMP_VOL"),
+    "flow.pcr_ema5_z30":      lambda D,t: f.zscore_rolling(_pcr(df=D,t=t).ewm(span=5,min_periods=2).mean(),30),
+    "flow.opt_vol_z30":       lambda D,t: f.zscore_rolling(_col(D,t,"TOT_OPT_VOLUME_CUR_DAY"),30),
+    "pos.oi_call_put_ratio":  lambda D,t: f.safe_div(_col(D,t,"OPEN_INT_TOTAL_CALL"), _col(D,t,"OPEN_INT_TOTAL_PUT")),
+    "pos.oi_skew_z60":        lambda D,t: f.zscore_rolling(_oi_skew(D,t),60),
+
+    # L5: Sentiment / Media
+    "sent.tw_pub_z30":        lambda D,t: f.zscore_rolling(_col(D,t,"TWITTER_PUBLICATION_COUNT"),30),
+    "sent.tw_avg_z30":        lambda D,t: f.zscore_rolling(_col(D,t,"TWITTER_SENTIMENT_DAILY_AVG"),30),
+    "sent.tw_mom_21":         lambda D,t: f.diff_n(_col(D,t,"TWITTER_SENTIMENT_DAILY_AVG"),21),
+    "sent.news_pub_z30":      lambda D,t: f.zscore_rolling(_col(D,t,"NEWS_PUBLICATION_COUNT"),30),
+    "sent.news_heat_z21":     lambda D,t: f.zscore_rolling(_col(D,t,"NEWS_HEAT_READ_DMAX"),21),
+    "sent.cn_avg_z60":        lambda D,t: f.zscore_rolling(_col(D,t,"CHINESE_NEWS_SENTMNT_DAILY_AVG"),60),
+
+    # L6: Cross-asset β & spreads (vs SPY & sector)
+    "x.beta_spy_63":          lambda D,t: f.rolling_beta(_ret1d(D,t), _ret1d(D, SPY if SPY in TICKS_ALL else SPX), 63),
+    "x.bh_ret_spy_21":        lambda D,t: f.beta_hedged_return(_ret1d(D,t), _ret1d(D, SPY if SPY in TICKS_ALL else SPX), 63).rolling(21).sum(),
+    "x.spread_vs_sector_21":  lambda D,t: f.pct_change_n(_col(D,t,"PX_LAST"),21) - f.pct_change_n(_col(D, SECTOR_MAP.get(t, SPY), "PX_LAST"),21),
+
+    # L7: Regime (ticker)
+    "reg.vol90d_z120":        lambda D,t: f.zscore_rolling(_col(D,t,"VOLATILITY_90D"),120),
+}
 
 
-# ===================================================================
-# THE FEATURE BUILDER
-# ===================================================================
+# ----------------------
+# Pairwise vs benchmark
+# ----------------------
+PAIR_SPECS: Dict[str, Callable[[pd.DataFrame, str, str], pd.Series]] = {
+    "x.corr_fisher20_z60":    lambda D,a,b: f.zscore_rolling(f.rolling_corr_fisher(_ret1d(D,a), _ret1d(D,b),20)[1],60),
+    "x.corr_delta_20_60_z60": lambda D,a,b: f.zscore_rolling(
+        f.rolling_corr_fisher(_ret1d(D,a), _ret1d(D,b),20)[1] - f.rolling_corr_fisher(_ret1d(D,a), _ret1d(D,b),60)[1],60
+    ),
+    "x.beta_60_z120":         lambda D,a,b: f.zscore_rolling(f.rolling_beta(_ret1d(D,a), _ret1d(D,b),60),120),
+    "x.corr_abs_21":          lambda D,a,b: f.corr_abs_to_abs(_ret1d(D,a), _ret1d(D,b),21),
+}
 
+
+# ----------------------
+# Event bundle / interactions
+# ----------------------
+def _ev_bundle(index_like) -> pd.DataFrame:
+    try:
+        EV = build_event_features()
+    except Exception as e:
+        print(f"Error building event features: {e}")
+        EV = pd.DataFrame(index=index_like)
+
+    def _safe(k):
+        s = EV[k] if k in EV.columns else pd.Series(index=EV.index, dtype=float)
+        return pd.to_numeric(s, errors="coerce")
+
+    # Include ALL event features instead of cherry-picking - collect first, then concat
+    ev_cols = {}
+    for col in EV.columns:
+        if col.startswith('EV') or col.startswith('days_to_') or col.startswith('within_') or col.startswith('SEQ.') or col.startswith('COND.') or col.startswith('EXP.') or col.startswith('META.') or col.startswith('day_'):
+            ev_cols[col] = _safe(col)
+    
+    # Create DataFrame from all columns at once to avoid fragmentation
+    out = pd.DataFrame(ev_cols, index=EV.index)
+    
+    return out.reindex(index_like)
+
+
+EV_INTERACT: Dict[str, Callable[[pd.DataFrame, pd.DataFrame, str], pd.Series]] = {
+    "ev.gated_mom21":     lambda EV,D,t: f.pct_change_n(_col(D,t,"PX_LAST"),21) * (EV["EV_forward_calendar_heat_3"] < EV["EV_forward_calendar_heat_3"].rolling(7).median()).astype(float),
+    "ev.tail_carry":      lambda EV,D,t: EV["EV_after_surprise_z"].ewm(span=5, min_periods=2).mean(),
+    "ev.infl_beta_gate":  lambda EV,D,t: EV["EV.bucket_inflation_surp"] * f.rolling_beta(_ret1d(D,t), f.pct_change_n(_col(D,DXY,"PX_LAST"),1),63),
+    "ev.growth_rotation": lambda EV,D,t: EV["EV.bucket_growth_surp"] * ( f.pct_change_n(_col(D,"XLY US Equity","PX_LAST"),21) - f.pct_change_n(_col(D,"XLP US Equity","PX_LAST"),21) ),
+}
+
+
+# ----------------------
+# Builder
+# ----------------------
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Constructs a complete matrix of lagged features for all tickers.
-    - Iterates FEATURE_SPECS for single-asset and cross-asset features
-    - Applies shift(1) everywhere to avoid lookahead
-    - Appends EV_* daily features (replicated per tradable ticker)
-    - Appends correlation features bundle (Option A style)
-    - Adds cross-sectional ranks for selected primitives
+    Input: wide panel with columns like '<TICKER>_<FIELD>' indexed by daily dates.
+    Output: feature matrix X (all features shifted by 1 day; EV_* already leak-safe upstream).
     """
-    print("Starting feature matrix construction...")
-    all_features: Dict[str, pd.Series] = {}
-    all_tickers = settings.data.tradable_tickers + settings.data.macro_tickers
+    tradables: List[str] = list(getattr(settings.data, "tradable_tickers", TICKS_ALL))
+    bench = getattr(settings.data, "benchmark_ticker", SPY if SPY in TICKS_ALL else SPX)
+    macro_ticks: List[str] = list(getattr(settings.data, "macro_tickers", []))
+    all_ticks = list(dict.fromkeys(tradables + macro_ticks + [bench]))
 
-    # --- Build Single-Asset Features ---
-    for ticker in all_tickers:
-        for spec_name, spec_func in FEATURE_SPECS.items():
-            if spec_func.__code__.co_argcount == 2:  # (df, t)
-                feature_name = f"{ticker}_{spec_name}"
-                try:
-                    raw_feature = spec_func(df, ticker)
-                    all_features[feature_name] = pd.to_numeric(raw_feature, errors="coerce").shift(1)
-                except Exception as e:
-                    print(f" Could not build feature '{feature_name}': {e}")
+    feats: Dict[str, pd.Series] = {}
 
-    print(f" Built {len(all_features)} single-asset features.")
-
-    # --- Build Cross-Asset Features (vs benchmark) ---
-    benchmark_ticker = 'SPY US Equity'
-    cross_asset_features: Dict[str, pd.Series] = {}
-    for ticker in all_tickers:
-        if ticker == benchmark_ticker:
-            continue
-        for spec_name, spec_func in FEATURE_SPECS.items():
-            if spec_func.__code__.co_argcount == 3:  # (df, t1, t2)
-                feature_name = f"{ticker}_vs_{benchmark_ticker}_{spec_name}"
-                try:
-                    raw_feature = spec_func(df, ticker, benchmark_ticker)
-                    cross_asset_features[feature_name] = pd.to_numeric(raw_feature, errors="coerce").shift(1)
-                except Exception as e:
-                    print(f" Could not build feature '{feature_name}': {e}")
-
-    print(f" Built {len(cross_asset_features)} cross-asset features.")
-    all_features.update(cross_asset_features)
-
-    # --- Event Features (consolidated) ---
-    print("Building event features from economic calendar...")
-    try:
-        # Standard EV features
-        ev_df = build_event_features(df.index)
-        if isinstance(ev_df, pd.DataFrame) and not ev_df.empty:
-            ev_cols = ev_df.columns.tolist()
-            for t in settings.data.tradable_tickers:
-                for col in ev_cols:
-                    all_features[f"{t}_EV__{col}"] = pd.to_numeric(ev_df[col], errors="coerce").shift(1)
-            print(f"  Built {len(ev_cols)} standard event features.")
-        else:
-            print("  No standard event features added.")
-    except Exception as e:
-        print(f"  Could not build standard event features: {e}")
-    
-    try:
-        # Per-event-type features
-        per_event_df = build_per_event_type_features(df.index, top_n_events=20)
-        if isinstance(per_event_df, pd.DataFrame) and not per_event_df.empty:
-            per_event_cols = per_event_df.columns.tolist()
-            for col in per_event_cols:
-                all_features[col] = pd.to_numeric(per_event_df[col], errors="coerce").shift(1)
-            print(f"  Built {len(per_event_cols)} per-event-type features.")
-        else:
-            print("  No per-event-type features added.")
-    except Exception as e:
-        print(f"  Could not build per-event-type features: {e}")
-
-    # --- Option A: Correlation features (within-ticker + SPY driver) ---
-    corr_features: Dict[str, pd.Series] = {}
-    windows = [20, 60]
-    min_support = 126  # require enough overlap for stability
-
-    def fisher_corr(s1: pd.Series, s2: pd.Series, win: int) -> pd.Series:
+    # ---- Macro once ----
+    for name, fn in MACRO_SPECS.items():
         try:
-            _, fisher = fcore.rolling_corr_fisher(s1, s2, window=win)
-            return pd.to_numeric(fisher, errors="coerce")
-        except Exception:
-            return pd.Series(index=df.index, dtype=float)
+            feats[name] = pd.to_numeric(fn(df), errors="coerce").shift(1)
+        except Exception as e:
+            print(f"[macro warn] {name}: {e}")
 
-    for t in settings.data.tradable_tickers:
-        RET_1D = _ret_1d(df, t)
-        TOT_OPT = _get_series(df, t, "TOT_OPT_VOLUME_CUR_DAY")
-        OI_SKEW = _oi_skew_ratio(df, t)
-        CALLIV3M = _get_series(df, t, "3MO_CALL_IMP_VOL")
-        NEWS_HEAT = _get_series(df, t, "NEWS_HEAT_READ_DMAX")
-        PCR5 = _pcr_ema5(df, t)
-        SPY_RET_1D = _ret_1d(df, "SPY US Equity")
+    # ---- Single-asset ----
+    for t in all_ticks:
+        for name, fn in FEAT.items():
+            col = f"{t}_{name}"
+            try:
+                s = pd.to_numeric(fn(df, t), errors="coerce").shift(1)
+                feats[col] = s
+            except Exception as e:
+                print(f"[feat warn] {col}: {e}")
 
-        pairs: List[Tuple[str, pd.Series, str, pd.Series]] = [
-            ("RET_1D", RET_1D, "TOT_OPT_VOLUME", TOT_OPT),
-            ("RET_1D", RET_1D, "OI_SKEW", OI_SKEW),
-            ("RET_1D", RET_1D, "CALLIV3M", CALLIV3M),
-            ("RET_1D", RET_1D, "NEWS_HEAT", NEWS_HEAT),
-            ("RET_1D", RET_1D, "PCR_EMA5", PCR5),
-            ("SPY_RET_1D", SPY_RET_1D, "TOT_OPT_VOLUME", TOT_OPT),
-            ("SPY_RET_1D", SPY_RET_1D, "OI_SKEW", OI_SKEW),
-        ]
+    # ---- Pairwise vs benchmark ----
+    for t in tradables:
+        if t == bench:
+            continue
+        for name, fn in PAIR_SPECS.items():
+            col = f"{t}_{name}"
+            try:
+                s = pd.to_numeric(fn(df, t, bench), errors="coerce").shift(1)
+                feats[col] = s
+            except Exception as e:
+                print(f"[pair warn] {col}: {e}")
 
-        for lhs_name, lhs, rhs_name, rhs in pairs:
-            fishers = {}
-            for w in windows:
-                fz = fisher_corr(lhs, rhs, w).shift(1)
-                if fz.count() < min_support:
-                    continue
-                fishers[w] = fz
-                base = f"{t}_corrF{w}__{_name_safe(lhs_name)}__{_name_safe(rhs_name)}"
-                corr_features[base] = fz
-                corr_features[f"{t}_invcorrF{w}__{_name_safe(lhs_name)}__{_name_safe(rhs_name)}"] = -fz
+    # ---- EV bundle & interactions ----
+    EV = _ev_bundle(df.index)
+    for c in EV.columns:
+        feats[c] = EV[c]  # already leak-safe upstream
+    for t in tradables:
+        for name, fn in EV_INTERACT.items():
+            col = f"{t}_{name}"
+            try:
+                feats[col] = pd.to_numeric(fn(EV, df, t), errors="coerce").shift(1)
+            except Exception as e:
+                print(f"[ev warn] {col}: {e}")
 
-            if 20 in fishers and 60 in fishers:
-                delta = (fishers[20] - fishers[60])
-                if delta.count() >= min_support:
-                    base = f"{t}_corrDelta20_60__{_name_safe(lhs_name)}__{_name_safe(rhs_name)}"
-                    corr_features[base] = delta
-                    corr_features[f"{t}_invcorrDelta20_60__{_name_safe(lhs_name)}__{_name_safe(rhs_name)}"] = -delta
+    # ---- Assemble (avoid fragmentation) ----
+    X = pd.DataFrame(feats).sort_index()
+    
+    # Drop columns that are all-NaN EXCEPT event features (which are naturally sparse)
+    non_event_cols = [col for col in X.columns if not (col.startswith('EV') or col.startswith('days_to_') or col.startswith('SEQ.') or col.startswith('COND.') or col.startswith('EXP.') or col.startswith('META.'))]
+    event_cols = [col for col in X.columns if col.startswith('EV') or col.startswith('days_to_') or col.startswith('SEQ.') or col.startswith('COND.') or col.startswith('EXP.') or col.startswith('META.')]
+    
+    # Drop all-NaN non-event columns
+    if non_event_cols:
+        X_non_event = X[non_event_cols].dropna(how="all", axis=1)
+    else:
+        X_non_event = pd.DataFrame(index=X.index)
+    
+    # Keep all event columns (even if mostly NaN - events are naturally sparse)
+    if event_cols:
+        X_event = X[event_cols]
+    else:
+        X_event = pd.DataFrame(index=X.index)
+    
+    # Combine back together
+    X = pd.concat([X_non_event, X_event], axis=1)
 
-    print(f" Built {len(corr_features)} correlation features.")
-    all_features.update(corr_features)
+    # ---- Quality masks / flags ----
+    for t in tradables:
+        volz = f.zscore_rolling(_col(df,t,"PX_VOLUME"),63)
+        toz  = f.zscore_rolling(_col(df,t,"TURNOVER"),63)
+        X[f"{t}_gate.liquid_flag"] = ((volz>0) & (toz>0)).astype(float).shift(1)
+        X[f"{t}_gate.opt_avail_flag"] = _options_available(df,t).shift(1)
 
-    # --- Combine to DataFrame ---
-    feature_matrix = pd.DataFrame(all_features).dropna(how="all", axis=1)
-
-    # --- Cross-sectional ranks on key primitives (across tradable tickers) ---
-    def _cs_rank(feature_stub: str, out_name: str):
-        # build the list of columns we expect for this stub
-        cols = [f"{t}_{feature_stub}" for t in settings.data.tradable_tickers]
-        cols = [c for c in cols if c in feature_matrix.columns]
+    # ---- Cross-sectional ranks (concat at once) ----
+    def _cs_rank(stub: str, outname: str):
+        nonlocal X
+        cols = [f"{t}_{stub}" for t in tradables if f"{t}_{stub}" in X.columns]
         if not cols:
             return
-        # take only those columns; drop any accidental duplicate column names
-        sub = feature_matrix.loc[:, cols]
-        if sub.columns.duplicated().any():
-            sub = sub.loc[:, ~sub.columns.duplicated()]
-        # rank across tickers for each date
-        ranked = sub.rank(axis=1, pct=True)
-        # write back one column per ticker
-        for t in settings.data.tradable_tickers:
-            col = f"{t}_{feature_stub}"
-            if col in ranked.columns:
-                feature_matrix[f"{t}_{out_name}"] = ranked[col].astype(float)
+        sub = X.loc[:, cols]
+        R = sub.rank(axis=1, pct=True)
+        new_cols = {f"{t}_{outname}": R[f"{t}_{stub}"].astype(float) for t in tradables if f"{t}_{stub}" in R.columns}
+        if new_cols:
+            new_df = pd.DataFrame(new_cols, index=X.index)
+            X = pd.concat([X, new_df], axis=1)
 
-    _cs_rank("price.mom_21",  "cs.rank_mom_21")
-    _cs_rank("price.mom_63",  "cs.rank_mom_63")
-    _cs_rank("price.mom_126", "cs.rank_mom_126")
-    _cs_rank("price.vol_gk_21", "cs.rank_vol_21")
-    _cs_rank("price.drawdown_63", "cs.rank_drawdown_63")
+    def _sector_neutral_cs_rank(stub: str, outname: str):
+        nonlocal X
+        by_sector = {}
+        for t in tradables:
+            sec = SECTOR_MAP.get(t, SPY)
+            by_sector.setdefault(sec, []).append(t)
+        all_new_cols = {}
+        for sec, members in by_sector.items():
+            cols = [f"{m}_{stub}" for m in members if f"{m}_{stub}" in X.columns]
+            if not cols:
+                continue
+            sub = X.loc[:, cols]
+            demean = sub.sub(sub.mean(axis=1), axis=0)
+            R = demean.rank(axis=1, pct=True)
+            for m in members:
+                c = f"{m}_{stub}"
+                if c in R.columns:
+                    all_new_cols[f"{m}_{outname}"] = R[c].astype(float)
+        if all_new_cols:
+            new_df = pd.DataFrame(all_new_cols, index=X.index)
+            X = pd.concat([X, new_df], axis=1)
 
-    print(f" Feature matrix construction complete. Shape: {feature_matrix.shape}")
-    return feature_matrix
+    _cs_rank("px.mom_21", "cs.rank_mom_21")
+    _cs_rank("px.mom_63", "cs.rank_mom_63")
+    _cs_rank("risk.drawdown_63", "cs.rank_drawdown_63")
+    _cs_rank("liq.amihud_21", "cs.rank_illiq_21")
+    _sector_neutral_cs_rank("x.spread_vs_sector_21", "sn.rank_spread_vs_sector_21")
+
+    return X

@@ -66,7 +66,9 @@ def _enforce_exclusivity_by_setup(ledger: pd.DataFrame, cooldown_days: int | Non
         ledger["exit_date"] = pd.to_datetime(ledger["exit_date"], errors="coerce")
 
     if cooldown_days is None:
-        cooldown_days = _parse_bt_env_int("BT_COOLDOWN_DAYS", 0)
+        # Use config cooldown_days as default instead of 0
+        from ..config import settings
+        cooldown_days = _parse_bt_env_int("BT_COOLDOWN_DAYS", getattr(settings.options, "cooldown_days", 3))
 
     keep_idx: list[int] = []
     for _sid, grp in ledger.groupby("setup_id", group_keys=False):

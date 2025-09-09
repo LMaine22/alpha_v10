@@ -657,7 +657,9 @@ def _aggregate_all_folds(out_dir: str,
         df["test_end"] = pd.to_datetime(te_e).date()
         # Derive direction from IS mean; derive expected edge from OOS mean return
         df["direction"] = np.where(df["mu_is"] > 0, "long", "short")
-        df["expected_edge_pct"] = np.exp(df["mu_oos"]) - 1.0
+        # Clip extreme values to prevent overflow in exp operation
+        mu_oos_clipped = np.clip(df["mu_oos"], -20, 20)  # Clip to reasonable range
+        df["expected_edge_pct"] = np.exp(mu_oos_clipped) - 1.0
         combined_list.append(df)
 
     if not combined_list:

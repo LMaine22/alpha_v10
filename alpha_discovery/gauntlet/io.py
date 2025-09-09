@@ -2,6 +2,8 @@
 from __future__ import annotations
 import os
 import re
+import glob
+import hashlib
 import pandas as pd
 from typing import Tuple, List
 
@@ -83,3 +85,183 @@ def read_fold_artifacts(run_dir: str, fold_num: int) -> Tuple[pd.DataFrame, pd.D
     if not gled.empty:
         led_f = gled[gled.get("fold").astype(str) == str(fold_num)]
     return sum_f.copy(), led_f.copy()
+
+
+# ---------- OOS artifact readers + setup fingerprint (non-breaking additions) ----------
+
+def _normalize_signal_ids(signal_ids_value):
+    """Return a sorted list of signal ids from either a list or a delimited string."""
+    if pd.isna(signal_ids_value):
+        return []
+    if isinstance(signal_ids_value, (list, tuple)):
+        sigs = list(signal_ids_value)
+    else:
+        s = str(signal_ids_value)
+        sep = '|' if '|' in s else ','
+        sigs = [t.strip() for t in s.split(sep) if t.strip()]
+    return sorted(set(sigs))
+
+
+def _row_setup_signature(row: pd.Series) -> str:
+    """
+    Build a stable, human-readable signature for a setup using available columns.
+    Priority: signal_ids + direction + specialized_ticker + params/description.
+    Falls back to setup_id if needed (hashed later).
+    """
+    parts = []
+
+    # 1) signals
+    if 'signal_ids' in row and pd.notna(row['signal_ids']):
+        sigs = _normalize_signal_ids(row['signal_ids'])
+        if sigs:
+            parts.append('signals=' + ';'.join(sigs))
+
+    # 2) direction
+    if 'direction' in row and pd.notna(row['direction']):
+        parts.append(f"dir={row['direction']}")
+
+    # 3) scope / specialization / ticker hint
+    for scope_col in ('specialized_ticker', 'ticker_scope', 'ticker', 'best_performing_ticker'):
+        if scope_col in row and pd.notna(row[scope_col]):
+            parts.append(f"scope={row[scope_col]}")
+            break
+
+    # 4) params / description
+    if 'param_json' in row and pd.notna(row['param_json']):
+        parts.append(f"params={row['param_json']}")
+    elif 'description' in row and pd.notna(row['description']):
+        parts.append(f"desc={row['description']}")
+
+    # Fallback: leave empty; caller may substitute setup_id
+    return '|'.join(parts)
+
+
+def _hash_setup_signature(sig: str) -> str:
+    return hashlib.sha1(sig.encode('utf-8')).hexdigest() if sig else ''
+
+
+def attach_setup_fp(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Non-destructive: returns a copy with 'setup_fp' added.
+    If a rich signature can't be built, falls back to hashing setup_id.
+    """
+    if df is None or df.empty:
+        return df
+
+    out = df.copy()
+    sig_series = out.apply(_row_setup_signature, axis=1)
+
+    # If signature is empty, fall back to setup_id if available
+    if 'setup_id' in out.columns:
+        need_fallback = (sig_series.isna()) | (sig_series == '')
+        sig_series = sig_series.mask(need_fallback, out['setup_id'].astype(str))
+
+    out['setup_fp'] = sig_series.astype(str).map(_hash_setup_signature)
+    return out
+
+
+def read_oos_artifacts(run_dir: str):
+    """
+    Load per-run OOS artifacts.
+
+    Prefers combined files at the run root:
+      - oos_pareto_front_summary_combined.csv
+      - oos_pareto_front_trade_ledger_combined.csv
+
+    If missing, falls back to concatenating any per-fold:
+      - fold_*_oos/oos_pareto_front_summary_*.csv
+      - fold_*_oos/oos_pareto_front_trade_ledger_*.csv
+
+    Returns:
+        (oos_summary_df, oos_ledger_df) with setup_fp attached to summary (and ledger if merge keys available).
+    """
+    combined_summary = os.path.join(run_dir, "oos_pareto_front_summary_combined.csv")
+    combined_ledger  = os.path.join(run_dir, "oos_pareto_front_trade_ledger_combined.csv")
+
+    summary_paths = []
+    ledger_paths = []
+
+    if os.path.exists(combined_summary):
+        summary_paths.append(combined_summary)
+    if os.path.exists(combined_ledger):
+        ledger_paths.append(combined_ledger)
+
+    # Per-fold fallback
+    if not summary_paths:
+        summary_paths = sorted(glob.glob(os.path.join(run_dir, "fold_*_oos", "oos_pareto_front_summary_*.csv")))
+    if not ledger_paths:
+        ledger_paths = sorted(glob.glob(os.path.join(run_dir, "fold_*_oos", "oos_pareto_front_trade_ledger_*.csv")))
+
+    if not summary_paths or not ledger_paths:
+        raise FileNotFoundError(f"[read_oos_artifacts] Could not find OOS files in: {run_dir}")
+
+    read_kwargs = dict(low_memory=False)
+    oos_summary_df = pd.concat((pd.read_csv(p, **read_kwargs) for p in summary_paths), ignore_index=True)
+    oos_ledger_df  = pd.concat((pd.read_csv(p, **read_kwargs) for p in ledger_paths),  ignore_index=True)
+
+    # Ensure setup_fp on summary
+    oos_summary_df = attach_setup_fp(oos_summary_df)
+
+    # Ensure setup_fp on ledger: try merge on shared keys; else compute row-wise
+    if 'setup_fp' not in oos_ledger_df.columns:
+        merge_keys = [c for c in ('setup_id', 'direction', 'specialized_ticker')
+                      if c in oos_ledger_df.columns and c in oos_summary_df.columns]
+        if merge_keys:
+            oos_ledger_df = oos_ledger_df.merge(
+                oos_summary_df[merge_keys + ['setup_fp']].drop_duplicates(),
+                on=merge_keys,
+                how='left'
+            )
+        else:
+            oos_ledger_df = attach_setup_fp(oos_ledger_df)
+
+    return oos_summary_df, oos_ledger_df
+
+
+def read_is_artifacts(run_dir: str):
+    """
+    Load per-run IN-SAMPLE artifacts for diagnostic replay ONLY.
+
+    Prefers combined files at the run root:
+      - pareto_front_summary.csv
+      - pareto_front_trade_ledger.csv
+
+    If missing, falls back to per-fold:
+      - fold_*_is/pareto_front_summary_*.csv
+      - fold_*_is/pareto_front_trade_ledger_*.csv
+
+    Returns:
+        (is_summary_df, is_ledger_df) or (None, None) if nothing found.
+    """
+    combined_summary = os.path.join(run_dir, "pareto_front_summary.csv")
+    combined_ledger  = os.path.join(run_dir, "pareto_front_trade_ledger.csv")
+
+    summary_paths = []
+    ledger_paths = []
+
+    if os.path.exists(combined_summary):
+        summary_paths.append(combined_summary)
+    if os.path.exists(combined_ledger):
+        ledger_paths.append(combined_ledger)
+
+    # Per-fold fallback (common naming variants)
+    if not summary_paths:
+        summary_paths = sorted(glob.glob(os.path.join(run_dir, "fold_*_is", "pareto_front_summary_*.csv")))
+        if not summary_paths:
+            summary_paths = sorted(glob.glob(os.path.join(run_dir, "fold_*", "pareto_front_summary_*.csv")))
+    if not ledger_paths:
+        ledger_paths = sorted(glob.glob(os.path.join(run_dir, "fold_*_is", "pareto_front_trade_ledger_*.csv")))
+        if not ledger_paths:
+            ledger_paths = sorted(glob.glob(os.path.join(run_dir, "fold_*", "pareto_front_trade_ledger_*.csv")))
+
+    if not summary_paths and not ledger_paths:
+        return None, None
+
+    read_kwargs = dict(low_memory=False)
+    is_summary_df = pd.concat((pd.read_csv(p, **read_kwargs) for p in summary_paths), ignore_index=True) if summary_paths else None
+    is_ledger_df  = pd.concat((pd.read_csv(p, **read_kwargs) for p in ledger_paths),  ignore_index=True) if ledger_paths  else None
+
+    return is_summary_df, is_ledger_df
+
+
+__all__ = ['attach_setup_fp', 'read_oos_artifacts', 'read_is_artifacts']

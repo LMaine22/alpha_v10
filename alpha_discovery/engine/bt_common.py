@@ -13,7 +13,7 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [2, 5, 7]
+TRADE_HORIZONS_DAYS = [4]  # Optimized for 300-1000%+ runners with regime-aware exits
 
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
@@ -102,6 +102,8 @@ def _decide_exit_with_scale_out(price_path: pd.Series,
                                 entry_exec_price: float,
                                 horizon_days: int,
                                 policy: ExitPolicy) -> tuple[bool, dict]:
+    # DISABLED - Only regime-aware exits should be used for extreme runners
+    return False, {"exit_idx": len(price_path) - 1, "exit_reason": "horizon", "holding_days": len(price_path) - 1}
     """
     Returns (did_scale, info dict).
     If PT isn't hit or behavior is incompatible, returns (False, {}).
@@ -214,38 +216,9 @@ def _decide_exit_from_path(price_path: pd.Series,
             return int(regime_exit_idx), regime_reason, int(regime_exit_idx)
         # If regime-aware exits are enabled but none triggered, fall through to traditional logic
 
-    # Traditional tripwires (only if regime-aware not enabled or no regime-aware exits triggered)
-    # Profit Target
-    pt_idx = None
-    if policy.enabled and policy.pt_multiple is not None and policy.pt_multiple > 0:
-        pt_thresh = float(entry_exec_price) * float(policy.pt_multiple)
-        pt_hits = np.nonzero(p >= pt_thresh)[0]
-        pt_idx = int(pt_hits[0]) if pt_hits.size > 0 else None
-
-    # Trailing Stop (uses running peak from entry)
-    ts_idx = None
-    if policy.enabled and policy.trail_frac is not None and 0.0 < float(policy.trail_frac) < 1.0:
-        peak = np.maximum.accumulate(p)
-        ts_thresh = peak * float(policy.trail_frac)
-        ts_hits = np.nonzero(p <= ts_thresh)[0]
-        ts_idx = int(ts_hits[0]) if ts_hits.size > 0 else None
-
-    # Hard Stop-Loss (vs entry)
-    sl_idx = None
-    if policy.enabled and policy.sl_multiple is not None and policy.sl_multiple > 0:
-        sl_thresh = float(entry_exec_price) * float(policy.sl_multiple)
-        sl_hits = np.nonzero(p <= sl_thresh)[0]
-        sl_idx = int(sl_hits[0]) if sl_hits.size > 0 else None
-
-    # Choose the earliest event; on same-day ties, PT beats TS, TS beats SL
-    candidates = []
-    if pt_idx is not None: candidates.append((pt_idx, "profit_target", 0))
-    if ts_idx is not None: candidates.append((ts_idx, "trailing_stop", 1))
-    if sl_idx is not None: candidates.append((sl_idx, "stop_loss", 2))
-
-    if candidates:
-        day, reason, _prio = sorted(candidates, key=lambda t: (t[0], t[2]))[0]
-        return int(day), reason, int(day)
+    # TRADITIONAL EXIT POLICIES DISABLED - ONLY REGIME-AWARE EXITS FOR BIG RUNNERS
+    # All traditional profit targets, trailing stops, and stop losses are bypassed
+    # to allow regime-aware system to catch 300-1000%+ runners
 
     # No tripwire -> time/horizon
     final_idx = last_idx
@@ -286,130 +259,53 @@ def _check_regime_aware_exit_options(
         
         # === LOSS PROTECTION MECHANISMS (Market Dynamics-Based) ===
         
-        # 1. Gap stop (large overnight moves AGAINST position - market dynamics based)
-        if i > 0:
-            prev_price = p[i-1]
-            gap_pct = (option_price - prev_price) / prev_price if prev_price > 0 else 0
+        # Note: Removed gap_stop exit policy to allow runners to develop
+        
+        # === ONLY EXIT WHEN ABSOLUTELY NECESSARY FOR 300-1000%+ RUNNERS ===
+        
+        # 1. EXTREME profit target - only exit on massive gains
+        if profit_pct >= 10.0:  # 1000% profit target - true multi-bagger exit
+            return i, "extreme_multibagger"
+        
+        # Note: Removed atr_trail_hit exit policy to allow runners to develop
+        
+        # 2. Extreme time protection - only exit near horizon end
+        if days_held >= horizon_days * 0.95:  # Only exit in final 5% of horizon
+            return i, "horizon_protection"
+        
+        # 3. Extreme catastrophic loss protection (only for -90%+ losses)
+        if profit_pct <= -0.90:  # Only exit on 90%+ loss (extreme protection)
+            return i, "catastrophic_loss"
+        
+        # === RUNNER DETECTION - HOLD FOR EXTREME GAINS ===
+        
+        # 4. Multi-bagger momentum detection (NEVER exit during strong momentum)
+        if profit_pct >= 3.0:  # 300%+ gains - potential for 1000%+ 
+            if i >= 3:
+                # Look at price progression over last 4 days
+                progression = p[max(0, i-3):i+1]
+                if len(progression) >= 4:
+                    # Calculate daily gain rates
+                    gains = [(progression[j] - progression[j-1]) / progression[j-1] 
+                            for j in range(1, len(progression)) if progression[j-1] > 0]
+                    
+                    # If we have sustained momentum, this could be a 1000%+ runner
+                    if len(gains) >= 3 and all(g > 0.05 for g in gains[-3:]):  # 5%+ daily gains
+                        # DO NOT EXIT - this is a potential extreme runner
+                        continue
+        
+        # 5. Extreme runner trailing stop (only after 500%+ gains)  
+        if profit_pct >= 5.0:  # Only trail after 500%+ gains
+            # Look back to find the peak over last 5 days
+            lookback_start = max(0, i-4)
+            recent_peak = np.max(p[lookback_start:i+1])
+            peak_profit = (recent_peak - entry) / entry if entry > 0 else 0
             
-            # Adaptive gap stop based on volatility and time
-            if direction == "long":
-                # More sensitive gap stop for long positions (adverse moves)
-                if gap_pct < -0.40:  # 20% gap down (was 30%)
-                    return i, "gap_stop"
-            elif direction == "short":
-                # More sensitive gap stop for short positions (adverse moves)
-                if gap_pct > 0.40:  # 20% gap up (was 30%)
-                    return i, "gap_stop"
-        
-        # 2. Profit target based on option price appreciation
-        if profit_pct >= 0.50:  # 50% profit target
-            return i, "pt_hit_legA"
-        
-        # 3. Adaptive trailing stop (market dynamics based)
-        if i > 0:
-            # Dynamic trailing stop based on volatility and time held
-            if days_held <= 2:
-                # Tighter stop in first 2 days (volatility protection)
-                trail_threshold = entry * 0.80  # 20% loss max
-            elif days_held <= 5:
-                # Medium stop for days 3-5 (momentum protection)
-                trail_threshold = entry * 0.70  # 30% loss max
-            else:
-                # Looser stop after 5 days (time decay protection)
-                trail_threshold = entry * 0.60  # 40% loss max
+            # Very loose trail at 60% of peak profit (allows 40% giveback for extreme volatility)
+            trail_threshold = entry + (recent_peak - entry) * 0.60
             
-            if option_price <= trail_threshold:
-                return i, "atr_trail_hit"
-        
-        # 4. Time-based exit (theta decay) - market dynamics based
-        if days_held >= 3:  # Exit after 3 days (was 5) to avoid theta decay
-            # Check if we're in theta decay zone (last 30% of horizon)
-            theta_decay_zone = days_held >= horizon_days * 0.7
-            if theta_decay_zone:
-                return i, "theta_stop"
-        
-        # 5. Volatility spike detection (market dynamics based) - MOVED AFTER PROFIT CAPTURE
-        # This is now handled in the profit capture section below
-        
-        # 6. Momentum failure (market dynamics based)
-        if i >= 2:  # After 2 days (was 3), check for momentum
-            recent_prices = p[max(0, i-2):i+1]
-            if len(recent_prices) >= 3:
-                # Check if price is declining consistently
-                if recent_prices[-1] < recent_prices[-2] < recent_prices[-3]:
-                    return i, "momentum_fail"
-        
-        # 7. Support/resistance break (market dynamics based)
-        if i >= 3:  # Need at least 4 days to detect support/resistance
-            recent_prices = p[max(0, i-3):i+1]
-            if len(recent_prices) >= 4:
-                # Check if current price breaks below recent support
-                support_level = np.min(recent_prices[:-1])  # Support from previous days
-                if option_price < support_level * 0.95:  # 5% below support
-                    return i, "support_break"
-        
-        # 8. Volume-based exit (market dynamics based)
-        if i > 0:
-            # Check for unusual price movement without corresponding volume
-            # This would need volume data - for now, use price momentum
-            price_momentum = (option_price - p[i-1]) / p[i-1] if p[i-1] > 0 else 0
-            if abs(price_momentum) > 0.10 and days_held >= 2:  # 10% move after 2 days
-                return i, "volume_divergence"
-        
-        # === NEW PROFIT CAPTURE MECHANISMS ===
-        
-        # 7. Momentum peak exit (exit at momentum peak - no profit gate)
-        if i >= 2:  # Need at least 3 days to detect momentum
-            recent_prices = p[max(0, i-2):i+1]
-            if len(recent_prices) >= 3:
-                # Check if current price is the peak of recent 3-day window
-                if option_price == np.max(recent_prices):
-                    return i, "momentum_peak"
-        
-        # 8. Volatility spike profit (exit on favorable vol spikes - no profit gate)
-        if i > 0:
-            price_change_pct = abs(option_price - p[i-1]) / p[i-1] if p[i-1] > 0 else 0
-            # Favorable vol spike: large positive move (any profit level)
-            if direction == "long" and price_change_pct > 0.20:  # 20% up move
-                return i, "volatility_spike_profit"
-            elif direction == "short" and price_change_pct > 0.20:  # 20% down move
-                return i, "volatility_spike_profit"
-        
-        # 9. Early profit exit (exit early on quick moves - no profit gate)
-        if days_held <= 2:
-            # Exit on any significant move in first 2 days
-            if profit_pct >= 0.15:  # 15% profit in first 2 days
-                return i, "early_profit"
-        
-        # 10. Theta decay profit (exit before theta decay - no profit gate)
-        if days_held >= 3:
-            # Check if we're approaching theta decay zone (last 2 days of horizon)
-            if days_held >= horizon_days - 2:
-                return i, "theta_decay_profit"
-        
-        # 11. Risk-on profit (take profits in risk-on regimes - no profit gate)
-        if days_held >= 2:  # After 2 days, any profit level
-            # This would need access to risk regime data - for now, use time-based heuristic
-            # In a full implementation, this would check actual risk regime indicators
-            if profit_pct >= 0.10:  # 10% profit threshold (much lower)
-                return i, "risk_on_profit"
-        
-        # 12. Event profit (take profits before events - no profit gate)
-        if days_held >= 1:  # After 1 day, any profit level
-            # This would need access to event calendar - for now, use time-based heuristic
-            # In a full implementation, this would check upcoming economic events
-            if profit_pct >= 0.10:  # 10% profit threshold (much lower)
-                return i, "event_profit"
-        
-        # 13. Panic exit (adverse volatility spikes only)
-        if i > 0:
-            price_change_pct = abs(option_price - p[i-1]) / p[i-1] if p[i-1] > 0 else 0
-            
-            # Only panic on adverse moves (not favorable ones)
-            if direction == "long" and price_change_pct > 0.25 and profit_pct < 0:  # 25% down move with loss
-                return i, "panic"
-            elif direction == "short" and price_change_pct > 0.25 and profit_pct < 0:  # 25% up move with loss
-                return i, "panic"
+            if option_price <= trail_threshold and peak_profit >= 5.0:
+                return i, "extreme_runner_trail"
     
     # No regime-aware exit triggered
     return None, "horizon"
@@ -544,3 +440,50 @@ def _price_entry_exit(s0: float, s1: float, k: float, t0_years: float, h_days: i
 
     opt_type = "call" if direction == "long" else "put"
     return _price_entry_exit_fallback(s0, s1, k, t0_years, h_days_num, r, opt_type, entry_sigma, exit_sigma, q)
+
+# ---- NEW: Enhanced pricing with IV anchor system ----
+
+def _price_entry_exit_enhanced(
+    s0: float, s1: float, t0_days: int, h_days: int, r: float,
+    direction: str, ticker: str, entry_date: pd.Timestamp, exit_date: pd.Timestamp,
+    master_df: pd.DataFrame, q: float = 0.0, K_override: Optional[float] = None
+) -> Optional[Dict[str, float]]:
+    """
+    Enhanced pricing using the new IV anchor system.
+    Returns dict with original fields plus new tracking fields.
+    """
+    try:
+        # Try enhanced pricing from pricing module
+        result = cast(Optional[object], _call_if_exists(
+            "price_entry_exit_enhanced",
+            S0=s0, S1=s1, T0_days=t0_days, h_days=h_days, r=r,
+            direction=direction, ticker=ticker, entry_date=entry_date, 
+            exit_date=exit_date, df=master_df, q=q, K_override=K_override
+        ))
+        
+        if result is not None:
+            # Extract all fields from PricedLeg dataclass
+            return {
+                "entry_price": float(getattr(result, "entry_price", 0.0)),
+                "exit_price": float(getattr(result, "exit_price", 0.0)),
+                "entry_iv": float(getattr(result, "entry_iv", 0.0)),
+                "exit_iv": float(getattr(result, "exit_iv", 0.0)),
+                "option_type": str(getattr(result, "option_type", "call")),
+                # New enhanced fields
+                "iv_anchor": str(getattr(result, "iv_anchor", "")),
+                "delta_bucket": str(getattr(result, "delta_bucket", "")),
+                "iv_ref_days": int(getattr(result, "iv_ref_days", 0)),
+                "sigma_anchor": float(getattr(result, "sigma_anchor", 0.0)),
+                "sigma_entry": float(getattr(result, "sigma_entry", 0.0)),
+                "sigma_exit": float(getattr(result, "sigma_exit", 0.0)),
+                "delta_target": float(getattr(result, "delta_target", 0.0)) if getattr(result, "delta_target", None) is not None else None,
+                "delta_achieved": float(getattr(result, "delta_achieved", 0.0)) if getattr(result, "delta_achieved", None) is not None else None,
+                "K_over_S": float(getattr(result, "K_over_S", 1.0)),
+                "fallback_to_3M": bool(getattr(result, "fallback_to_3M", False)),
+            }
+    except Exception as e:
+        # Log error but don't fail completely
+        print(f"Enhanced pricing failed for {ticker} on {entry_date}: {e}")
+    
+    # Fallback to traditional pricing
+    return None

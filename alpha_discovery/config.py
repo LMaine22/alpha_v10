@@ -10,12 +10,12 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 100
-    generations: int = 8
+    population_size: int =120
+    generations: int = 12
     elitism_rate: float = 0.1
     mutation_rate: float = 0.2
-    seed: int = 67
-    setup_lengths_to_explore: List[int] = [2]
+    seed: int = 85
+    setup_lengths_to_explore: List[int] = [1,2]
 
     # Verbosity & debugging used by NSGA layer (added)
     verbose: int = 2              # 0..3 (2 = extra progress summaries)
@@ -23,6 +23,11 @@ class GaConfig(BaseModel):
     
     # Island Model Configuration
     islands: Optional['IslandConfig'] = None
+    
+    # Gauntlet Control
+    run_gauntlet: bool = True      # Set to False to skip traditional gauntlet phase entirely
+    run_strict_oos_gauntlet: bool = True   # Set to False to skip Strict-OOS gauntlet phase
+    run_diagnostic_replay: bool = True     # Set to False to skip diagnostic replay with portfolio analysis
 
 
 # -----------------------------
@@ -33,7 +38,7 @@ class DataConfig(BaseModel):
     excel_file_path: str = 'data_store/raw/bb_data.xlsx'
     parquet_file_path: str = 'data_store/processed/bb_data.parquet'
     start_date: date = date(2018, 1, 1)
-    end_date: date = date(2025, 9, 4)
+    end_date: date = date(2025, 9, 8)
     holdout_start_date: date = date(2023, 8, 27)
 
     # Finalized ticker lists
@@ -42,9 +47,9 @@ class DataConfig(BaseModel):
         'GOOGL US Equity', 'MSFT US Equity', 'AAPL US Equity', 'LLY US Equity', 
         'AMD US Equity', 'MSTR US Equity', 'COIN US Equity', 'ARM US Equity', 
         'SPY US Equity',  'PLTR US Equity','XLE US Equity', 'XLK US Equity',
-        'XLRE US Equity', 'XLC US Equity',
-        'XLV US Equity', 'XLP US Equity', 'JPM US Equity', 'C US Equity', 
-        'BMY US Equity', 'PEPS US Equity', 'NKE US Equity',
+        'NKE US Equity', 'CRM US Equity'
+        #'XLRE US Equity', 'XLC US Equity', 'XLV US Equity', 'XLP US Equity', 
+       # 'JPM US Equity', 'C US Equity', 'BMY US Equity', 'PEP US Equity', 
     ]
     macro_tickers: List[str] = [
         'RTY Index', 'MXWO Index', 'USGG10YR Index', 'USGG2YR Index',
@@ -201,17 +206,31 @@ class OptionsConfig(BaseModel):
     # 'timebox_be_trail' (new) OR 'arm_trail' / 'exit' / 'scale_out' (legacy family)
     pt_behavior: Literal['exit', 'arm_trail', 'scale_out', 'timebox_be_trail', 'regime_aware'] = 'regime_aware'
 
-    # ===== New policy knobs (used when pt_behavior == 'timebox_be_trail') =====
-    be_trigger_multiple: float = 1.20   # arm breakeven at +25% on option price
-    trail_arm_multiple: float = 1.35    # arm trailing at +40%
-    exit_trail_frac: float | None = 0.80  # if None, engine will default to 0.80 (keep 80% of peak)
-    exit_sl_multiple: float | None = 0.65 # optional hard stop (e.g., 0.65 = -35%)
-    exit_time_cap_days: int | None = 8 # optional time cap across horizons
+    # ===== DISABLED - ONLY REGIME-AWARE EXITS FOR EXTREME RUNNERS =====
+    be_trigger_multiple: float = 999.0   # DISABLED - effectively never triggers
+    trail_arm_multiple: float = 999.0    # DISABLED - effectively never triggers  
+    exit_trail_frac: float | None = None  # DISABLED - no traditional trailing
+    exit_sl_multiple: float | None = None # DISABLED - no traditional stops
+    exit_time_cap_days: int | None = None # DISABLED - let regime-aware handle timing
 
-    # ===== Legacy family knobs (used when pt_behavior != 'timebox_be_trail') =====
-    exit_pt_multiple: float | None = 1.8
-    armed_trail_frac: float | None = 0.98
+    # ===== DISABLED - ONLY REGIME-AWARE EXITS FOR EXTREME RUNNERS =====
+    exit_pt_multiple: float | None = None  # DISABLED - no traditional profit targets
+    armed_trail_frac: float | None = None  # DISABLED - no traditional trailing
     scale_out_frac: float = 0.0
+
+    # ===== NEW: Advanced IV Pricing Configuration =====
+    
+    # IV anchor: which maturity to use as base volatility
+    iv_anchor: Literal['1M', '30D', '3M'] = '1M'  # Default: 1M for short-tenor trades
+    
+    # Delta bucket: how to select strike and volatility
+    delta_bucket: Literal['ATM', 'AUTO_BY_DIRECTION', 'CALL_40D', 'CALL_25D', 'CALL_10D', 'PUT_40D', 'PUT_25D', 'PUT_10D'] = 'AUTO_BY_DIRECTION'
+    
+    # Strict mode: if True and new IV columns missing, raise error; if False, fallback to 3M
+    strict_new_iv: bool = True
+    
+    # Pricing regime for A/B testing
+    pricing_regime: Literal['LEGACY_3M', 'ATM_30D', 'SMILE_1M'] = 'SMILE_1M'
 
     # IV term structure mapping (fallbacks)
     iv_map_alpha: float = 0.7
@@ -340,6 +359,7 @@ class RegimeAwareConfig(BaseModel):
     # Position management
     cooldown_days: int = 3
     max_positions_per_setup: int = 1
+    signal_reset_days: int = 5  # Force signal reset after being true for this many days
     
     # Enhanced ledger tracking
     enable_enhanced_ledger: bool = True

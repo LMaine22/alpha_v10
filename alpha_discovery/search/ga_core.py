@@ -44,10 +44,10 @@ def _exit_policy_from_settings() -> Optional[Dict]:
 
 # --- DNA & cache --------------------------------------------------------------
 
-def _dna(individual: Tuple[str, List[str]]) -> Tuple[str, Tuple[str, ...]]:
-    """Canonical identity for (ticker, setup)."""
+def _dna(individual: Tuple[str, List[str]]) -> Tuple[str, ...]:
+    """Canonical identity for setup (signals only - globally unique)."""
     ticker, setup = individual
-    return (ticker, tuple(sorted(setup or [])))
+    return tuple(sorted(setup or []))
 
 _EVAL_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
 _EVAL_CACHE_MAX = 4096
@@ -139,9 +139,19 @@ def _evaluate_one_setup(
             "trade_ledger": pd.DataFrame(), "direction": direction, "exit_policy": exit_policy,
         }
 
-    # TRAIN-side exclusivity per setup
+    # TRAIN-side exclusivity per setup - generate unique SETUP_XXXX IDs
     try:
-        setup_id = f"{ticker}__" + "|".join(sorted(setup))
+        # Create a unique setup ID based on ticker and signals combination
+        key = (ticker, tuple(sorted(setup)))
+        if not hasattr(_evaluate_one_setup, '_setup_counter'):
+            _evaluate_one_setup._setup_counter = 0
+            _evaluate_one_setup._setup_id_map = {}
+        
+        if key not in _evaluate_one_setup._setup_id_map:
+            _evaluate_one_setup._setup_counter += 1
+            _evaluate_one_setup._setup_id_map[key] = f"SETUP_{_evaluate_one_setup._setup_counter:04d}"
+        
+        setup_id = _evaluate_one_setup._setup_id_map[key]
     except Exception:
         setup_id = str(individual)
 

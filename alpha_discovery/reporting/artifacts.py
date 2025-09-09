@@ -183,7 +183,9 @@ def _signal_ids_str(setup_items: Any) -> str:
     Canonical comma-separated list of signal identifiers for CSV.
     """
     if isinstance(setup_items, (list, tuple)):
-        return ", ".join(_extract_signal_id_token(x) for x in setup_items)
+        # Sort signals to match setup_id ordering for consistency
+        signal_ids = [_extract_signal_id_token(x) for x in setup_items]
+        return ", ".join(sorted(signal_ids))
     if setup_items is None:
         return ""
     return _extract_signal_id_token(setup_items)
@@ -357,8 +359,6 @@ def save_results(
     print("Generating final reports from winning setups across all folds (TRAIN-only)...")
 
     for i, solution in enumerate(all_fold_results):
-        setup_id = f"SETUP_{i:04d}"
-
         # --- DEFINITIVE FIX for <null> values and key mismatches ---
         dna = solution.get('individual') or solution.get('setup', (None, []))
         if isinstance(dna, tuple) and len(dna) == 2:
@@ -366,6 +366,25 @@ def save_results(
         else:
             specialized_ticker = 'UNKNOWN'
             setup_signal_items = []
+
+        # Create unique SETUP_XXXX format matching the new system
+        try:
+            if setup_signal_items:
+                # Generate unique setup ID based on ticker and signals combination
+                key = (specialized_ticker, tuple(sorted(setup_signal_items)))
+                if not hasattr(save_results, '_setup_counter'):
+                    save_results._setup_counter = 0
+                    save_results._setup_id_map = {}
+                
+                if key not in save_results._setup_id_map:
+                    save_results._setup_counter += 1
+                    save_results._setup_id_map[key] = f"SETUP_{save_results._setup_counter:04d}"
+                
+                setup_id = save_results._setup_id_map[key]
+            else:
+                setup_id = f"SETUP_{i:04d}"
+        except Exception:
+            setup_id = f"SETUP_{i:04d}"
 
         direction = solution.get('direction', 'N/A')
         # --- END FIX ---

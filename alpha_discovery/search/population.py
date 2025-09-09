@@ -39,8 +39,8 @@ def initialize_population(
         # 3. Randomly choose signal IDs without replacement
         setup = list(rng.choice(all_signal_ids, size=length, replace=False))
 
-        # 4. Create a canonical representation (DNA) to check for uniqueness
-        dna = (ticker, tuple(sorted(setup)))
+        # 4. Create a canonical representation (DNA) - signals must be globally unique
+        dna = tuple(sorted(setup))
 
         if dna not in seen_dna:
             seen_dna.add(dna)
