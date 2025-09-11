@@ -13,7 +13,7 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [4]  # Optimized for 300-1000%+ runners with regime-aware exits
+TRADE_HORIZONS_DAYS = [12]  # Optimized for regime-aware exits
 
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
@@ -250,6 +250,10 @@ def _check_regime_aware_exit_options(
     
     entry = float(entry_exec_price)
     
+    # Get regime-aware config
+    from alpha_discovery.config import settings
+    regime_config = settings.regime_aware
+    
     # Process each day in the price path
     for i in range(n):
         current_date = price_path.index[i]
@@ -257,55 +261,51 @@ def _check_regime_aware_exit_options(
         days_held = i
         profit_pct = (option_price - entry) / entry if entry > 0 else 0
         
-        # === LOSS PROTECTION MECHANISMS (Market Dynamics-Based) ===
+        # === REGIME-AWARE EXIT CONDITIONS ===
         
-        # Note: Removed gap_stop exit policy to allow runners to develop
+        # 1. Profit Target Hit - Leg A (conservative profit taking)
+        if profit_pct >= 1.0:  # 100% profit target
+            return i, "pt_hit_legA"
         
-        # === ONLY EXIT WHEN ABSOLUTELY NECESSARY FOR 300-1000%+ RUNNERS ===
+        # 2. Volatility Spike Profit (quick exit on volatility expansion)
+        if i >= 2:  # Need at least 3 days of data
+            # Calculate recent volatility
+            recent_prices = p[max(0, i-2):i+1]
+            if len(recent_prices) >= 3:
+                price_changes = np.diff(recent_prices) / recent_prices[:-1]
+                vol_spike = np.std(price_changes) if len(price_changes) > 0 else 0
+                
+                # Exit if we have profit AND high volatility (volatility spike profit)
+                if profit_pct >= 0.5 and vol_spike > 0.1:  # 50% profit + 10% daily volatility
+                    return i, "volatility_spike_profit"
         
-        # 1. EXTREME profit target - only exit on massive gains
-        if profit_pct >= 10.0:  # 1000% profit target - true multi-bagger exit
-            return i, "extreme_multibagger"
+        # 3. Time Decay Protection (theta burn)
+        if days_held >= horizon_days * 0.8:  # Exit in final 20% of horizon
+            if profit_pct >= 0.3:  # Only if we have some profit
+                return i, "time_decay_protection"
         
-        # Note: Removed atr_trail_hit exit policy to allow runners to develop
+        # 4. Stop Loss (risk management)
+        if profit_pct <= -0.5:  # 50% stop loss
+            return i, "stop_loss"
         
-        # 2. Extreme time protection - only exit near horizon end
-        if days_held >= horizon_days * 0.95:  # Only exit in final 5% of horizon
+        # 5. ATR-based Trailing Stop (regime-aware)
+        if i >= 5 and profit_pct >= 0.2:  # Need 5 days of data and 20% profit
+            # Calculate ATR over last 5 days
+            recent_prices = p[max(0, i-4):i+1]
+            if len(recent_prices) >= 5:
+                high_low_range = np.max(recent_prices) - np.min(recent_prices)
+                atr = high_low_range / len(recent_prices)
+                
+                # Trail at ATR distance from recent high
+                recent_high = np.max(recent_prices)
+                trail_level = recent_high - (atr * 2.0)  # 2x ATR trail
+                
+                if option_price <= trail_level:
+                    return i, "atr_trail_hit"
+        
+        # 6. Horizon Protection (final safety net)
+        if days_held >= horizon_days:
             return i, "horizon_protection"
-        
-        # 3. Extreme catastrophic loss protection (only for -90%+ losses)
-        if profit_pct <= -0.90:  # Only exit on 90%+ loss (extreme protection)
-            return i, "catastrophic_loss"
-        
-        # === RUNNER DETECTION - HOLD FOR EXTREME GAINS ===
-        
-        # 4. Multi-bagger momentum detection (NEVER exit during strong momentum)
-        if profit_pct >= 3.0:  # 300%+ gains - potential for 1000%+ 
-            if i >= 3:
-                # Look at price progression over last 4 days
-                progression = p[max(0, i-3):i+1]
-                if len(progression) >= 4:
-                    # Calculate daily gain rates
-                    gains = [(progression[j] - progression[j-1]) / progression[j-1] 
-                            for j in range(1, len(progression)) if progression[j-1] > 0]
-                    
-                    # If we have sustained momentum, this could be a 1000%+ runner
-                    if len(gains) >= 3 and all(g > 0.05 for g in gains[-3:]):  # 5%+ daily gains
-                        # DO NOT EXIT - this is a potential extreme runner
-                        continue
-        
-        # 5. Extreme runner trailing stop (only after 500%+ gains)  
-        if profit_pct >= 5.0:  # Only trail after 500%+ gains
-            # Look back to find the peak over last 5 days
-            lookback_start = max(0, i-4)
-            recent_peak = np.max(p[lookback_start:i+1])
-            peak_profit = (recent_peak - entry) / entry if entry > 0 else 0
-            
-            # Very loose trail at 60% of peak profit (allows 40% giveback for extreme volatility)
-            trail_threshold = entry + (recent_peak - entry) * 0.60
-            
-            if option_price <= trail_threshold and peak_profit >= 5.0:
-                return i, "extreme_runner_trail"
     
     # No regime-aware exit triggered
     return None, "horizon"

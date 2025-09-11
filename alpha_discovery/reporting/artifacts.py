@@ -219,8 +219,8 @@ def materialize_per_fold_artifacts(base_dir: str) -> None:
     """
     Splits the global training CSVs into per-fold files.
     """
-    sum_path = os.path.join(base_dir, "pareto_front_summary.csv")
-    ledg_path = os.path.join(base_dir, "pareto_front_trade_ledger.csv")
+    sum_path = os.path.join(base_dir, "pareto", "pareto_front_summary.csv")
+    ledg_path = os.path.join(base_dir, "pareto", "pareto_front_trade_ledger.csv")
 
     folds_dir = os.path.join(base_dir, "folds")
     _ensure_dir(folds_dir)
@@ -487,7 +487,11 @@ def save_results(
                 pd.to_numeric(summary_df['nav_total_return_pct'], errors="coerce").fillna(0.0) * 100.0
         ).round(2).map(lambda x: f"{x:.2f} %")
 
-    summary_path: str = os.path.join(output_dir, 'pareto_front_summary.csv')
+    # Create pareto directory
+    pareto_dir = os.path.join(output_dir, 'pareto')
+    _ensure_dir(pareto_dir)
+    
+    summary_path: str = os.path.join(pareto_dir, 'pareto_front_summary.csv')
     summary_df.to_csv(summary_path, index=False, float_format='%.4f')
     print(f"Enriched summary saved to: {summary_path}")
 
@@ -508,7 +512,7 @@ def save_results(
         remaining_cols = [c for c in full_trade_ledger_df.columns if c not in existing_ledger_cols]
         full_trade_ledger_df = full_trade_ledger_df.reindex(columns=existing_ledger_cols + remaining_cols)
 
-        ledger_path: str = os.path.join(output_dir, 'pareto_front_trade_ledger.csv')
+        ledger_path: str = os.path.join(pareto_dir, 'pareto_front_trade_ledger.csv')
         full_trade_ledger_df.to_csv(ledger_path, index=False, float_format='%.6f')
         print(f"Full options trade ledger saved to: {ledger_path}")
     else:

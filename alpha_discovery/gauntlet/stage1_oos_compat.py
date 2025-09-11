@@ -66,9 +66,6 @@ def run_stage1_oos_compat(
     else:
         filtered = df.iloc[0:0].copy()
 
-    # Save optional summary
-    if output_dir:
-        _ensure_dir(output_dir)
-        rollup.to_csv(os.path.join(output_dir, 'stage1_oos_compat_summary.csv'), index=False)
+    # Note: Summary is handled by the calling function
 
     return filtered, rollup

@@ -10,12 +10,12 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int =120
-    generations: int = 12
+    population_size: int =100
+    generations: int = 8
     elitism_rate: float = 0.1
     mutation_rate: float = 0.2
-    seed: int = 85
-    setup_lengths_to_explore: List[int] = [1,2]
+    seed: int = 100
+    setup_lengths_to_explore: List[int] = [1]
 
     # Verbosity & debugging used by NSGA layer (added)
     verbose: int = 2              # 0..3 (2 = extra progress summaries)
@@ -28,6 +28,10 @@ class GaConfig(BaseModel):
     run_gauntlet: bool = True      # Set to False to skip traditional gauntlet phase entirely
     run_strict_oos_gauntlet: bool = True   # Set to False to skip Strict-OOS gauntlet phase
     run_diagnostic_replay: bool = True     # Set to False to skip diagnostic replay with portfolio analysis
+    
+    # Fitness system (legacy)
+    fitness_profile: str = "legacy"  # Use legacy metrics system
+    objectives: Optional[List[str]] = None
 
 
 # -----------------------------
@@ -106,64 +110,6 @@ class IslandConfig(BaseModel):
     
     # Logging per island
     log_island_metrics: bool = True
-
-
-# -----------------------------
-# Meta-Labeling Configuration
-# -----------------------------
-class MetaLabelingConfig(BaseModel):
-    """Meta-Labeling Filter Configuration"""
-    enabled: bool = False
-    
-    # Training parameters
-    min_trades_for_meta: int = 20          # Minimum trades needed to train meta-model
-    min_trades_per_ticker: int = 10        # Minimum trades per ticker for ticker-specific models
-    use_pooled_models: bool = True         # Pool across tickers if insufficient data
-    
-    # Cross-validation
-    cv_folds: int = 5                      # Number of CV folds
-    embargo_days: int = 10                 # Embargo period (≥ max hold period)
-    test_size: float = 0.2                 # Test set size for final evaluation
-    
-    # Meta-feature configuration
-    options_flow_features: List[str] = [
-        "3MO_CALL_IMP_VOL", "3MO_PUT_IMP_VOL", "IVOL_MONEYNESS",
-        "PUT_CALL_VOLUME_RATIO_CUR_DAY", "TOT_OPT_VOLUME_CUR_DAY",
-        "OPEN_INT_TOTAL_CALL", "OPEN_INT_TOTAL_PUT"
-    ]
-    
-    underlying_context_features: List[str] = [
-        "VOLATILITY_90D", "TURNOVER", "PX_LAST"
-    ]
-    
-    sentiment_features: List[str] = [
-        "TWITTER_COUNT", "NEWS_COUNT", "NET_SENTIMENT"
-    ]
-    
-    event_features: List[str] = [
-        "EV_pre_window", "EV_in_window", "EV_after_surprise"
-    ]
-    
-    setup_internal_features: List[str] = [
-        "trigger_z_score", "distance_to_threshold"
-    ]
-    
-    # Recent performance features
-    recent_hit_rate_window: int = 10       # Last K trades for hit rate calculation
-    
-    # Threshold optimization
-    min_trade_retention: float = 0.5       # Retain at least 50% of trades
-    max_trade_retention: float = 0.8       # Retain at most 80% of trades
-    threshold_optimization_metric: str = "expected_value"  # "expected_value" | "sharpe" | "sortino"
-    
-    # Model configuration
-    model_type: str = "logistic_regression"  # "logistic_regression" | "random_forest" | "xgboost"
-    model_params: Dict[str, Any] = {}       # Model-specific parameters
-    
-    # Evaluation
-    shadow_mode: bool = True               # Run in shadow mode (no changes to base system)
-    generate_artifacts: bool = True        # Generate detailed artifacts
-    log_meta_decisions: bool = True        # Log individual meta decisions
 
 
 # -----------------------------
@@ -387,7 +333,6 @@ class Settings(BaseModel):
     stage2: Stage2Config = Stage2Config()
     stage3: Stage3Config = Stage3Config()
     regime_aware: RegimeAwareConfig = RegimeAwareConfig()
-    meta_labeling: MetaLabelingConfig = MetaLabelingConfig()
 
 
 

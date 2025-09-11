@@ -121,7 +121,9 @@ def save_oos_results(
     print(f"    Saving OOS artifacts for fold {fold_num}...")
     
     # Create OOS-specific directory
-    oos_dir = os.path.join(output_dir, f"fold_{fold_num:02d}_oos")
+    oos_folds_dir = os.path.join(output_dir, "oos_folds")
+    os.makedirs(oos_folds_dir, exist_ok=True)
+    oos_dir = os.path.join(oos_folds_dir, f"fold_{fold_num:02d}_oos")
     os.makedirs(oos_dir, exist_ok=True)
     
     # Build signal metadata map for descriptions
@@ -283,7 +285,11 @@ def save_combined_oos_results(output_dir: str) -> None:
     # Save combined OOS summary
     if all_oos_summaries:
         combined_oos_summary = pd.concat(all_oos_summaries, ignore_index=True)
-        combined_summary_path = os.path.join(output_dir, 'oos_pareto_front_summary_combined.csv')
+        # Create pareto directory for OOS files
+        pareto_dir = os.path.join(output_dir, 'pareto')
+        os.makedirs(pareto_dir, exist_ok=True)
+        
+        combined_summary_path = os.path.join(pareto_dir, 'oos_pareto_front_summary_combined.csv')
         combined_oos_summary.to_csv(combined_summary_path, index=False, float_format='%.4f')
         print(f"Combined OOS summary saved to: {combined_summary_path}")
         
@@ -295,7 +301,7 @@ def save_combined_oos_results(output_dir: str) -> None:
     # Save combined OOS ledger  
     if all_oos_ledgers:
         combined_oos_ledger = pd.concat(all_oos_ledgers, ignore_index=True)
-        combined_ledger_path = os.path.join(output_dir, 'oos_pareto_front_trade_ledger_combined.csv')
+        combined_ledger_path = os.path.join(pareto_dir, 'oos_pareto_front_trade_ledger_combined.csv')
         combined_oos_ledger.to_csv(combined_ledger_path, index=False, float_format='%.6f')
         print(f"Combined OOS trade ledger saved to: {combined_ledger_path}")
 

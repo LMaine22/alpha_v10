@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 import math
 import warnings
+import os
+from datetime import datetime
 from typing import Optional, Tuple, Dict, List
 
 import numpy as np
@@ -11,6 +13,58 @@ from pandas.tseries.offsets import BDay
 
 # Suppress pandas FutureWarnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
+
+# ---------------------------------------------------------------------
+# Robust path resolution helpers
+# ---------------------------------------------------------------------
+def _project_root() -> str:
+    """Get repo root = two levels up from this file"""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+def _expand(p: str) -> str:
+    """Expand user path and make absolute if relative"""
+    p = os.path.expanduser(p)
+    if not os.path.isabs(p):
+        p = os.path.abspath(os.path.join(_project_root(), p))
+    return p
+
+def _resolve_calendar_paths_from_settings() -> list[str]:
+    """Resolve calendar paths from settings with fallbacks"""
+    paths: list[str] = []
+    try:
+        ev = getattr(settings, "events", None)
+        if ev:
+            # Prefer explicit single file_path if present
+            fp = getattr(ev, "file_path", None)
+            if fp:
+                paths.append(_expand(fp))
+            # Also support optional calendar_paths (plural)
+            cps = getattr(ev, "calendar_paths", None)
+            if cps:
+                for c in cps:
+                    paths.append(_expand(c))
+    except Exception:
+        pass
+    # Always append defaults (expanded) as fallbacks
+    for d in DEFAULT_CAL_PATHS:
+        paths.append(_expand(d))
+    # De-dup in order
+    seen, out = set(), []
+    for p in paths:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+def _calendar_path() -> Optional[str]:
+    """Find first existing calendar file from resolved paths"""
+    for p in _resolve_calendar_paths_from_settings():
+        try:
+            if os.path.exists(p):
+                return p
+        except Exception:
+            continue
+    return None
 
 # ---------------------------------------------------------------------
 # Project settings and helpers (safe fallbacks if imports missing)
@@ -365,11 +419,26 @@ def _load_calendar_df(calendar_df: Optional[pd.DataFrame] = None) -> pd.DataFram
     if calendar_df is None:
         p = _calendar_path()
         if p is None:
-            raise FileNotFoundError("No calendar file found in DEFAULT_CAL_PATHS and no DataFrame provided.")
-        if p.lower().endswith(".parquet"):
-            calendar_df = pd.read_parquet(p)
-        else:
-            calendar_df = pd.read_csv(p)
+            raise FileNotFoundError(
+                f"No calendar file found. Tried settings.events.file_path/calendar_paths "
+                f"and defaults: {DEFAULT_CAL_PATHS}"
+            )
+        try:
+            if p.lower().endswith(".parquet"):
+                try:
+                    calendar_df = pd.read_parquet(p)
+                except Exception as e:
+                    # fallback to CSV if a same-name CSV exists
+                    csv_guess = os.path.splitext(p)[0] + ".csv"
+                    if os.path.exists(csv_guess):
+                        print(f"[events] Parquet read failed ({e}); falling back to CSV: {csv_guess}")
+                        calendar_df = pd.read_csv(csv_guess)
+                    else:
+                        raise
+            else:
+                calendar_df = pd.read_csv(p)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load calendar file at {p}: {e}")
 
     df = calendar_df.copy()
 
@@ -383,6 +452,13 @@ def _load_calendar_df(calendar_df: Optional[pd.DataFrame] = None) -> pd.DataFram
         "SurveyLow": "Survey Low",
         "SurveyMean": "Survey Mean",
         "Country Code": "Country",
+        "relevance": "Relevance",  # Fix lowercase relevance column
+        "event_type": "Event",     # Map event_type to Event
+        "actual": "Actual",        # Map actual to Actual
+        "survey": "Survey",        # Map survey to Survey
+        "prior": "Prior",          # Map prior to Prior
+        "revised": "Revised",      # Map revised to Revised
+        "release_date": "Date",    # Map release_date to Date
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
 
@@ -405,6 +481,10 @@ def _load_calendar_df(calendar_df: Optional[pd.DataFrame] = None) -> pd.DataFram
               "Survey High", "Survey Low", "Survey Mean"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Sanity: if Relevance missing or all-NaN, set a conservative default (70)
+    if "Relevance" not in df.columns or pd.to_numeric(df["Relevance"], errors="coerce").fillna(0).eq(0).all():
+        df["Relevance"] = 70.0  # ensures EV_forward_calendar_* won't be identically zero
 
     # Ensure relevance bounded and sqrt-weight ready
     df["Relevance"] = _cap(df["Relevance"], 0, 100)
@@ -472,8 +552,11 @@ def _load_calendar_df(calendar_df: Optional[pd.DataFrame] = None) -> pd.DataFram
 # --------------------------------------------------------------------------------------
 
 def _wavg(x, w) -> float:
-    xs = pd.to_numeric(pd.Series(x).squeeze(), errors="coerce")
-    ws = pd.to_numeric(pd.Series(w).squeeze(), errors="coerce")
+    # Ensure we always have Series objects
+    xs = pd.Series(x) if not isinstance(x, pd.Series) else x
+    ws = pd.Series(w) if not isinstance(w, pd.Series) else w
+    xs = pd.to_numeric(xs, errors="coerce")
+    ws = pd.to_numeric(ws, errors="coerce")
     xs, ws = xs.align(ws, join="inner")
     m = xs.notna() & ws.notna() & (ws > 0)
     if not m.any():
@@ -990,6 +1073,15 @@ def build_event_features(calendar_df: Optional[pd.DataFrame] = None) -> pd.DataF
 
     # Final sorting & clean-up
     daily = daily.sort_index()
+    
+    # Add diagnostic summary
+    try:
+        non_all_nan = [c for c in daily.columns if not daily[c].dropna().empty]
+        print(f"[events] built {len(daily.columns)} EV cols "
+              f"({len(non_all_nan)} non-empty) | idx: {daily.index.min()} → {daily.index.max()}")
+    except Exception:
+        pass
+    
     return daily
 
 

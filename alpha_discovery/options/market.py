@@ -176,7 +176,7 @@ def get_1m_smile_iv(
     delta_bucket: str
 ) -> Optional[float]:
     """Get 1M delta smile implied volatility for specific bucket."""
-    # Map delta bucket to column suffix
+    # Map delta bucket to column suffix - NOW WITH COMPLETE 8-FEATURE SET
     bucket_mapping = {
         'CALL_40D': '1M_CALL_IMP_VOL_40DELTA_DFLT',
         'CALL_25D': '1M_CALL_IMP_VOL_25DELTA_DFLT', 
@@ -203,14 +203,14 @@ def interpolate_smile_iv(
 ) -> Optional[float]:
     """
     Interpolate 1M smile IV for a target delta between available buckets.
-    Works with whatever columns are available (need at least 2).
+    NOW USES COMPLETE 8-FEATURE SET for better interpolation.
     """
     if option_type == "call":
-        # Check what call deltas are available
+        # Complete call delta set - ALL 3 DELTAS AVAILABLE
         all_call_deltas = [0.10, 0.25, 0.40]
         all_call_buckets = ['CALL_10D', 'CALL_25D', 'CALL_40D']
     else:
-        # Check what put deltas are available
+        # Complete put delta set - ALL 3 DELTAS AVAILABLE
         all_put_deltas = [-0.40, -0.25, -0.10]
         all_put_buckets = ['PUT_40D', 'PUT_25D', 'PUT_10D']
     
@@ -228,8 +228,8 @@ def interpolate_smile_iv(
             if iv is not None:
                 available_pairs.append((delta, iv))
     
-    # Need at least 2 points for interpolation
-    if len(available_pairs) < 2:
+    # With complete 8-feature set, we expect all 3 deltas to be available
+    if len(available_pairs) < 3:
         return None
     
     # Sort by delta for proper interpolation
@@ -267,14 +267,14 @@ def check_new_iv_columns_available(ticker: str, date: pd.Timestamp, df: pd.DataF
     """
     Check if new IV columns are available for this ticker/date.
     Returns (sufficient_available, missing_columns).
-    Now requires only 30D ATM + at least 2 delta smile columns for each side.
+    NOW REQUIRES COMPLETE 8-FEATURE SET: 30D ATM + all 6 delta smile columns.
     """
     # Core required columns (30D ATM)
     core_required = ['CALL_IMP_VOL_30D', 'PUT_IMP_VOL_30D']
     
-    # Smile columns (need at least 2 for each side to enable interpolation)
-    call_smile_options = ['1M_CALL_IMP_VOL_10DELTA_DFLT', '1M_CALL_IMP_VOL_25DELTA_DFLT', '1M_CALL_IMP_VOL_40DELTA_DFLT']
-    put_smile_options = ['1M_PUT_IMP_VOL_40DELTA_DFLT', '1M_PUT_IMP_VOL_25DELTA_DFLT', '1M_PUT_IMP_VOL_10DELTA_DFLT']
+    # Complete smile columns - ALL 6 DELTA FEATURES REQUIRED
+    call_smile_required = ['1M_CALL_IMP_VOL_10DELTA_DFLT', '1M_CALL_IMP_VOL_25DELTA_DFLT', '1M_CALL_IMP_VOL_40DELTA_DFLT']
+    put_smile_required = ['1M_PUT_IMP_VOL_40DELTA_DFLT', '1M_PUT_IMP_VOL_25DELTA_DFLT', '1M_PUT_IMP_VOL_10DELTA_DFLT']
     
     missing = []
     
@@ -289,33 +289,20 @@ def check_new_iv_columns_available(ticker: str, date: pd.Timestamp, df: pd.DataF
             if value is None:
                 missing.append(f"{full_col} (no data for {date})")
     
-    # Check smile columns - need at least 2 available for each side
-    call_smile_available = []
-    put_smile_available = []
+    # Check smile columns - ALL 6 DELTA FEATURES REQUIRED
+    all_smile_required = call_smile_required + put_smile_required
     
-    for col in call_smile_options:
+    for col in all_smile_required:
         full_col = f"{ticker}_{col}"
-        if full_col in df.columns:
+        if full_col not in df.columns:
+            missing.append(full_col)
+        else:
             s = df[full_col]
             value = _value_at_or_pad(s, date)
-            if value is not None:
-                call_smile_available.append(col)
+            if value is None:
+                missing.append(f"{full_col} (no data for {date})")
     
-    for col in put_smile_options:
-        full_col = f"{ticker}_{col}"
-        if full_col in df.columns:
-            s = df[full_col]
-            value = _value_at_or_pad(s, date)
-            if value is not None:
-                put_smile_available.append(col)
-    
-    # Add missing smile info
-    if len(call_smile_available) < 2:
-        missing.append(f"Insufficient call smile columns (need 2, have {len(call_smile_available)})")
-    if len(put_smile_available) < 2:
-        missing.append(f"Insufficient put smile columns (need 2, have {len(put_smile_available)})")
-    
-    # Success if we have 30D ATM + at least 2 smile columns per side
+    # Success if we have 30D ATM + ALL 6 delta smile columns
     sufficient = len(missing) == 0
     
     return sufficient, missing

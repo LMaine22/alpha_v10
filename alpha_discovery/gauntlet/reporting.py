@@ -56,6 +56,11 @@ def _gauntlet_dir(run_dir: str) -> str:
     ensure_dir(d)
     return d
 
+def _gauntlet_legacy_dir(run_dir: str) -> str:
+    d = os.path.join(run_dir, "gauntlet", "legacy")
+    ensure_dir(d)
+    return d
+
 
 def _coerce_schema(df: pd.DataFrame, base_schema: Optional[List[str]]) -> pd.DataFrame:
     """
@@ -89,6 +94,7 @@ def write_stage_csv(
     name: str,
     df: pd.DataFrame,
     base_schema: Optional[List[str]] = None,
+    use_legacy_dir: bool = False,
 ) -> str:
     """
     Generic CSV writer used by the gauntlet stages. Ensures directories exist,
@@ -98,7 +104,7 @@ def write_stage_csv(
     this function will automatically apply LEDGER_BASE_SCHEMA so your new
     scale-out columns always show up (even when some are missing/NaN).
     """
-    d = _gauntlet_dir(run_dir)
+    d = _gauntlet_legacy_dir(run_dir) if use_legacy_dir else _gauntlet_dir(run_dir)
     path = os.path.join(d, f"{name}.csv")
 
     # Auto-apply gauntlet ledger schema if caller didn't pass one.

@@ -24,7 +24,6 @@ from .io import ensure_dir
 from .backtester import _align_to_pareto_schema_auto
 from .config_new import get_permissive_gauntlet_config
 from .medium import run_medium_gauntlet, SetupResults, write_gauntlet_artifacts
-from ..meta_labeling import MetaLabelingSystem
 
 
 
@@ -305,10 +304,6 @@ def _run_medium_gauntlet_mode(run_dir: str, oos_ledgers: Dict[str, pd.DataFrame]
     output_dir = os.path.join(run_dir, "gauntlet_medium")
     write_gauntlet_artifacts(results, output_dir, medium_config)
     
-    # Run meta-labeling on survivors
-    if settings.meta_labeling.enabled:
-        print("\n--- Phase 4: Meta-Labeling (Post-Gauntlet Filter) ---")
-        _run_meta_labeling(run_dir, results, oos_ledgers, settings, config)
     
     # Print summary
     deploy_count = len([r for r in results if r.final_decision == "Deploy"])
@@ -320,62 +315,6 @@ def _run_medium_gauntlet_mode(run_dir: str, oos_ledgers: Dict[str, pd.DataFrame]
     print(f"  Monitor: {monitor_count}")
     print(f"  Retire: {retire_count}")
     print(f"  Artifacts written to: {output_dir}")
-
-
-def _run_meta_labeling(run_dir: str, gauntlet_results: List, oos_ledgers: Dict[str, pd.DataFrame],
-                      settings: Any, config: Dict[str, Any]) -> None:
-    """Run meta-labeling on gauntlet survivors."""
-    from ..meta_labeling import MetaLabelingSystem
-    
-    # Get gauntlet survivors (Deploy and Monitor decisions)
-    survivors = []
-    for result in gauntlet_results:
-        if result.final_decision in ["Deploy", "Monitor"]:
-            survivors.append({
-                'setup_id': result.setup_id,
-                'ticker': result.ticker,
-                'direction': result.direction,
-                'final_decision': result.final_decision
-            })
-    
-    if not survivors:
-        print("No gauntlet survivors for meta-labeling")
-        return
-    
-    print(f"Running meta-labeling on {len(survivors)} gauntlet survivors...")
-    
-    # Initialize meta-labeling system
-    meta_system = MetaLabelingSystem(config.get('meta_labeling', {}))
-    
-    # Load required data
-    from ..data.loader import load_master_data
-    from ..features.registry import build_feature_matrix
-    from ..signals.compiler import compile_signals
-    
-    print("Loading data for meta-labeling...")
-    master_df = load_master_data()
-    feature_matrix = build_feature_matrix(master_df)
-    signals_df, signals_metadata = compile_signals(feature_matrix)
-    
-    # Run meta-labeling
-    meta_results = meta_system.run_meta_labeling(
-        survivors, oos_ledgers, master_df, signals_df, signals_metadata
-    )
-    
-    # Generate artifacts
-    meta_output_dir = os.path.join(run_dir, "meta_labeling")
-    meta_system.artifact_generator.generate_summary_artifacts(meta_results, meta_output_dir)
-    
-    # Print summary
-    summary_stats = meta_system.get_summary_statistics()
-    print(f"\nMeta-Labeling Results:")
-    print(f"  Total setups: {summary_stats.get('total_setups', 0)}")
-    print(f"  Successfully trained: {summary_stats.get('trained_count', 0)}")
-    print(f"  Average EV improvement: {summary_stats.get('avg_ev_improvement', 0):.4f}")
-    print(f"  Average Sharpe improvement: {summary_stats.get('avg_sharpe_improvement', 0):.4f}")
-    print(f"  Average retention rate: {summary_stats.get('avg_retention_rate', 0):.4f}")
-    print(f"  Average model accuracy: {summary_stats.get('avg_accuracy', 0):.4f}")
-    print(f"  Artifacts written to: {meta_output_dir}")
 
 
 def _first_nonnull_col(df: pd.DataFrame, candidates):
@@ -761,18 +700,9 @@ def run_gauntlet_strict_oos(run_dir: str, splits=None, outdir: str | None = None
         # Use compat outputs
         s1_df = compat_df
         s1_summary = compat_sum
-        # Note why we did this
-        with open(os.path.join(out_base, 'stage1_compat_note.txt'), 'w') as f:
-            f.write(
-                "Legacy Stage 1 returned no filtering or contradictory pass flags for historical OOS data.\n"
-                f"Applied OOS-compat Stage 1 with as_of_date={oos_as_of_date}, "
-                f"recency_days={recency_days}, min_trades={min_trades}.\n"
-            )
+        # Note: Using OOS-compat Stage 1 for better historical OOS data handling
 
-    # Persist Stage 1 artifacts
-    if not _write_if_df(s1_df, os.path.join(out_base, 'stage1_oos.csv')):
-        s1_df = strict_df.copy()
-        s1_df.to_csv(os.path.join(out_base, 'stage1_oos.csv'), index=False)
+    # Persist Stage 1 artifacts (only summary, not the large ledger)
     _write_if_df(s1_summary, os.path.join(out_base, 'stage1_summary.csv'))
 
     # 3) Stage 2 - Call directly with proper signature

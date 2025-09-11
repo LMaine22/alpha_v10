@@ -210,25 +210,25 @@ PAIR_SPECS: Dict[str, Callable[[pd.DataFrame, str, str], pd.Series]] = {
 # Event bundle / interactions
 # ----------------------
 def _ev_bundle(index_like) -> pd.DataFrame:
+    EV = None
     try:
         EV = build_event_features()
     except Exception as e:
-        print(f"Error building event features: {e}")
+        # do NOT hide the error — surface it loudly
+        print(f"[events] ERROR: {e}")
         EV = pd.DataFrame(index=index_like)
+
+    if EV is None or EV.empty:
+        # ensure we return a df aligned to index_like even if empty
+        return pd.DataFrame(index=index_like)
 
     def _safe(k):
         s = EV[k] if k in EV.columns else pd.Series(index=EV.index, dtype=float)
         return pd.to_numeric(s, errors="coerce")
 
-    # Include ALL event features instead of cherry-picking - collect first, then concat
-    ev_cols = {}
-    for col in EV.columns:
-        if col.startswith('EV') or col.startswith('days_to_') or col.startswith('within_') or col.startswith('SEQ.') or col.startswith('COND.') or col.startswith('EXP.') or col.startswith('META.') or col.startswith('day_'):
-            ev_cols[col] = _safe(col)
-    
-    # Create DataFrame from all columns at once to avoid fragmentation
+    keep_prefixes = ("EV", "days_to_", "COND.", "EXP.", "META.", "day_")
+    ev_cols = {col: _safe(col) for col in EV.columns if any(col.startswith(p) for p in keep_prefixes)}
     out = pd.DataFrame(ev_cols, index=EV.index)
-    
     return out.reindex(index_like)
 
 
@@ -299,9 +299,10 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     # ---- Assemble (avoid fragmentation) ----
     X = pd.DataFrame(feats).sort_index()
     
-    # Drop columns that are all-NaN EXCEPT event features (which are naturally sparse)
-    non_event_cols = [col for col in X.columns if not (col.startswith('EV') or col.startswith('days_to_') or col.startswith('SEQ.') or col.startswith('COND.') or col.startswith('EXP.') or col.startswith('META.'))]
-    event_cols = [col for col in X.columns if col.startswith('EV') or col.startswith('days_to_') or col.startswith('SEQ.') or col.startswith('COND.') or col.startswith('EXP.') or col.startswith('META.')]
+    # Drop non-event columns that are all-NaN, keep EV/COND/EXP/META/day_* even if sparse
+    keep_prefixes = ("EV", "days_to_", "COND.", "EXP.", "META.", "day_")
+    event_cols = [c for c in X.columns if any(c.startswith(p) for p in keep_prefixes)]
+    non_event_cols = [c for c in X.columns if c not in event_cols]
     
     # Drop all-NaN non-event columns
     if non_event_cols:
