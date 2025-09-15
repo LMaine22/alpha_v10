@@ -278,7 +278,10 @@ def write_all_setups_summary(
         if ("fold" in agg.columns) and ("fold" in pareto_df.columns):
             final_df = agg.merge(pareto_df, on=["setup_id", "fold"], how="left", suffixes=("", ""))
         else:
-            final_df = agg.merge(pareto_df, on="setup_id", how="left", suffixes=("", ""))
+            # If no fold column in agg, deduplicate pareto data by setup_id first
+            # Keep the first occurrence for each setup_id to avoid cartesian product
+            pareto_dedup = pareto_df.drop_duplicates(subset=["setup_id"], keep="first")
+            final_df = agg.merge(pareto_dedup, on="setup_id", how="left", suffixes=("", ""))
     else:
         final_df = agg
 
@@ -439,7 +442,10 @@ def write_open_trades_summary(
         if ("fold" in agg.columns) and ("fold" in pareto_df.columns):
             final_df = agg.merge(pareto_df, on=["setup_id", "fold"], how="left", suffixes=("", ""))
         else:
-            final_df = agg.merge(pareto_df, on="setup_id", how="left", suffixes=("", ""))
+            # If no fold column in agg, deduplicate pareto data by setup_id first
+            # Keep the first occurrence for each setup_id to avoid cartesian product
+            pareto_dedup = pareto_df.drop_duplicates(subset=["setup_id"], keep="first")
+            final_df = agg.merge(pareto_dedup, on="setup_id", how="left", suffixes=("", ""))
     else:
         final_df = agg
 

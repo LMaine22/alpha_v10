@@ -43,9 +43,10 @@ def _read_csv_safe(path: str) -> pd.DataFrame:
     return df
 
 def read_global_artifacts(run_dir: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Return (summary_df, ledger_df) from the run root."""
-    summary = _read_csv_safe(os.path.join(run_dir, RUN_SUMMARY))
-    ledger  = _read_csv_safe(os.path.join(run_dir, RUN_LEDGER))
+    """Return (summary_df, ledger_df) from the pareto subdirectory."""
+    pareto_dir = os.path.join(run_dir, "pareto")
+    summary = _read_csv_safe(os.path.join(pareto_dir, RUN_SUMMARY))
+    ledger  = _read_csv_safe(os.path.join(pareto_dir, RUN_LEDGER))
     return summary, ledger
 
 def list_folds(run_dir: str) -> List[int]:
@@ -169,8 +170,8 @@ def read_oos_artifacts(run_dir: str):
       - oos_pareto_front_trade_ledger_combined.csv
 
     If missing, falls back to concatenating any per-fold:
-      - fold_*_oos/oos_pareto_front_summary_*.csv
-      - fold_*_oos/oos_pareto_front_trade_ledger_*.csv
+      - oos_folds/fold_*_oos/oos_pareto_front_summary.csv
+      - oos_folds/fold_*_oos/oos_pareto_front_trade_ledger.csv
 
     Returns:
         (oos_summary_df, oos_ledger_df) with setup_fp attached to summary (and ledger if merge keys available).
@@ -188,9 +189,9 @@ def read_oos_artifacts(run_dir: str):
 
     # Per-fold fallback
     if not summary_paths:
-        summary_paths = sorted(glob.glob(os.path.join(run_dir, "fold_*_oos", "oos_pareto_front_summary_*.csv")))
+        summary_paths = sorted(glob.glob(os.path.join(run_dir, "oos_folds", "fold_*_oos", "oos_pareto_front_summary.csv")))
     if not ledger_paths:
-        ledger_paths = sorted(glob.glob(os.path.join(run_dir, "fold_*_oos", "oos_pareto_front_trade_ledger_*.csv")))
+        ledger_paths = sorted(glob.glob(os.path.join(run_dir, "oos_folds", "fold_*_oos", "oos_pareto_front_trade_ledger.csv")))
 
     if not summary_paths or not ledger_paths:
         raise FileNotFoundError(f"[read_oos_artifacts] Could not find OOS files in: {run_dir}")
@@ -233,8 +234,8 @@ def read_is_artifacts(run_dir: str):
     Returns:
         (is_summary_df, is_ledger_df) or (None, None) if nothing found.
     """
-    combined_summary = os.path.join(run_dir, "pareto_front_summary.csv")
-    combined_ledger  = os.path.join(run_dir, "pareto_front_trade_ledger.csv")
+    combined_summary = os.path.join(run_dir, "pareto", "pareto_front_summary.csv")
+    combined_ledger  = os.path.join(run_dir, "pareto", "pareto_front_trade_ledger.csv")
 
     summary_paths = []
     ledger_paths = []

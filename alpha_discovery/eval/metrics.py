@@ -24,7 +24,7 @@ def _sanitize_series(s: Optional[pd.Series]) -> pd.Series:
 
 
 # =========================
-# Robust helpers (WINSORIZE ADDED BACK)
+# Robust helpers
 # =========================
 
 def winsorize(series: pd.Series, lower_q: float = 0.01, upper_q: float = 0.99) -> pd.Series:
@@ -38,14 +38,25 @@ def winsorize(series: pd.Series, lower_q: float = 0.01, upper_q: float = 0.99) -
     return series.clip(lower=lower, upper=upper)
 
 
+def _daily_required_return_from_settings() -> float:
+    """
+    Annual RF from settings → daily MAR used by Sortino.
+    This anchors downside to economic opportunity cost.
+    """
+    try:
+        rf_annual = float(getattr(settings.options, "constant_r", 0.0))
+    except Exception:
+        rf_annual = 0.0
+    return float(rf_annual) / TRADING_DAYS_PER_YEAR
+
+
 # =========================
-# Expectancy (New)
+# Expectancy
 # =========================
 
 def calculate_expectancy(trade_ledger: pd.DataFrame) -> float:
     """
-    Calculates the per-trade expectancy of a strategy.
-    E = (Win Rate * Avg Win Size) + (Loss Rate * Avg Loss Size)
+    Per-trade expectancy (dollars): E = p_win*avg_win + (1-p_win)*avg_loss
     """
     if trade_ledger is None or trade_ledger.empty or 'pnl_dollars' not in trade_ledger.columns:
         return 0.0
@@ -60,7 +71,6 @@ def calculate_expectancy(trade_ledger: pd.DataFrame) -> float:
     n_wins = len(wins)
     n_losses = len(losses)
     n_trades = n_wins + n_losses
-
     if n_trades == 0:
         return 0.0
 
@@ -68,76 +78,96 @@ def calculate_expectancy(trade_ledger: pd.DataFrame) -> float:
     loss_rate = n_losses / n_trades
 
     avg_win = wins.mean() if n_wins > 0 else 0.0
-    avg_loss = losses.mean() if n_losses > 0 else 0.0  # This will be negative or zero
+    avg_loss = losses.mean() if n_losses > 0 else 0.0  # negative or zero
 
-    expectancy = (win_rate * avg_win) + (loss_rate * avg_loss)  # Add because avg_loss is already negative
-
+    expectancy = (win_rate * avg_win) + (loss_rate * avg_loss)
     return float(expectancy) if np.isfinite(expectancy) else 0.0
 
 
 # =========================
-# Sortino Ratio (New)
+# Sortino Ratio (MAR-aware)
 # =========================
 
-def calculate_sortino_ratio(series: pd.Series, required_return: float = 0.0) -> float:
-    """Calculates the Sortino Ratio."""
+def calculate_sortino_ratio(series: pd.Series, required_return: Optional[float] = None) -> float:
+    """
+    Sortino ratio computed against a positive MAR (default: daily risk-free).
+    This removes the ∞→hardcoded-100 sentinel pathology.
+    """
     s = _sanitize_series(series)
     if len(s) < 2:
         return 0.0
 
+    mar = _daily_required_return_from_settings() if required_return is None else float(required_return)
     mean_return = s.mean()
 
-    # Calculate downside deviation
-    downside_returns = s[s < required_return]
-    if len(downside_returns) < 1:
-        # If there are no losses, Sortino is technically infinite. Return a large number.
-        return 100.0 if mean_return > 0 else 0.0
+    downside = s[s < mar]
+    if downside.empty:
+        # True mathematical result is +inf (no downside vs MAR).
+        return float("inf")
 
-    # Note: The denominator should be the square root of the mean squared downside returns
-    downside_deviation = np.sqrt(np.mean((downside_returns - required_return) ** 2))
+    # Semideviation around MAR
+    downside_deviation = np.sqrt(np.mean(np.square(downside - mar)))
+    if downside_deviation < 1e-12:
+        return float("inf") if (mean_return > mar) else 0.0
 
-    if downside_deviation < 1e-9:
-        return 100.0 if mean_return > 0 else 0.0
-
-    sortino = (mean_return - required_return) / downside_deviation * np.sqrt(TRADING_DAYS_PER_YEAR)
-    return float(sortino) if np.isfinite(sortino) else 0.0
+    sortino = (mean_return - mar) / downside_deviation
+    # Annualize
+    sortino *= np.sqrt(TRADING_DAYS_PER_YEAR)
+    return float(sortino) if np.isfinite(sortino) else float("inf")
 
 
 def block_bootstrap_sortino(
-        returns_series: pd.Series,
-        block_size: int = 5,
-        num_iterations: int = 500
+    returns_series: pd.Series,
+    block_size: int = 5,
+    num_iterations: int = 500,
+    required_return: Optional[float] = None,
 ) -> Dict[str, float]:
-    """Sortino bootstrap with overlapping blocks."""
+    """
+    Sortino bootstrap with overlapping blocks and a positive MAR.
+    We compute Sortino on each bootstrap sample vs MAR, then take finite quantiles.
+    """
     rs = _sanitize_series(returns_series)
     n = len(rs)
     if n < max(block_size * 2, 10):
         return {"sortino_median": 0.0, "sortino_lb": 0.0, "sortino_ub": 0.0}
 
+    b = int(block_size)
+    if b <= 0 or n < b:
+        return {"sortino_median": 0.0, "sortino_lb": 0.0, "sortino_ub": 0.0}
+
     x = rs.to_numpy(copy=False)
-    n_blocks = n - block_size + 1
+    n_blocks = n - b + 1
     if n_blocks <= 0:
         return {"sortino_median": 0.0, "sortino_lb": 0.0, "sortino_ub": 0.0}
 
-    blocks = np.lib.stride_tricks.as_strided(x, shape=(n_blocks, block_size), strides=(x.strides[0], x.strides[0]))
+    stride = x.strides[0]
+    blocks = np.lib.stride_tricks.as_strided(x, shape=(n_blocks, b), strides=(stride, stride))
 
-    k = max(n // block_size, 1)
+    k = max(n // b, 1)
     sortino_vals = np.empty(int(num_iterations), dtype=float)
+    mar = _daily_required_return_from_settings() if required_return is None else float(required_return)
 
     rng = np.random.default_rng()
     for i in range(int(num_iterations)):
         idx = rng.integers(0, n_blocks, size=k, endpoint=False)
         sample = blocks[idx].ravel()[:n]
-        sortino_vals[i] = calculate_sortino_ratio(pd.Series(sample))
+        sortino_vals[i] = calculate_sortino_ratio(pd.Series(sample), required_return=mar)
 
-    sortino_vals = sortino_vals[np.isfinite(sortino_vals)]
-    if sortino_vals.size == 0:
-        return {"sortino_median": 0.0, "sortino_lb": 0.0, "sortino_ub": 0.0}
+    # Keep finite values only for quantiles
+    finite_mask = np.isfinite(sortino_vals)
+    finite = sortino_vals[finite_mask]
+    if finite.size == 0:
+        # Pathological case: every resample is ∞ → define a very high but finite floor
+        # using the single-sample Sortino against MAR to avoid returning 0s.
+        single = calculate_sortino_ratio(rs, required_return=mar)
+        if not np.isfinite(single):
+            return {"sortino_median": 0.0, "sortino_lb": 0.0, "sortino_ub": 0.0}
+        finite = np.array([single], dtype=float)
 
     return {
-        "sortino_median": float(np.nanmedian(sortino_vals)),
-        "sortino_lb": float(np.nanpercentile(sortino_vals, 5)),
-        "sortino_ub": float(np.nanpercentile(sortino_vals, 95)),
+        "sortino_median": float(np.nanmedian(finite)),
+        "sortino_lb": float(np.nanpercentile(finite, 5)),
+        "sortino_ub": float(np.nanpercentile(finite, 95)),
     }
 
 
@@ -145,10 +175,10 @@ def block_bootstrap_sortino(
 # Existing Metrics (Kept for compatibility/reporting)
 # =========================
 def block_bootstrap_sharpe(
-        returns_series: pd.Series,
-        block_size: int = 5,
-        num_iterations: int = 500,
-        trading_days_per_year: int = int(TRADING_DAYS_PER_YEAR),
+    returns_series: pd.Series,
+    block_size: int = 5,
+    num_iterations: int = 500,
+    trading_days_per_year: int = int(TRADING_DAYS_PER_YEAR),
 ) -> Dict[str, float]:
     """
     Sharpe bootstrap with overlapping blocks (robust to autocorrelation).
@@ -231,12 +261,12 @@ def calculate_max_drawdown(series: pd.Series) -> float:
 
 
 # =========================
-# Main Portfolio Metrics Calculator (Updated)
+# Main Portfolio Metrics Calculator
 # =========================
 def calculate_portfolio_metrics(
-        daily_returns: pd.Series,
-        portfolio_ledger: Optional[pd.DataFrame] = None,  # Added to calculate expectancy
-        do_winsorize: bool = True,
+    daily_returns: pd.Series,
+    portfolio_ledger: Optional[pd.DataFrame] = None,
+    do_winsorize: bool = True,
 ) -> Dict[str, float]:
     """
     Canonical metrics from a daily return series and the underlying ledger.
@@ -250,11 +280,12 @@ def calculate_portfolio_metrics(
         if len(s) > 20:  # Avoid winsorizing very small samples
             s = winsorize(s, lower_q=alpha, upper_q=1.0 - alpha)
 
-    # --- New Metrics ---
-    sortino_stats = block_bootstrap_sortino(s)
-    expectancy = calculate_expectancy(portfolio_ledger) if portfolio_ledger is not None else 0.0
+    # --- MAR-aware Sortino (with bootstrap) ---
+    mar = _daily_required_return_from_settings()
+    sortino_stats = block_bootstrap_sortino(s, block_size=5, num_iterations=500, required_return=mar)
 
-    # --- Existing Metrics (calculated for reporting purposes) ---
+    # --- Other metrics ---
+    expectancy = calculate_expectancy(portfolio_ledger) if portfolio_ledger is not None else 0.0
     support = float(len(daily_returns))
     sharpe_stats = block_bootstrap_sharpe(s)
     omega = calculate_omega_ratio(s)
@@ -264,10 +295,9 @@ def calculate_portfolio_metrics(
         "support": support,
         "expectancy": expectancy,
         "max_drawdown": float(max_dd),
-        "omega_ratio": float(omega),  # Kept for reporting
+        "omega_ratio": float(omega),
     }
     out.update({k: float(v) for k, v in sharpe_stats.items()})
     out.update({k: float(v) for k, v in sortino_stats.items()})
 
     return {k: (0.0 if v is None or not np.isfinite(v) else float(v)) for k, v in out.items()}
-

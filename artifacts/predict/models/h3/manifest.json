@@ -1,0 +1,12 @@
+{
+  "horizon_days": 3,
+  "n_features": 1,
+  "feature_columns": [
+    "PX_LAST"
+  ],
+  "dir_oos_auc": 0.5007550560406463,
+  "dir_oos_brier": 0.24982864832425855,
+  "dir_oos_ece": 0.015630268082765866,
+  "reg_oos_mae": 0.027909020162078416,
+  "reg_oos_wis": 0.05792758456323603
+}

@@ -1,46 +1,67 @@
-# Alpha Discovery v10 - Documentation
+# Runs Directory
 
-Welcome to the Alpha Discovery v10 documentation. This directory contains comprehensive documentation for the project.
+This directory contains all experimental runs and results from the Alpha Discovery v10 system.
 
-## 📁 Documentation Structure
+## 📁 Directory Structure
 
-### User Guides
-- **[Operator Runbook](user_guides/OPERATOR_RUNBOOK.md)** - Main operational guide for running experiments
+### `active/`
+Contains the most recent and currently relevant runs (4 most recent):
+- `run_seed100_20250910_182743/` - Most recent run
+- `run_seed99_20250910_154937/` - Recent run  
+- `run_seed97_20250910_131151/` - Recent run
+- `run_seed97_20250910_123530/` - Recent run
 
-### Technical Documentation
-- **[8-Feature IV System](technical/COMPLETE_8_FEATURE_IV_SYSTEM.md)** - Complete IV pricing system documentation
-- **[Robust Metrics Upgrade](technical/ROBUST_METRICS_UPGRADE.md)** - Metrics system improvements
-- **[Strict OOS Gauntlet](technical/STRICT_OOS_GAUNTLET_EXPLAINED.md)** - Out-of-sample validation system
-- **[Strict OOS Files](technical/STRICT_OOS_FILES_EXPLAINED.md)** - File structure and outputs
-- **[Current Fitness Objectives](technical/CURRENT_FITNESS_OBJECTIVES.md)** - GA fitness configuration
+### `archived/`
+Contains all older runs and historical data:
+- `1-30/`, `31-37/`, `38-50/`, `51-70/`, `71-91/` - Historical runs by seed ranges
+- `run_seed85_*`, `run_seed92_*`, `run_seed93_*`, etc. - Individual older runs
 
-### Changelog
-- **[Fitness Metrics Cleanup](changelog/FITNESS_METRICS_CLEANUP.md)** - Metrics system cleanup notes
-- **[Fitness Metrics Fixed](changelog/FITNESS_METRICS_FIXED.md)** - Metrics fixes and improvements
-- **[Strict OOS Fixed](changelog/STRICT_OOS_FIXED.md)** - OOS system fixes
-- **[Strict OOS Simplified](changelog/STRICT_OOS_SIMPLIFIED.md)** - OOS system simplification
+### `summaries/`
+Contains consolidated summary files:
+- `master_open_trades_summary.csv` - Master summary of all open trades
 
-## 🚀 Quick Start
+### Numbered Directories
+- `1-30/`, `31-37/`, `38-50/`, `51-70/`, `71-91/` - Historical runs organized by seed ranges
 
-1. See the [Operator Runbook](user_guides/OPERATOR_RUNBOOK.md) for getting started
-2. Check [8-Feature IV System](technical/COMPLETE_8_FEATURE_IV_SYSTEM.md) for pricing details
-3. Review [Strict OOS Gauntlet](technical/STRICT_OOS_GAUNTLET_EXPLAINED.md) for validation
+### Individual Run Directories
+- `run_seedXXX_YYYYMMDD_HHMMSS/` - Individual experimental runs
 
-## 📊 Project Overview
+## 🚀 Usage
 
-Alpha Discovery v10 is a comprehensive options trading strategy discovery system that uses:
-- Genetic Algorithms (GA) with NSGA-II multi-objective optimization
-- Walk-forward validation with strict out-of-sample testing
-- Regime-aware exit strategies
-- Economic event feature integration
-- Advanced options pricing with IV smile interpolation
+### Finding Recent Runs
+```bash
+# List most recent runs
+ls runs/active/
 
-## 🔧 System Components
+# List all runs sorted by date
+ls -t runs/run_seed*
+```
 
-- **Data Pipeline**: Bloomberg data processing and economic event integration
-- **Feature Engineering**: Technical indicators and event-based features
-- **Signal Generation**: Primitive signal compilation and combination
-- **Genetic Search**: Multi-objective optimization for strategy discovery
-- **Backtesting**: Options simulation with regime-aware exits
-- **Validation**: Multi-stage gauntlet with strict OOS testing
-- **Reporting**: Comprehensive results analysis and visualization
+### Accessing Results
+Each run directory contains:
+- `config.json` - Configuration used for the run
+- `pareto_front_summary.csv` - Pareto front results
+- `pareto_front_trade_ledger.csv` - Detailed trade ledger
+- `gauntlet/` - Gauntlet validation results
+- `folds/` - Per-fold results
+
+### Moving Runs to Archive
+```bash
+# Move old runs to archive
+mv runs/run_seedXXX_YYYYMMDD_HHMMSS runs/archived/
+```
+
+## 📊 Run Naming Convention
+
+Runs are named: `run_seed{SEED}_{YYYYMMDD}_{HHMMSS}`
+
+- `SEED`: Random seed used for reproducibility
+- `YYYYMMDD`: Date of the run
+- `HHMMSS`: Time of the run
+
+## 🔧 Maintenance
+
+- **Active runs**: Keep 5-10 most recent runs in `active/`
+- **Archived runs**: Move older runs to `archived/` by date
+- **Cleanup**: Remove very old runs periodically to save space
+- **Summaries**: Update master summaries after major runs
