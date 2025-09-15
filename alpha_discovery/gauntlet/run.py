@@ -577,29 +577,97 @@ def run_gauntlet_strict_oos(
 
     if ledger_for_outputs is None:
         # Best-effort: mark opens as of last OOS date
-        as_of = pd.to_datetime(survivors_df[
-                                   "trade_d"]).max().normalize() if "trade_d" in survivors_df.columns else pd.Timestamp.today().normalize()
+        # Use the actual data end date, not max trade_d which might be earlier
+        # This ensures we properly mark trades as open if they extend beyond data availability
+        data_end_date = pd.Timestamp("2025-09-15").normalize()  # Your actual data end date
+        
+        # Clean up any fictional future exit dates before marking open positions
+        survivors_clean = survivors_df.copy()
+        if "exit_date" in survivors_clean.columns:
+            survivors_clean["exit_date"] = pd.to_datetime(survivors_clean["exit_date"], errors="coerce")
+            # Set any exit dates after data end to NaT (these are fictional)
+            fictional_exits = survivors_clean["exit_date"] > data_end_date
+            if fictional_exits.any():
+                print(f"[Strict-OOS] Found {fictional_exits.sum()} trades with fictional future exit dates, marking as open")
+                survivors_clean.loc[fictional_exits, "exit_date"] = pd.NaT
+        
         ledger_for_outputs = _mark_open_positions_at_eod(
-            ledger=survivors_df.copy(),
-            oos_end=as_of,
+            ledger=survivors_clean,
+            oos_end=data_end_date,
             last_mark=None
         )
 
-    # 7) *** Canonical writers for IDENTICAL schemas ***
-    # These write to runs/<run>/gauntlet/ using your standard columns (no setup_fp)
-    write_open_trades_summary(run_dir, ledger_for_outputs)
-    write_all_setups_summary(run_dir, ledger_for_outputs)
-
-    # Mirror the canonical CSVs into strict_oos/ so both places match exactly
-    gaunt_root = os.path.join(run_dir, "gauntlet")
-    for fname in ("open_trades_summary.csv", "gauntlet_summary.csv"):
-        src = os.path.join(gaunt_root, fname)
-        dst = os.path.join(out_base, fname)
+    # 7) *** Write Strict OOS results directly to strict_oos directory ***
+    # Use the full summary functions but redirect their output to strict_oos directory
+    
+    # Create a custom function to write summaries to strict_oos instead of main gauntlet
+    def write_to_strict_oos(summary_func, ledger):
+        """Write summary to strict_oos directory by temporarily modifying the gauntlet path"""
+        import tempfile
+        import shutil
+        
+        # Create a temporary run directory structure
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_run_dir = os.path.join(temp_dir, "temp_run")
+            temp_gauntlet_dir = os.path.join(temp_run_dir, "gauntlet")
+            os.makedirs(temp_gauntlet_dir, exist_ok=True)
+            
+            # Generate the summary in the temp directory
+            result_path = summary_func(temp_run_dir, ledger)
+            
+            # Copy the result to the strict_oos directory
+            if os.path.exists(result_path):
+                filename = os.path.basename(result_path)
+                dest_path = os.path.join(out_base, filename)
+                shutil.copy2(result_path, dest_path)
+                print(f"Strict OOS {filename} generated at: {dest_path}")
+                return dest_path
+            else:
+                print(f"Warning: {summary_func.__name__} did not generate expected file")
+                return None
+    
+    # Generate full summaries for strict_oos directory
+    if ledger_for_outputs is not None and not ledger_for_outputs.empty:
         try:
-            if os.path.isfile(src):
-                shutil.copyfile(src, dst)
+            # Write full open trades summary to strict_oos
+            write_to_strict_oos(write_open_trades_summary, ledger_for_outputs)
+            
+            # Write full all setups summary to strict_oos  
+            write_to_strict_oos(write_all_setups_summary, ledger_for_outputs)
+            
+            # Write full gauntlet summary to strict_oos (this was missing!)
+            # Note: write_gauntlet_summary needs survivors list, so we'll create a minimal one
+            if survivors_df is not None and not survivors_df.empty:
+                # Create a minimal survivors list for the gauntlet summary
+                survivors_list = []
+                for _, row in survivors_df.iterrows():
+                    survivors_list.append({
+                        'setup_id': row.get('setup_id', 'unknown'),
+                        'rank': row.get('rank', 0),
+                        'fold': row.get('fold', 0)
+                    })
+                
+                # Write gauntlet summary using the survivors
+                def write_gauntlet_to_strict_oos(temp_run_dir, ledger):
+                    return write_gauntlet_summary(temp_run_dir, survivors_list, ledger)
+                
+                write_to_strict_oos(write_gauntlet_to_strict_oos, ledger_for_outputs)
+            
         except Exception as e:
-            print(f"[Strict-OOS] Mirror failed for {fname}: {e}")
+            print(f"Error generating strict OOS summaries: {e}")
+            # Create minimal fallback files
+            empty_df = pd.DataFrame(columns=[
+                "setup_id", "specialized_ticker", "direction", "description", "signal_ids",
+                "oos_first_trigger", "oos_last_trigger", "oos_days_since_last_trigger",
+                "oos_total_trades", "oos_open_trades", "oos_sum_pnl_dollars", 
+                "oos_final_nav", "oos_nav_total_return_pct", "expectancy"
+            ])
+            from .summary import _write_csv
+            _write_csv(os.path.join(out_base, "open_trades_summary.csv"), empty_df)
+    else:
+        print("No ledger data for strict OOS summaries")
+
+    # Note: We now write directly to strict_oos directory above, no mirroring needed
 
     return {
         'outdir': out_base,

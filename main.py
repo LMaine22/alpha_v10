@@ -251,8 +251,18 @@ def save_combined_oos_results(output_dir: str) -> None:
     all_oos_summaries = []
     all_oos_ledgers = []
     
-    # Find all OOS directories
-    oos_dirs = [d for d in os.listdir(output_dir) if d.endswith('_oos') and os.path.isdir(os.path.join(output_dir, d))]
+    # Find all OOS directories - check both old structure and new oos_folds/ structure
+    oos_folds_dir = os.path.join(output_dir, 'oos_folds')
+    
+    if os.path.exists(oos_folds_dir):
+        # New structure: look in oos_folds/ subdirectory
+        oos_dirs = [d for d in os.listdir(oos_folds_dir) if d.endswith('_oos') and os.path.isdir(os.path.join(oos_folds_dir, d))]
+        base_oos_path = oos_folds_dir
+    else:
+        # Old structure: look in main output directory
+        oos_dirs = [d for d in os.listdir(output_dir) if d.endswith('_oos') and os.path.isdir(os.path.join(output_dir, d))]
+        base_oos_path = output_dir
+    
     oos_dirs.sort()  # Ensure consistent ordering
     
     if not oos_dirs:
@@ -262,7 +272,7 @@ def save_combined_oos_results(output_dir: str) -> None:
     print(f"Aggregating OOS results from {len(oos_dirs)} folds...")
     
     for oos_dir in oos_dirs:
-        oos_path = os.path.join(output_dir, oos_dir)
+        oos_path = os.path.join(base_oos_path, oos_dir)
         
         # Load OOS summary
         summary_file = os.path.join(oos_path, 'oos_pareto_front_summary.csv')

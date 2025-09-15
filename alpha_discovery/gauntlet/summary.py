@@ -94,7 +94,11 @@ def write_gauntlet_summary(
     )
 
     # Open/closed counts
-    led["is_open"] = led["exit_date"].isna() if "exit_date" in led.columns else False
+    if "exit_date" in led.columns:
+        # Check for both NaN/NaT and empty strings
+        led["is_open"] = led["exit_date"].isna() | (led["exit_date"] == "") | (led["exit_date"].astype(str).str.strip() == "")
+    else:
+        led["is_open"] = False
     counts = (
         led.groupby(setup_col)["is_open"].agg(oos_open_trades="sum", oos_total_trades="count")
         .reset_index().rename(columns={setup_col: "setup_id"})
@@ -237,7 +241,11 @@ def write_all_setups_summary(
     )
 
     # Open/closed counts
-    led["is_open"] = led["exit_date"].isna() if "exit_date" in led.columns else False
+    if "exit_date" in led.columns:
+        # Check for both NaN/NaT and empty strings
+        led["is_open"] = led["exit_date"].isna() | (led["exit_date"] == "") | (led["exit_date"].astype(str).str.strip() == "")
+    else:
+        led["is_open"] = False
     counts = (
         led.groupby(setup_col)["is_open"].agg(oos_open_trades="sum", oos_total_trades="count")
         .reset_index().rename(columns={setup_col: "setup_id"})
@@ -370,7 +378,11 @@ def write_open_trades_summary(
         setup_col = "_tmp_setup_id"
 
     # Identify setups with open trades
-    led["is_open"] = led["exit_date"].isna() if "exit_date" in led.columns else False
+    if "exit_date" in led.columns:
+        # Check for both NaN/NaT and empty strings
+        led["is_open"] = led["exit_date"].isna() | (led["exit_date"] == "") | (led["exit_date"].astype(str).str.strip() == "")
+    else:
+        led["is_open"] = False
     setups_with_open_trades = led[led["is_open"]][setup_col].unique()
     
     if len(setups_with_open_trades) == 0:

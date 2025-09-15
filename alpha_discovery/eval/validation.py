@@ -23,7 +23,7 @@ def create_walk_forward_splits(
         data_index: pd.DatetimeIndex,
         train_years: Number = 3,
         test_years: Number = 1,
-        step_months: int = 9
+        step_months: int = 12
 ) -> List[Tuple[pd.DatetimeIndex, pd.DatetimeIndex]]:
     """
     Creates a list of training and testing splits for walk-forward validation.
