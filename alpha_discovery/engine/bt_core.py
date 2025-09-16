@@ -226,16 +226,23 @@ def run_setup_backtest_options(
                 if exit_result is None:
                     # No exit condition met - check if position should remain open
                     days_since_trigger = (analysis_end_date - trigger_date).days
+                    last_data_date = master_df.index.max() if hasattr(master_df.index, 'max') else pd.Timestamp.now()
                     
+                    # If we've reached the end of available data, close the trade
+                    if analysis_end_date >= last_data_date:
+                        chosen_exit_date = analysis_end_date
+                        exit_reason = "data_end"
+                        holding_days_actual = days_since_trigger
+                        exit_exec = float(price_path.iloc[-1]) * (1.0 - slip) if len(price_path) > 0 else entry_exec
                     # If max_open_days is specified and exceeded, force close the position
-                    if max_open_days is not None and days_since_trigger > max_open_days:
+                    elif max_open_days is not None and days_since_trigger > max_open_days:
                         chosen_exit_date = analysis_end_date
                         exit_reason = "max_open_days_exceeded"
                         holding_days_actual = days_since_trigger
                         exit_exec = float(price_path.iloc[-1]) * (1.0 - slip) if len(price_path) > 0 else entry_exec
                     else:
-                        # Position remains open
-                        chosen_exit_date = pd.NaT  # This is the key fix for open positions!
+                        # Position remains open (only if we're within data range and within max_open_days)
+                        chosen_exit_date = pd.NaT
                         exit_reason = "OPEN"
                         holding_days_actual = days_since_trigger
 
