@@ -74,7 +74,15 @@ def _mark_open_positions_at_eod(
         if dc in led.columns:
             led[dc] = pd.to_datetime(led[dc], errors="coerce")
 
-    is_open_eod = led["exit_date"].isna() | (led["exit_date"] > oos_end)
+    # Only consider trades as "open" if they were triggered recently (within last 30 days)
+    # and either have no exit_date or exit_date is after oos_end
+    recent_cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
+    is_recent = led["trigger_date"] >= recent_cutoff
+    is_never_closed = led["exit_date"].isna()
+    is_exit_after_oos = led["exit_date"] > oos_end
+    
+    is_open_eod = is_recent & (is_never_closed | is_exit_after_oos)
+    
     if is_open_eod.any():
         led.loc[is_open_eod, "status"] = "OPEN"
         led.loc[is_open_eod, "exit_date"] = pd.NaT
@@ -223,6 +231,7 @@ def run_gauntlet_backtest(
         direction=direction,
         exit_policy=exit_policy,
         tickers_to_run=[specialized_ticker],
+        max_open_days=30  # Prevent old trades from being marked as open
     )
 
     if ledger is None or len(ledger) == 0:

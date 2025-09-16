@@ -188,15 +188,19 @@ def _write_open_positions(gaunt_dir: str, full_ledger: pd.DataFrame, stage_resul
             ledger = pd.DataFrame()  # Empty if we can't filter
 
     # CRITICAL FIX: Properly identify open trades (exit_date is NaT)
-    if "exit_date" in ledger.columns:
-        is_open = ledger["exit_date"].isna()  # This catches pd.NaT values
-    else:
+    # Only consider trades as "open" if they were triggered recently (within last 30 days)
+    # and have no exit_date (never closed)
+    recent_cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
+    
+    if "exit_date" in ledger.columns and "trigger_date" in ledger.columns:
+        is_recent = ledger["trigger_date"] >= recent_cutoff
+        is_never_closed = ledger["exit_date"].isna()
+        is_open = is_recent & is_never_closed
+    elif "trigger_date" in ledger.columns:
         # Fallback: if no exit_date column, check if trade was triggered recently
-        if "trigger_date" in ledger.columns:
-            recent_cutoff = pd.Timestamp.now() - pd.Timedelta(days=30)
-            is_open = ledger["trigger_date"] >= recent_cutoff
-        else:
-            is_open = pd.Series([False] * len(ledger), index=ledger.index)
+        is_open = ledger["trigger_date"] >= recent_cutoff
+    else:
+        is_open = pd.Series([False] * len(ledger), index=ledger.index)
 
     open_trades = ledger[is_open].copy()
 

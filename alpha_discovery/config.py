@@ -9,11 +9,11 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 500
-    generations: int = 15
+    population_size: int = 200
+    generations: int = 10
     elitism_rate: float = 0.1
     mutation_rate: float = 0.2
-    seed: int = 131
+    seed: int = 132
     setup_lengths_to_explore: List[int] = [1,2]
 
     # Verbosity & debugging used by NSGA layer (added)
@@ -134,7 +134,7 @@ class OptionsConfig(BaseModel):
     capital_per_trade: float = 10000.0
     contract_multiplier: int = 100
     risk_free_rate_mode: Literal["constant", "macro"] = "constant"
-    constant_r: float = 0.04  # <-- was 0.0; set a realistic annual RF so Sortino's MAR > 0
+    constant_r: float = 0.0  # <-- was 0.0; set a realistic annual RF so Sortino's MAR > 0
     allow_nonoptionable: bool = False
 
     # Tenor selection (business days to expiry)

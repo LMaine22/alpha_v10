@@ -13,7 +13,7 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [7]  # Optimized for regime-aware exits
+TRADE_HORIZONS_DAYS = [6]  # Optimized for regime-aware exits
 
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:

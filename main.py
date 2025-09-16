@@ -74,6 +74,7 @@ def run_oos_backtesting(
         direction = _infer_direction_from_metadata(setup_signals, signals_metadata)
         
         # Run OOS backtest using the same backtesting engine
+        # Use max_open_days=30 to prevent old trades from being marked as open
         oos_ledger = backtester.run_setup_backtest_options(
             setup_signals=setup_signals,
             signals_df=test_signals_df,
@@ -81,6 +82,7 @@ def run_oos_backtesting(
             direction=direction,
             exit_policy=solution.get('exit_policy'),
             tickers_to_run=[ticker],
+            max_open_days=30
         )
         
         if oos_ledger is None or oos_ledger.empty:
@@ -496,8 +498,8 @@ def run_pipeline(args=None):
     if settings.ga.run_diagnostic_replay:
         print("\n--- Launching Diagnostic Replay + Portfolio Analysis ---")
         try:
-            from alpha_discovery.gauntlet.diagnostic_replay import build_diagnostic_replay, summarize_diagnostic_replay
-            from alpha_discovery.gauntlet.portfolio_diag import simulate_portfolio
+            from alpha_discovery.gauntlet.diagnostic_replay import build_diagnostic_replay, summarize_diagnostic_replay  # pyright: ignore[reportMissingImports]
+            from alpha_discovery.gauntlet.portfolio_diag import simulate_portfolio  # pyright: ignore[reportMissingImports]
             from alpha_discovery.gauntlet.run import _ensure_dir
             
             # Build diagnostic replay (survivors-only by default)

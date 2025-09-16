@@ -56,6 +56,7 @@ def run_setup_backtest_options(
         direction: str,  # "long" or "short"
         exit_policy: dict | None = None,
         tickers_to_run: Optional[List[str]] = None,  # allow narrowing to a subset
+        max_open_days: Optional[int] = None,  # maximum days a trade can be open
 ) -> pd.DataFrame:
     """
     SIMPLIFIED OPTIONS BACKTESTING: Only regime-aware exits supported.
@@ -223,13 +224,23 @@ def run_setup_backtest_options(
 
                 # Handle the exit result
                 if exit_result is None:
-                    # No exit condition met - position remains open
-                    chosen_exit_date = pd.NaT  # This is the key fix for open positions!
-                    exit_reason = "OPEN"
-                    holding_days_actual = (analysis_end_date - trigger_date).days
+                    # No exit condition met - check if position should remain open
+                    days_since_trigger = (analysis_end_date - trigger_date).days
+                    
+                    # If max_open_days is specified and exceeded, force close the position
+                    if max_open_days is not None and days_since_trigger > max_open_days:
+                        chosen_exit_date = analysis_end_date
+                        exit_reason = "max_open_days_exceeded"
+                        holding_days_actual = days_since_trigger
+                        exit_exec = float(price_path.iloc[-1]) * (1.0 - slip) if len(price_path) > 0 else entry_exec
+                    else:
+                        # Position remains open
+                        chosen_exit_date = pd.NaT  # This is the key fix for open positions!
+                        exit_reason = "OPEN"
+                        holding_days_actual = days_since_trigger
 
-                    # For open positions, use current market price for unrealized P&L calculation
-                    exit_exec = float(price_path.iloc[-1]) * (1.0 - slip) if len(price_path) > 0 else entry_exec
+                        # For open positions, use current market price for unrealized P&L calculation
+                        exit_exec = float(price_path.iloc[-1]) * (1.0 - slip) if len(price_path) > 0 else entry_exec
 
                 else:
                     # Exit condition was triggered

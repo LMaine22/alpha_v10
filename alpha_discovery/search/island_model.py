@@ -526,8 +526,10 @@ class IslandManager:
                 sortino = metrics_dict.get('sortino_lb', -99.0)
                 expectancy = metrics_dict.get('expectancy', -9999.0)
                 
+                # For Sortino: find the least negative (closest to zero) value
                 if sortino > best_sortino:
                     best_sortino = sortino
+                # For expectancy: find the highest value
                 if expectancy > best_expectancy:
                     best_expectancy = expectancy
         
