@@ -9,12 +9,12 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 200
-    generations: int = 10
+    population_size: int = 500
+    generations: int = 12
     elitism_rate: float = 0.1
-    mutation_rate: float = 0.2
-    seed: int = 132
-    setup_lengths_to_explore: List[int] = [1,2]
+    mutation_rate: float = 0.6
+    seed: int = 136
+    setup_lengths_to_explore: List[int] = [2]
 
     # Verbosity & debugging used by NSGA layer (added)
     verbose: int = 2  # 0..3 (2 = extra progress summaries)
@@ -41,16 +41,18 @@ class DataConfig(BaseModel):
     excel_file_path: str = 'data_store/raw/bb_data.xlsx'
     parquet_file_path: str = 'data_store/processed/bb_data.parquet'
     start_date: date = date(2018, 1, 1)
-    end_date: date = date(2025, 9, 15)
+    end_date: date = date(2025, 9, 16)
     holdout_start_date: date = date(2023, 8, 27)
 
     # Finalized ticker lists
     tradable_tickers: List[str] = [
-        'MSTR US Equity', 'SNOW US Equity', 'LLY US Equity', 'COIN US Equity',
-        'QCOM US Equity', 'ULTA US Equity', 'CRM US Equity', 'AAPL US Equity',
-        'AMZN US Equity', 'MSFT US Equity', 'QQQ US Equity', 'SPY US Equity',
-        'TSM US Equity', 'META US Equity', 'TSLA US Equity', 'CRWV US Equity','VIX Index',
-        #'GOOGL US Equity', 'AMD US Equity',  'ARM US Equity',
+        'MSTR US Equity',
+
+        #'MSTR US Equity', 'SNOW US Equity', 'LLY US Equity', 'COIN US Equity',
+        #'QCOM US Equity', 'ULTA US Equity', 'CRM US Equity', 'AAPL US Equity',
+        #'AMZN US Equity', 'MSFT US Equity', 'QQQ US Equity', 'SPY US Equity',
+        #'TSM US Equity', 'META US Equity', 'TSLA US Equity', 'CRWV US Equity',
+        #'VIX Index', 'GOOGL US Equity', 'AMD US Equity',  'ARM US Equity',
         #'PLTR US Equity', 'VIX Index', 'JPM US Equity', 'C US Equity',
         #'BMY US Equity','NKE US Equity',
     ]
@@ -59,6 +61,15 @@ class DataConfig(BaseModel):
         'DXY Curncy', 'JPY Curncy', 'EUR Curncy', 'EEM US Equity',
         'CL1 Comdty', 'HG1 Comdty', 'XAU Curncy', 'XLE US Equity', 'XLK US Equity',
         #'XLRE US Equity', 'XLC US Equity', 'XLV US Equity', 'XLP US Equity',
+
+
+        'SNOW US Equity', 'LLY US Equity', 'COIN US Equity',
+        'QCOM US Equity', 'ULTA US Equity', 'CRM US Equity', 'AAPL US Equity',
+        'AMZN US Equity', 'MSFT US Equity', 'QQQ US Equity', 'SPY US Equity',
+        'TSM US Equity', 'META US Equity', 'TSLA US Equity', 'CRWV US Equity',
+        'VIX Index', 'GOOGL US Equity', 'AMD US Equity', 'ARM US Equity',
+        'PLTR US Equity', 'VIX Index', 'JPM US Equity', 'C US Equity',
+        'BMY US Equity', 'NKE US Equity',
 
     ]
 
@@ -97,8 +108,8 @@ class GaDiversityConfig(BaseModel):
 class IslandConfig(BaseModel):
     """Island Model Parameters for Genetic Algorithm"""
     enabled: bool = True
-    n_islands: int = 12
-    migration_interval: int = 6  # generations between migrations
+    n_islands: int = 4
+    migration_interval: int = 5  # generations between migrations
     migration_size: float = 0.2  # % of island population migrated
     replace_strategy: str = "worst"  # "worst" | "random"
     sync_final: bool = True  # merge all islands at end

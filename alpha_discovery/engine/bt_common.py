@@ -13,7 +13,7 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [6]  # Optimized for regime-aware exits
+TRADE_HORIZONS_DAYS = [4]  # Optimized for regime-aware exits
 
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
@@ -175,7 +175,7 @@ def _check_regime_aware_exit_options(
         # === REGIME-AWARE EXIT CONDITIONS ===
 
         # 1. Profit Target Hit - Leg A (conservative profit taking at 100%)
-        if profit_pct >= 1.5:  # 100% profit target
+        if profit_pct >= 3.0:  # 100% profit target
             return i, "pt_hit_legA"
 
         # 2. Volatility Spike Profit (quick exit on volatility expansion)
@@ -200,7 +200,7 @@ def _check_regime_aware_exit_options(
                 return i, "time_decay_protection"
 
         # 4. Stop Loss (risk management - prevents catastrophic losses)
-        if profit_pct <= -0.6:  # 50% stop loss
+        if profit_pct <= -0.8:  # 50% stop loss
             return i, "stop_loss"
 
         # 5. ATR-based Trailing Stop (let winners run while protecting gains)

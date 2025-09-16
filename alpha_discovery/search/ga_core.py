@@ -129,7 +129,7 @@ def _evaluate_one_setup(
         direction=direction,
         exit_policy=exit_policy,
         tickers_to_run=[ticker],  # IMPORTANT: restrict to that ticker
-        max_open_days=30  # Prevent old trades from being marked as open
+        # No max_open_days for GA training - trades should be open based on horizon only
     )
 
     if ledger is None or ledger.empty:

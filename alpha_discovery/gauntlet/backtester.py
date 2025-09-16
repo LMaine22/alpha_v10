@@ -230,8 +230,9 @@ def run_gauntlet_backtest(
         master_df=oos_master_df,
         direction=direction,
         exit_policy=exit_policy,
-        tickers_to_run=[specialized_ticker],
-        max_open_days=30  # Prevent old trades from being marked as open
+        tickers_to_run=[specialized_ticker]
+        # No max_open_days here - trades should be open based on horizon only
+        # Filtering for "currently open" happens in reporting, not backtesting
     )
 
     if ledger is None or len(ledger) == 0:

@@ -74,15 +74,14 @@ def run_oos_backtesting(
         direction = _infer_direction_from_metadata(setup_signals, signals_metadata)
         
         # Run OOS backtest using the same backtesting engine
-        # Use max_open_days=30 to prevent old trades from being marked as open
+        # No max_open_days for OOS - trades should be open based on horizon only
         oos_ledger = backtester.run_setup_backtest_options(
             setup_signals=setup_signals,
             signals_df=test_signals_df,
             master_df=test_master_df,
             direction=direction,
             exit_policy=solution.get('exit_policy'),
-            tickers_to_run=[ticker],
-            max_open_days=30
+            tickers_to_run=[ticker]
         )
         
         if oos_ledger is None or oos_ledger.empty:
