@@ -82,7 +82,9 @@ def _mark_open_positions_at_eod(
         led.loc[is_open_eod, "exit_price"] = np.nan
 
         if last_mark is not None:
-            entry_price = pd.to_numeric(led.loc[is_open_eod, "entry_price"], errors="coerce")
+            # Use entry_option_price if available, otherwise fall back to entry_price
+            entry_price_col = "entry_option_price" if "entry_option_price" in led.columns else "entry_price"
+            entry_price = pd.to_numeric(led.loc[is_open_eod, entry_price_col], errors="coerce")
             contracts = pd.to_numeric(led.loc[is_open_eod, "contracts"], errors="coerce").fillna(0.0)
             direction = led.loc[is_open_eod, "direction"].astype(str).str.upper()
             sign = np.where(direction.str.contains("SHORT"), -1.0, 1.0)

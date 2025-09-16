@@ -240,15 +240,12 @@ EV_INTERACT: Dict[str, Callable[[pd.DataFrame, pd.DataFrame, str], pd.Series]] =
 }
 
 
-# ----------------------
-# Builder
-# ----------------------
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     """
     Input: wide panel with columns like '<TICKER>_<FIELD>' indexed by daily dates.
     Output: feature matrix X (all features shifted by 1 day; EV_* already leak-safe upstream).
     """
-    tradables: List[str] = list(getattr(settings.data, "tradable_tickers", TICKS_ALL))
+    tradables: List[str] = list(dict.fromkeys(getattr(settings.data, "tradable_tickers", TICKS_ALL)))
     bench = getattr(settings.data, "benchmark_ticker", SPY if SPY in TICKS_ALL else SPX)
     macro_ticks: List[str] = list(getattr(settings.data, "macro_tickers", []))
     all_ticks = list(dict.fromkeys(tradables + macro_ticks + [bench]))
@@ -334,8 +331,21 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
             return
         sub = X.loc[:, cols]
         R = sub.rank(axis=1, pct=True)
-        new_cols = {f"{t}_{outname}": R[f"{t}_{stub}"].astype(float) for t in tradables if f"{t}_{stub}" in R.columns}
+        
+        # FIX: Ensure we extract proper 1D Series from ranked DataFrame
+        new_cols = {}
+        for t in tradables:
+            col_name = f"{t}_{stub}"
+            if col_name in R.columns:
+                # Extract Series properly - R[col_name] should already be 1D
+                series_data = R[col_name]
+                # Ensure it's a proper Series (should already be from DataFrame column selection)
+                if not isinstance(series_data, pd.Series):
+                    series_data = pd.Series(series_data, index=R.index)
+                new_cols[f"{t}_{outname}"] = series_data.astype(float)
+        
         if new_cols:
+            # Create DataFrame from properly formatted 1D Series
             new_df = pd.DataFrame(new_cols, index=X.index)
             X = pd.concat([X, new_df], axis=1)
 
@@ -356,7 +366,13 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
             for m in members:
                 c = f"{m}_{stub}"
                 if c in R.columns:
-                    all_new_cols[f"{m}_{outname}"] = R[c].astype(float)
+                    # Extract Series properly - R[c] should already be 1D
+                    series_data = R[c]
+                    # Ensure it's a proper Series (should already be from DataFrame column selection)
+                    if not isinstance(series_data, pd.Series):
+                        series_data = pd.Series(series_data, index=R.index)
+                    all_new_cols[f"{m}_{outname}"] = series_data.astype(float)
+        
         if all_new_cols:
             new_df = pd.DataFrame(all_new_cols, index=X.index)
             X = pd.concat([X, new_df], axis=1)

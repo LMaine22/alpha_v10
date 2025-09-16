@@ -13,7 +13,7 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [12]  # Optimized for regime-aware exits
+TRADE_HORIZONS_DAYS = [7]  # Optimized for regime-aware exits
 
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
@@ -52,193 +52,99 @@ def _ensure_df_token(df: pd.DataFrame) -> str:
         df.attrs["_cache_token"] = tok
     return tok
 
-# ---------------- Exit policy ----------------
+
+# ---------------- Simplified Exit Policy (Regime-Aware Only) ----------------
 
 
 @dataclass(frozen=True)
 class ExitPolicy:
+    """
+    Simplified exit policy that only supports regime-aware exits.
+    All traditional exit policies (PT, TS, SL, time caps) are removed.
+    """
     enabled: bool = True
-    pt_multiple: float | None = None
-    trail_frac: float | None = None
-    sl_multiple: float | None = None
-    time_cap_days: int | None = None  # if None, defaults to horizon
-
-    # NEW behavior knobs (read from settings or GA policy dict)
-    pt_behavior: str = "exit"         # 'exit' | 'arm_trail' | 'scale_out' | 'regime_aware'
-    armed_trail_frac: float | None = None
-    scale_out_frac: float = 0.50
-    # regime-aware settings
-    regime_aware: bool = False
+    regime_aware: bool = True  # Always true for this system
 
     def is_noop(self) -> bool:
-        return (self.pt_multiple is None and
-                self.trail_frac is None and
-                self.sl_multiple is None and
-                self.time_cap_days is None)
-
-
-def _first_true_index(mask: np.ndarray) -> Optional[int]:
-    idxs = np.nonzero(mask)[0]
-    return int(idxs[0]) if idxs.size > 0 else None
+        """Returns true if exit policies are disabled."""
+        return not self.enabled
 
 
 def _policy_id(policy: ExitPolicy, horizon_days: int) -> str:
-    active = {
-        "pt": policy.pt_multiple,
-        "ts": policy.trail_frac,
-        "sl": policy.sl_multiple,
-        "tc": policy.time_cap_days,
-        "hz": horizon_days,
-        # NEW:
-        "pb": policy.pt_behavior,
-        "at": policy.armed_trail_frac,
-        "sf": policy.scale_out_frac,
-    }
-    s = "|".join(f"{k}={v}" for k, v in active.items() if v is not None)
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10] if s else ""
-
-
-def _decide_exit_with_scale_out(price_path: pd.Series,
-                                entry_exec_price: float,
-                                horizon_days: int,
-                                policy: ExitPolicy) -> tuple[bool, dict]:
-    # DISABLED - Only regime-aware exits should be used for extreme runners
-    return False, {"exit_idx": len(price_path) - 1, "exit_reason": "horizon", "holding_days": len(price_path) - 1}
-    """
-    Returns (did_scale, info dict).
-    If PT isn't hit or behavior is incompatible, returns (False, {}).
-
-    When scale-out triggers:
-      info = {
-        "pt_idx": int,                 # day index of PT hit (0-based)
-        "pt_reason": "profit_target_partial",
-        "final_idx": int,              # day index of final exit
-        "final_reason": str,           # e.g., 'trailing_stop' | 'stop_loss' | 'horizon' | 'time_stop'
-      }
-    """
-    n = len(price_path)
-    if n == 0:
-        return False, {}
-
-    # Respect time cap just like the regular path
-    time_cap = min(horizon_days, policy.time_cap_days if policy.time_cap_days is not None else horizon_days)
-    time_cap = max(0, time_cap)
-    last_idx = min(time_cap, n - 1)
-
-    # Need a real PT and the 'scale_out' behavior
-    if (not policy.enabled) or policy.pt_multiple is None or policy.pt_multiple <= 0:
-        return False, {}
-    if str(policy.pt_behavior).lower() != "scale_out":
-        return False, {}
-
-    p = price_path.iloc[: last_idx + 1].astype(float).values
-    pt_thresh = float(entry_exec_price) * float(policy.pt_multiple)
-    pt_mask = p >= pt_thresh
-    pt_idxs = np.nonzero(pt_mask)[0]
-    if pt_idxs.size == 0:
-        return False, {}  # PT never hit
-
-    pt_idx = int(pt_idxs[0])
-
-    # After PT, tighten trailing (if configured), keep SL, same time cap remainder
-    armed_frac = policy.armed_trail_frac if (policy.armed_trail_frac is not None) else policy.trail_frac
-    p2 = p[pt_idx: last_idx + 1]  # includes PT day
-    peak2 = np.maximum.accumulate(p2)
-
-    ts2_mask = np.zeros_like(p2, dtype=bool)
-    if armed_frac is not None and 0 < float(armed_frac) < 1:
-        ts2_thresh = peak2 * float(armed_frac)
-        ts2_mask = p2 <= ts2_thresh
-
-    sl2_mask = np.zeros_like(p2, dtype=bool)
-    if policy.sl_multiple is not None and policy.sl_multiple > 0:
-        sl_thresh = float(entry_exec_price) * float(policy.sl_multiple)
-        sl2_mask = p2 <= sl_thresh
-
-    # earliest of (trailing, stop) after PT; otherwise time/horizon
-    day_ts2 = _first_true_index(ts2_mask)
-    day_sl2 = _first_true_index(sl2_mask)
-
-    candidates = []
-    if day_ts2 is not None: candidates.append((day_ts2, "trailing_stop"))
-    if day_sl2 is not None: candidates.append((day_sl2, "stop_loss"))
-
-    if candidates:
-        earliest_rel, reason = min(candidates, key=lambda t: t[0])
-        final_idx = pt_idx + int(earliest_rel)
-        return True, {"pt_idx": pt_idx, "pt_reason": "profit_target_partial",
-                      "final_idx": final_idx, "final_reason": reason}
-
-    # No TS/SL after PT -> end at time cap / horizon
-    final_idx = last_idx
-    final_reason = "horizon" if time_cap == horizon_days else "time_stop"
-    return True, {"pt_idx": pt_idx, "pt_reason": "profit_target_partial",
-                  "final_idx": final_idx, "final_reason": final_reason}
+    """Generate a simple policy ID for regime-aware exits."""
+    if not policy.enabled:
+        return "disabled"
+    return f"regime_aware_h{horizon_days}"
 
 
 def _decide_exit_from_path(price_path: pd.Series,
                            entry_exec_price: float,
                            horizon_days: int,
                            policy: ExitPolicy,
-                           direction: str = "long") -> Tuple[int, str, int]:
+                           direction: str = "long",
+                           entry_date: pd.Timestamp = None,
+                           tenor_bd: int = None) -> Optional[Tuple[int, str, int]]:
     """
-    Single-leg exit decision on an option price path with:
-      - Profit Target (PT)
-      - Trailing Stop (TS)
-      - Stop-Loss (SL)
-      - Time cap / Horizon fallback
-      - Regime-aware exits (if enabled)
+    SIMPLIFIED: Only regime-aware exits are supported.
 
     Returns:
-        exit_idx (int): 0-based index into price_path where we exit
-        exit_reason (str): 'profit_target' | 'trailing_stop' | 'stop_loss' | 'time_stop' | 'horizon' | regime-aware reasons
-        holding_days_actual (int): equals exit_idx (0...len(path)-1)
+        None: if no exit condition is met (position remains open)
+        (exit_idx, exit_reason, holding_days_actual): if an exit condition is triggered
     """
     n = len(price_path)
     if n == 0:
-        return 0, "horizon", 0
+        return None
 
-    # Respect time cap (defaults to horizon if None)
-    time_cap = min(int(horizon_days),
-                   int(policy.time_cap_days) if policy.time_cap_days is not None else int(horizon_days))
-    time_cap = max(0, time_cap)
-    last_idx = min(time_cap, n - 1)
+    # If exit policies are disabled, let it run to natural expiration
+    if not policy.enabled or not policy.regime_aware:
+        # Check if we've reached actual option expiration
+        if entry_date and tenor_bd:
+            option_expiration = _add_bdays(entry_date, tenor_bd)
+            current_date = price_path.index[-1]  # Last date in our data
+            if current_date >= option_expiration:
+                return len(price_path) - 1, "option_expired", len(price_path) - 1
+        return None  # Position remains open
 
-    # Slice path up to cap
-    p = price_path.iloc[: last_idx + 1].astype(float).values
+    # Run regime-aware exit logic
+    regime_exit_idx, regime_reason = _check_regime_aware_exit_options(
+        price_path, entry_exec_price, horizon_days, policy, direction,
+        entry_date, tenor_bd
+    )
 
-    # Regime-aware exits (if enabled) - check FIRST
-    if policy.regime_aware or policy.pt_behavior == "regime_aware":
-        regime_exit_idx, regime_reason = _check_regime_aware_exit_options(
-            price_path, entry_exec_price, horizon_days, policy, direction
-        )
-        if regime_exit_idx is not None:
-            return int(regime_exit_idx), regime_reason, int(regime_exit_idx)
-        # If regime-aware exits are enabled but none triggered, fall through to traditional logic
+    if regime_exit_idx is not None:
+        return int(regime_exit_idx), regime_reason, int(regime_exit_idx)
 
-    # TRADITIONAL EXIT POLICIES DISABLED - ONLY REGIME-AWARE EXITS FOR BIG RUNNERS
-    # All traditional profit targets, trailing stops, and stop losses are bypassed
-    # to allow regime-aware system to catch 300-1000%+ runners
+    # Check if option has actually expired
+    if entry_date and tenor_bd:
+        option_expiration = _add_bdays(entry_date, tenor_bd)
+        current_date = price_path.index[-1]
+        if current_date >= option_expiration:
+            return len(price_path) - 1, "option_expired", len(price_path) - 1
 
-    # No tripwire -> time/horizon
-    final_idx = last_idx
-    final_reason = "horizon" if time_cap == int(horizon_days) else "time_stop"
-    return int(final_idx), final_reason, int(final_idx)
+    # No exit condition met and option hasn't expired - position remains open
+    return None
 
 
 def _check_regime_aware_exit_options(
-    price_path: pd.Series,
-    entry_exec_price: float,
-    horizon_days: int,
-    policy: ExitPolicy,
-    direction: str = "long"
+        price_path: pd.Series,
+        entry_exec_price: float,
+        horizon_days: int,
+        policy: ExitPolicy,
+        direction: str = "long",
+        entry_date: pd.Timestamp = None,
+        tenor_bd: int = None
 ) -> Tuple[Optional[int], str]:
     """
-    Check for regime-aware exit conditions on option prices.
-    
-    This function implements regime-aware exit logic specifically for options trading,
-    considering volatility regimes, time decay, and market conditions.
-    
+    Enhanced regime-aware exit conditions for options trading.
+
+    This implements the six core regime-aware exit conditions:
+    1. Profit Target Hit - Leg A (conservative profit taking)
+    2. Volatility Spike Profit (capitalize on vol expansion)
+    3. Time Decay Protection (protect against theta burn)
+    4. Stop Loss (risk management)
+    5. ATR-based Trailing Stop (let winners run while protecting gains)
+    6. Option Expiration (natural expiration of the contract)
+
     Returns:
         exit_idx (Optional[int]): Index where to exit, or None if no exit
         exit_reason (str): Reason for exit
@@ -246,69 +152,78 @@ def _check_regime_aware_exit_options(
     p = np.asarray(price_path, dtype=float)
     n = len(p)
     if n == 0:
-        return None, "horizon"
-    
+        return None, "no_data"
+
     entry = float(entry_exec_price)
-    
+
     # Get regime-aware config
     from alpha_discovery.config import settings
     regime_config = settings.regime_aware
-    
+
+    # Calculate option expiration date if we have the information
+    option_expiration = None
+    if entry_date and tenor_bd:
+        option_expiration = _add_bdays(entry_date, tenor_bd)
+
     # Process each day in the price path
     for i in range(n):
         current_date = price_path.index[i]
         option_price = p[i]
         days_held = i
         profit_pct = (option_price - entry) / entry if entry > 0 else 0
-        
+
         # === REGIME-AWARE EXIT CONDITIONS ===
-        
-        # 1. Profit Target Hit - Leg A (conservative profit taking)
-        if profit_pct >= 1.0:  # 100% profit target
+
+        # 1. Profit Target Hit - Leg A (conservative profit taking at 100%)
+        if profit_pct >= 1.5:  # 100% profit target
             return i, "pt_hit_legA"
-        
+
         # 2. Volatility Spike Profit (quick exit on volatility expansion)
-        if i >= 2:  # Need at least 3 days of data
-            # Calculate recent volatility
-            recent_prices = p[max(0, i-2):i+1]
+        if i >= 2:  # Need at least 3 days of data for volatility calculation
+            recent_prices = p[max(0, i - 2):i + 1]
             if len(recent_prices) >= 3:
                 price_changes = np.diff(recent_prices) / recent_prices[:-1]
                 vol_spike = np.std(price_changes) if len(price_changes) > 0 else 0
-                
-                # Exit if we have profit AND high volatility (volatility spike profit)
-                if profit_pct >= 0.5 and vol_spike > 0.1:  # 50% profit + 10% daily volatility
+
+                # Exit if we have decent profit AND high volatility
+                if profit_pct >= 0.8 and vol_spike > 0.15:  # 50% profit + 10% daily volatility
                     return i, "volatility_spike_profit"
-        
-        # 3. Time Decay Protection (theta burn)
-        if days_held >= horizon_days * 0.8:  # Exit in final 20% of horizon
-            if profit_pct >= 0.3:  # Only if we have some profit
+
+        # 3. Time Decay Protection (theta burn protection)
+        # This protects against time decay in the final portion of the option's life
+        if option_expiration and tenor_bd:
+            days_to_expiration = (option_expiration - current_date).days
+            time_remaining_pct = days_to_expiration / tenor_bd if tenor_bd > 0 else 0
+
+            # Exit in final 20% of option life if we have some profit
+            if time_remaining_pct <= 0.1 and profit_pct >= 0.4:  # Final 20% + 30% profit
                 return i, "time_decay_protection"
-        
-        # 4. Stop Loss (risk management)
-        if profit_pct <= -0.5:  # 50% stop loss
+
+        # 4. Stop Loss (risk management - prevents catastrophic losses)
+        if profit_pct <= -0.6:  # 50% stop loss
             return i, "stop_loss"
-        
-        # 5. ATR-based Trailing Stop (regime-aware)
-        if i >= 5 and profit_pct >= 0.2:  # Need 5 days of data and 20% profit
-            # Calculate ATR over last 5 days
-            recent_prices = p[max(0, i-4):i+1]
+
+        # 5. ATR-based Trailing Stop (let winners run while protecting gains)
+        if i >= 5 and profit_pct >= 0.2:  # Need 5 days of data and 20% profit to start trailing
+            recent_prices = p[max(0, i - 4):i + 1]
             if len(recent_prices) >= 5:
+                # Calculate ATR over last 5 days
                 high_low_range = np.max(recent_prices) - np.min(recent_prices)
                 atr = high_low_range / len(recent_prices)
-                
-                # Trail at ATR distance from recent high
+
+                # Trail at 2x ATR distance from recent high
                 recent_high = np.max(recent_prices)
-                trail_level = recent_high - (atr * 2.0)  # 2x ATR trail
-                
+                trail_level = recent_high - (atr * 2.0)
+
                 if option_price <= trail_level:
                     return i, "atr_trail_hit"
-        
-        # 6. Horizon Protection (final safety net)
-        if days_held >= horizon_days:
-            return i, "horizon_protection"
-    
-    # No regime-aware exit triggered
-    return None, "horizon"
+
+        # 6. Option Expiration Check (natural expiration)
+        if option_expiration and current_date >= option_expiration:
+            return i, "option_expired"
+
+    # No regime-aware exit triggered and option hasn't expired
+    return None, "no_exit"
 
 
 # ---------------- Pricing bridge (delegates to options.pricing if present) ----------------
@@ -351,7 +266,8 @@ def _get_iv3m_eod_raw(ticker: str, date: pd.Timestamp, direction: str, df: pd.Da
     v = cast(Optional[float], _call_if_exists("get_entry_iv_3m", ticker, date, direction, df))
     if v is not None:
         return float(v)
-    v = cast(Optional[float], _call_if_exists("get_exit_iv_3m", ticker, date, direction, df, fallback_sigma=fallback_sigma))
+    v = cast(Optional[float],
+             _call_if_exists("get_exit_iv_3m", ticker, date, direction, df, fallback_sigma=fallback_sigma))
     if v is not None:
         return float(v)
     iv_col = _find_col(df, [f"{ticker}_IVOL_3M", f"{ticker}_IV_3M", f"{ticker}_IV3M", f"{ticker}_IVOL"])
@@ -397,7 +313,8 @@ def _bs_price(s: float, k: float, t: float, r: float, sigma: float, option_type:
 
 
 def _price_entry_exit_fallback(s0: float, s1: float, k: float, t0_years: float, h_days: int, r: float,
-                               option_type: str, entry_sigma: float, exit_sigma: float, q: float = 0.0) -> Dict[str, float]:
+                               option_type: str, entry_sigma: float, exit_sigma: float, q: float = 0.0) -> Dict[
+    str, float]:
     t1_years = max(1e-6, (max(0, int(round(t0_years * 252))) - h_days) / 252.0)
     entry_price = _bs_price(s0, k, t0_years, r, entry_sigma, option_type, q)
     exit_price = _bs_price(s1, k, t1_years, r, exit_sigma, option_type, q)
@@ -411,7 +328,8 @@ def _price_entry_exit_fallback(s0: float, s1: float, k: float, t0_years: float, 
 
 
 def _price_entry_exit(s0: float, s1: float, k: float, t0_years: float, h_days: int, r: float,
-                      direction: str, entry_sigma: float, exit_sigma: float, q: float = 0.0) -> Optional[Dict[str, float]]:
+                      direction: str, entry_sigma: float, exit_sigma: float, q: float = 0.0) -> Optional[
+    Dict[str, float]]:
     """Try user pricing.price_entry_exit; else Black–Scholes fallback."""
     try:
         h_days_num = int(h_days)
@@ -441,26 +359,30 @@ def _price_entry_exit(s0: float, s1: float, k: float, t0_years: float, h_days: i
     opt_type = "call" if direction == "long" else "put"
     return _price_entry_exit_fallback(s0, s1, k, t0_years, h_days_num, r, opt_type, entry_sigma, exit_sigma, q)
 
+
 # ---- NEW: Enhanced pricing with IV anchor system ----
 
 def _price_entry_exit_enhanced(
-    s0: float, s1: float, t0_days: int, h_days: int, r: float,
-    direction: str, ticker: str, entry_date: pd.Timestamp, exit_date: pd.Timestamp,
-    master_df: pd.DataFrame, q: float = 0.0, K_override: Optional[float] = None
+        s0: float, s1: float, t0_days: int, h_days: int, r: float,
+        direction: str, ticker: str, entry_date: pd.Timestamp, exit_date: pd.Timestamp,
+        master_df: pd.DataFrame, q: float = 0.0, K_override: Optional[float] = None
 ) -> Optional[Dict[str, float]]:
     """
-    Enhanced pricing using the new IV anchor system.
+    Enhanced pricing using the new IV anchor system with realistic strikes.
     Returns dict with original fields plus new tracking fields.
     """
     try:
-        # Try enhanced pricing from pricing module
+        # Use the NEW pricing function with realistic strikes
         result = cast(Optional[object], _call_if_exists(
-            "price_entry_exit_enhanced",
-            S0=s0, S1=s1, T0_days=t0_days, h_days=h_days, r=r,
-            direction=direction, ticker=ticker, entry_date=entry_date, 
-            exit_date=exit_date, df=master_df, q=q, K_override=K_override
+            "price_entry_exit_enhanced_fixed",  # ← CHANGED: Use the new function
+            S0=s0, S1=s1,
+            trade_horizon_days=h_days,  # ← CHANGED: Use correct parameter name
+            r=r, direction=direction, ticker=ticker,
+            entry_date=entry_date, exit_date=exit_date,
+            df=master_df, q=q, K_override=K_override,
+            force_atm=True  # ← ADDED: This fixes your strike issues!
         ))
-        
+
         if result is not None:
             # Extract all fields from PricedLeg dataclass
             return {
@@ -476,14 +398,16 @@ def _price_entry_exit_enhanced(
                 "sigma_anchor": float(getattr(result, "sigma_anchor", 0.0)),
                 "sigma_entry": float(getattr(result, "sigma_entry", 0.0)),
                 "sigma_exit": float(getattr(result, "sigma_exit", 0.0)),
-                "delta_target": float(getattr(result, "delta_target", 0.0)) if getattr(result, "delta_target", None) is not None else None,
-                "delta_achieved": float(getattr(result, "delta_achieved", 0.0)) if getattr(result, "delta_achieved", None) is not None else None,
+                "delta_target": float(getattr(result, "delta_target", 0.0)) if getattr(result, "delta_target",
+                                                                                       None) is not None else None,
+                "delta_achieved": float(getattr(result, "delta_achieved", 0.0)) if getattr(result, "delta_achieved",
+                                                                                           None) is not None else None,
                 "K_over_S": float(getattr(result, "K_over_S", 1.0)),
                 "fallback_to_3M": bool(getattr(result, "fallback_to_3M", False)),
             }
     except Exception as e:
         # Log error but don't fail completely
         print(f"Enhanced pricing failed for {ticker} on {entry_date}: {e}")
-    
-    # Fallback to traditional pricing
+
+    # Fallback to traditional pricing if enhanced fails
     return None

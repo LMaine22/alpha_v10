@@ -168,6 +168,11 @@ def _get_or_build_price_path(
 ) -> pd.Series:
     """Series of mid option prices per business day from trigger_date to horizon_date (cached)."""
     horizon_date = _add_bdays(trigger_date, horizon_days)
+    
+    # CRITICAL FIX: Constrain horizon_date to available data to prevent future dates
+    last_available_date = df.index.max() if hasattr(df.index, 'max') else pd.Timestamp.now()
+    horizon_date = min(horizon_date, last_available_date)
+    
     key = (
         _CURRENT_TOKEN, ticker, trigger_date, int(horizon_days), int(tenor_bd), str(direction),
         _rf(r), _rf(S0), _rf(entry_iv3m, 6), _rf(entry_sigma_T0, 6), _rf(T0_years, 8)

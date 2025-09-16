@@ -9,12 +9,12 @@ from datetime import date
 # -----------------------------
 class GaConfig(BaseModel):
     """Genetic Algorithm Search Parameters"""
-    population_size: int = 300
+    population_size: int = 500
     generations: int = 15
     elitism_rate: float = 0.1
-    mutation_rate: float = 0.3
-    seed: int = 111
-    setup_lengths_to_explore: List[int] = [2]
+    mutation_rate: float = 0.2
+    seed: int = 131
+    setup_lengths_to_explore: List[int] = [1,2]
 
     # Verbosity & debugging used by NSGA layer (added)
     verbose: int = 2  # 0..3 (2 = extra progress summaries)
@@ -25,8 +25,8 @@ class GaConfig(BaseModel):
 
     # Gauntlet Control
     run_gauntlet: bool = True  # Set to False to skip traditional gauntlet phase entirely
-    run_strict_oos_gauntlet: bool = True  # Set to False to skip Strict-OOS gauntlet phase
-    run_diagnostic_replay: bool = True  # Set to False to skip diagnostic replay with portfolio analysis
+    run_strict_oos_gauntlet: bool = False  # Set to False to skip Strict-OOS gauntlet phase
+    run_diagnostic_replay: bool = False  # Set to False to skip diagnostic replay with portfolio analysis
 
     # Fitness system (legacy)
     fitness_profile: str = "legacy"  # Use legacy metrics system
@@ -41,23 +41,25 @@ class DataConfig(BaseModel):
     excel_file_path: str = 'data_store/raw/bb_data.xlsx'
     parquet_file_path: str = 'data_store/processed/bb_data.parquet'
     start_date: date = date(2018, 1, 1)
-    end_date: date = date(2025, 9, 9)
+    end_date: date = date(2025, 9, 15)
     holdout_start_date: date = date(2023, 8, 27)
 
     # Finalized ticker lists
     tradable_tickers: List[str] = [
-        'TSLA US Equity', 'CRWV US Equity', 'AMZN US Equity', 'QQQ US Equity',
-        'GOOGL US Equity', 'MSFT US Equity', 'AAPL US Equity', 'LLY US Equity',
-        'AMD US Equity', 'MSTR US Equity', 'COIN US Equity', 'ARM US Equity',
-        # 'SPY US Equity',  'PLTR US Equity',#'XLE US Equity', 'XLK US Equity',
-        # 'CRM US Equity'
-        # 'XLRE US Equity', 'XLC US Equity', 'XLV US Equity', 'XLP US Equity',
-        # 'JPM US Equity', 'C US Equity', 'BMY US Equity', 'PEP US Equity', 'NKE US Equity',
+        'MSTR US Equity', 'SNOW US Equity', 'LLY US Equity', 'COIN US Equity',
+        'QCOM US Equity', 'ULTA US Equity', 'CRM US Equity', 'AAPL US Equity',
+        'AMZN US Equity', 'MSFT US Equity', 'QQQ US Equity', 'SPY US Equity',
+        'TSM US Equity', 'META US Equity', 'TSLA US Equity', 'CRWV US Equity','VIX Index',
+        #'GOOGL US Equity', 'AMD US Equity',  'ARM US Equity',
+        #'PLTR US Equity', 'VIX Index', 'JPM US Equity', 'C US Equity',
+        #'BMY US Equity','NKE US Equity',
     ]
     macro_tickers: List[str] = [
         'RTY Index', 'MXWO Index', 'USGG10YR Index', 'USGG2YR Index',
         'DXY Curncy', 'JPY Curncy', 'EUR Curncy', 'EEM US Equity',
-        'CL1 Comdty', 'HG1 Comdty', 'XAU Curncy'
+        'CL1 Comdty', 'HG1 Comdty', 'XAU Curncy', 'XLE US Equity', 'XLK US Equity',
+        #'XLRE US Equity', 'XLC US Equity', 'XLV US Equity', 'XLP US Equity',
+
     ]
 
 
@@ -95,9 +97,9 @@ class GaDiversityConfig(BaseModel):
 class IslandConfig(BaseModel):
     """Island Model Parameters for Genetic Algorithm"""
     enabled: bool = True
-    n_islands: int = 4
-    migration_interval: int = 5  # generations between migrations
-    migration_size: float = 0.1  # % of island population migrated
+    n_islands: int = 12
+    migration_interval: int = 6  # generations between migrations
+    migration_size: float = 0.2  # % of island population migrated
     replace_strategy: str = "worst"  # "worst" | "random"
     sync_final: bool = True  # merge all islands at end
 
@@ -246,9 +248,9 @@ class ReportingConfig(BaseModel):
 class Stage1Config(BaseModel):
     """Stage-1 recency and liveness gates (OOS only)."""
     # Fail if last trigger older than this
-    recency_max_days: int = 25
+    recency_max_days: int = 5
     # Short-window size for liveness/trade checks
-    short_window_days: int = 20
+    short_window_days: int = 5
     # Require at least this many trades in the short window
     min_trades_short: int = 1
     # Cap on max drawdown in the short window (fractional, e.g. 0.15 = 15%)
@@ -344,20 +346,39 @@ if settings.ga.islands is None:
 def gauntlet_cfg(settings: Settings) -> dict:
     """Flattened config keys for gauntlet stages (Stage1, Stage2, Stage3)."""
     return {
-        # Stage-1
-        "s1_recency_max_days": settings.stage1.recency_max_days,
-        "s1_short_window_days": settings.stage1.short_window_days,
-        "s1_min_trades_short": settings.stage1.min_trades_short,
-        "s1_max_drawdown_short": settings.stage1.max_drawdown_short,
+        # Stage-1 Health Check (updated keys to match stage functions)
+        "s1_rolling_window_days": settings.stage1.short_window_days,
+        "s1_min_recent_trades": settings.stage1.min_trades_short,
+        "s1_min_total_trades": 5,  # reasonable default
+        "s1_momentum_window_days": 30,  # reasonable default
+        "s1_min_momentum_trades": 3,   # reasonable default
 
-        # Stage-2
+        # Stage-2 Profitability (updated keys to match stage functions)
+        "s2_min_nav_return_pct": 0.0,
+        "s2_min_total_pnl": 0.0,
+        "s2_min_win_rate": 0.0,
+        "s2_min_payoff_ratio": 0.0,
+        "s2_max_drawdown_pct": 0.50,
+        "s2_recent_days": 30,
+        "s2_min_recent_nav_return": 0.0,
+        "s2_min_recent_trades": 1,
+
+        # Stage-3 Robustness (updated keys to match stage functions)
+        "s3_min_dsr": 0.1,
+        "s3_min_ci_lower": 0.0,
+        "s3_min_stability_ratio": 0.3,
+        "s3_max_stability_ratio": 2.0,
+        "s3_min_sharpe_trend": -0.1,
+        "s3_n_trials": 1,
+        "s3_n_bootstrap": 1000,
+        "s3_confidence": 0.95,
+
+        # Legacy MBB settings (for compatibility)
         "mbb_B": settings.stage2.mbb_B,
         "block_len_method": settings.stage2.block_len_method,
         "block_len_min": settings.stage2.block_len_min,
         "block_len_max": settings.stage2.block_len_max,
         "seed": settings.stage2.seed,
-
-        # Stage-3
         "fdr_q": settings.stage3.fdr_q,
     }
 
