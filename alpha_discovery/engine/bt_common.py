@@ -13,7 +13,15 @@ from ..options import pricing  # user module; we only *call if exists*
 
 # ---------------- Constants & tiny utils ----------------
 
-TRADE_HORIZONS_DAYS = [4]  # Optimized for regime-aware exits
+# Trade horizons can be extended in moonshot mode to better capture super-runners
+try:
+    from ..config import settings as _settings_in_bt_common
+    if getattr(_settings_in_bt_common.options, "pt_behavior", "regime_aware") == "moonshot":
+        TRADE_HORIZONS_DAYS = list(getattr(_settings_in_bt_common.options, "moonshot_horizons_days", [4, 10, 21]))
+    else:
+        TRADE_HORIZONS_DAYS = [4]
+except Exception:
+    TRADE_HORIZONS_DAYS = [4]
 
 
 def _add_bdays(start_date: pd.Timestamp, bd: int) -> pd.Timestamp:
@@ -74,6 +82,12 @@ def _policy_id(policy: ExitPolicy, horizon_days: int) -> str:
     """Generate a simple policy ID for regime-aware exits."""
     if not policy.enabled:
         return "disabled"
+    try:
+        mode = getattr(settings.options, "pt_behavior", "regime_aware")
+    except Exception:
+        mode = "regime_aware"
+    if mode == "moonshot":
+        return f"moonshot_h{horizon_days}"
     return f"regime_aware_h{horizon_days}"
 
 
@@ -165,6 +179,29 @@ def _check_regime_aware_exit_options(
     if entry_date and tenor_bd:
         option_expiration = _add_bdays(entry_date, tenor_bd)
 
+    # Determine mode-specific thresholds
+    try:
+        mode = getattr(settings.options, "pt_behavior", "regime_aware")
+    except Exception:
+        mode = "regime_aware"
+
+    if mode == "moonshot":
+        pt_threshold = None  # disable early profit target
+        vol_profit_min = 3.0
+        vol_spike_min = 0.20
+        sl_cut = -0.95
+        trail_start_profit = 2.0
+        trail_k_atr = 4.0
+        time_decay_profit_min = 0.50
+    else:
+        pt_threshold = 1.5
+        vol_profit_min = 0.8
+        vol_spike_min = 0.15
+        sl_cut = -0.8
+        trail_start_profit = 0.2
+        trail_k_atr = 2.0
+        time_decay_profit_min = 0.4
+
     # Process each day in the price path
     for i in range(n):
         current_date = price_path.index[i]
@@ -174,8 +211,8 @@ def _check_regime_aware_exit_options(
 
         # === REGIME-AWARE EXIT CONDITIONS ===
 
-        # 1. Profit Target Hit - Leg A (conservative profit taking at 100%)
-        if profit_pct >= 3.0:  # 100% profit target
+        # 1. Profit Target Hit - Leg A (only if enabled)
+        if pt_threshold is not None and profit_pct >= pt_threshold:
             return i, "pt_hit_legA"
 
         # 2. Volatility Spike Profit (quick exit on volatility expansion)
@@ -185,8 +222,7 @@ def _check_regime_aware_exit_options(
                 price_changes = np.diff(recent_prices) / recent_prices[:-1]
                 vol_spike = np.std(price_changes) if len(price_changes) > 0 else 0
 
-                # Exit if we have decent profit AND high volatility
-                if profit_pct >= 0.8 and vol_spike > 0.15:  # 50% profit + 10% daily volatility
+                if profit_pct >= vol_profit_min and vol_spike > vol_spike_min:
                     return i, "volatility_spike_profit"
 
         # 3. Time Decay Protection (theta burn protection)
@@ -195,25 +231,25 @@ def _check_regime_aware_exit_options(
             days_to_expiration = (option_expiration - current_date).days
             time_remaining_pct = days_to_expiration / tenor_bd if tenor_bd > 0 else 0
 
-            # Exit in final 20% of option life if we have some profit
-            if time_remaining_pct <= 0.1 and profit_pct >= 0.4:  # Final 20% + 30% profit
+            # Exit in final ~10% of option life if we have some profit
+            if time_remaining_pct <= 0.1 and profit_pct >= time_decay_profit_min:
                 return i, "time_decay_protection"
 
         # 4. Stop Loss (risk management - prevents catastrophic losses)
-        if profit_pct <= -0.8:  # 50% stop loss
+        if profit_pct <= sl_cut:
             return i, "stop_loss"
 
         # 5. ATR-based Trailing Stop (let winners run while protecting gains)
-        if i >= 5 and profit_pct >= 0.2:  # Need 5 days of data and 20% profit to start trailing
+        if i >= 5 and profit_pct >= trail_start_profit:
             recent_prices = p[max(0, i - 4):i + 1]
             if len(recent_prices) >= 5:
                 # Calculate ATR over last 5 days
                 high_low_range = np.max(recent_prices) - np.min(recent_prices)
                 atr = high_low_range / len(recent_prices)
 
-                # Trail at 2x ATR distance from recent high
+                # Trail at k*ATR distance from recent high
                 recent_high = np.max(recent_prices)
-                trail_level = recent_high - (atr * 2.0)
+                trail_level = recent_high - (atr * trail_k_atr)
 
                 if option_price <= trail_level:
                     return i, "atr_trail_hit"
@@ -223,6 +259,17 @@ def _check_regime_aware_exit_options(
             return i, "option_expired"
 
     # No regime-aware exit triggered and option hasn't expired
+    # Fallback: enforce an exit by the strategy's time horizon (or last available bar)
+    if n > 0:
+        try:
+            max_idx = n - 1
+            if horizon_days is not None and horizon_days > 0:
+                # clamp to available data
+                max_idx = min(max_idx, max(0, int(horizon_days) - 1))
+            return max_idx, "max_horizon_exit"
+        except Exception:
+            # safest fallback: exit on the last available bar
+            return n - 1, "max_horizon_exit"
     return None, "no_exit"
 
 

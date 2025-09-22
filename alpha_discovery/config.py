@@ -1,397 +1,232 @@
-# alpha_discovery/config.py
-from pydantic import BaseModel
-from typing import List, Literal, Optional, Dict, Any
+from __future__ import annotations
+from pydantic import BaseModel, Field
+from typing import List, Optional, Literal
 from datetime import date
 
 
-# -----------------------------
-# Genetic Algorithm (core)
-# -----------------------------
 class GaConfig(BaseModel):
-    """Genetic Algorithm Search Parameters"""
-    population_size: int = 500
-    generations: int = 12
+    """Genetic Algorithm parameters (model-agnostic, NSGA-compatible)."""
+    population_size: int = 50
+    generations: int = 4
     elitism_rate: float = 0.1
-    mutation_rate: float = 0.6
-    seed: int = 136
+    mutation_rate: float = 0.35
+    crossover_rate: float = 0.75
+    seed: int = 170 # keep visible in run_dir names
+
+    # Setup grammar — PAIRS ONLY
     setup_lengths_to_explore: List[int] = [2]
 
-    # Verbosity & debugging used by NSGA layer (added)
-    verbose: int = 2  # 0..3 (2 = extra progress summaries)
-    debug_sequential: bool = False  # True = evaluate in-process (no joblib)
+    # Logging/debug used by nsga/population
+    verbose: int = 2
+    debug_sequential: bool = False
 
-    # Island Model Configuration
-    islands: Optional['IslandConfig'] = None
+    # Objectives to MAXIMIZE (must match keys in ga_core after transformation)
+    objectives: List[str] = [
+        "crps_neg",
+        "pinball_loss_neg_q10",
+        "pinball_loss_neg_q90",
+        "info_gain",
+        "w1_effect",
+        "dfa_alpha_closeness_neg",
+        "sensitivity_scan_neg",
+        "redundancy_neg",  # Default, can be swapped with complexity
+    ]
 
-    # Gauntlet Control
-    run_gauntlet: bool = True  # Set to False to skip traditional gauntlet phase entirely
-    run_strict_oos_gauntlet: bool = False  # Set to False to skip Strict-OOS gauntlet phase
-    run_diagnostic_replay: bool = False  # Set to False to skip diagnostic replay with portfolio analysis
+    # Penalty objective for GA (complexity vs redundancy)
+    # Use 'redundancy_neg' or 'complexity_index_neg'
+    complexity_objective: str = "redundancy_neg"
 
-    # Fitness system (legacy)
-    fitness_profile: str = "legacy"  # Use legacy metrics system
-    objectives: Optional[List[str]] = None
+    # Horizon aggregation method for GA objectives ('best', 'mean', 'p75')
+    horizon_agg_method: str = "p75"
+    # Quantiles for horizon aggregation if method is 'p75'
+    h_quantile_low: int = 25
+    h_quantile_high: int = 75
 
 
-# -----------------------------
-# Data & universe
-# -----------------------------
+    # Island model knobs
+    islands: Optional[dict] = None
+    islands_count: int = 4
+    migration_interval: int = 2
+    migration_size: int = 8
+
+    # Disable legacy gauntlets in this pivot (compat only)
+    run_gauntlet: bool = False
+    run_strict_oos_gauntlet: bool = False
+    run_diagnostic_replay: bool = False
+
+
+class ValidationConfig(BaseModel):
+    """Support / split knobs."""
+    min_support: int = 5             # friendlier than 30 for cross-ticker coverage
+    embargo_days: int = 5
+    purge_days: int = 3 # Truncate end of train set to prevent label leakage
+    n_folds: int = 5
+    # Prefilter: drop ultra-rare primitive signals before GA
+    min_signal_fires: int = 6
+
+
+class ComplexityConfig(BaseModel):
+    """Configuration for complexity metrics."""
+    # 'permutation' or 'complexity_index'
+    metric: str = "permutation"
+    # Permutation entropy params
+    pe_embedding: int = 3
+    pe_tau: int = 1
+
+
+class HybridSplitConfig(BaseModel):
+    """Configuration for the full Discovery->OOS->Gauntlet split."""
+    # Discovery CV settings
+    n_discovery_folds: int = 4
+    discovery_train_years: float = 3.0
+    discovery_test_years: float = 1.0
+    discovery_step_months: int = 12
+
+    # True OOS settings
+    n_oos_folds: int = 1
+    oos_fold_months: int = 12
+
+    # Forward Gauntlet settings
+    gauntlet_start_offset_months: int = 0  # months after last discovery train end
+    gauntlet_end_date: Optional[date] = None # None means use data end_date
+
+
+class ForecastConfig(BaseModel):
+    """Forecast + scoring knobs for return distributions."""
+    horizons: List[int] = [3, 5, 8, 10]
+    default_horizon: int = 5
+    price_field: str = "PX_LAST"
+
+    # Probability bands (also used for entropy bins)
+    band_edges: List[float] = [-999.0, -0.10, -0.05, -0.03, -0.01, 0.01, 0.03, 0.05, 0.10, 999.0]
+
+    # DFA/Hurst target (shape stability)
+    dfa_alpha_target: float = 0.65
+
+    # Bootstrap for CRPS robustness (0 = off)
+    crps_bootstrap_samples: int = 20 # Enable for robustness checks
+
+
+class RegimeConfig(BaseModel):
+    """HMM/GMM configs for regime detection."""
+    enabled: bool = True
+    features: List[str] = ["volatility", "trend"]
+    n_regimes_range: List[int] = [3, 6] # Range of K to test for BIC selection
+    vol_window: int = 20
+    trend_window: int = 20
+
+
+class RobustnessConfig(BaseModel):
+    """Perturbation settings for robustness objectives."""
+    jitter_flip_prob: float = 0.02
+    n_perturbations: int = 5
+    mbb_block_length: int = 22 # Approx 1 month of trading days
+    page_hinkley_threshold: float = 0.5
+
+
+class ElvConfig(BaseModel):
+    """Configuration for ELV (Expected Live Value) scoring components."""
+    # Shrinkage weights for trigger rate
+    live_trigger_rate_cv_weight: float = 0.7
+    live_trigger_rate_fg_weight: float = 0.3
+    trigger_rate_saturation: float = 0.12 # tau_sat
+
+    # Dormancy
+    dormancy_eligibility_threshold: float = 0.02 # 2% of days
+
+    # Specialist Rules
+    specialist_edge_threshold: float = 0.85
+    specialist_trigger_rate_max: float = 0.04
+    specialist_coverage_floor: float = 0.40
+
+    # Gates
+    gate_min_oos_triggers: int = 15
+    gate_crps_percentile: float = 0.60
+    gate_ig_percentile: float = 0.70
+    gate_mi_max: float = 0.7
+    gate_sensitivity_max_drop: float = 0.20
+
+    # Disqualification
+    disqualify_calib_mae_percentile: float = 0.90
+    disqualify_crps_percentile: float = 0.10
+    disqualify_mbb_p_value: float = 0.01
+    disqualify_sensitivity_drop: float = 0.30
+    disqualify_mi_max: float = 0.90
+
+    # Edge_OOS component weights
+    edge_crps_weight: float = 0.30
+    edge_pinball_weight: float = 0.20
+    edge_info_gain_weight: float = 0.25
+    edge_w1_weight: float = 0.15
+    edge_calibration_weight: float = 0.10
+
+    # CoverageFactor component weights
+    coverage_regime_breadth_weight: float = 0.5
+    coverage_fold_coverage_weight: float = 0.3
+    coverage_stability_weight: float = 0.2
+
+    # Penalty adjustment parameters
+    penalty_sensitivity_k: float = 4.0
+    penalty_mbb_p_value_tiers: List[float] = [0.10, 0.05]
+    penalty_mbb_p_value_adj: List[float] = [0.8, 0.6]
+    penalty_page_hinkley_adj: float = 0.75
+    penalty_redundancy_factor: float = 0.5
+    penalty_complexity_factor: float = 0.4
+    maturity_n_triggers: int = 40
+    maturity_dormant_floor: float = 0.6
+
+
 class DataConfig(BaseModel):
-    """Data Source and Ticker Configuration"""
     excel_file_path: str = 'data_store/raw/bb_data.xlsx'
     parquet_file_path: str = 'data_store/processed/bb_data.parquet'
     start_date: date = date(2018, 1, 1)
-    end_date: date = date(2025, 9, 16)
-    holdout_start_date: date = date(2023, 8, 27)
+    end_date: date = date(2025, 9, 18)
 
-    # Finalized ticker lists
     tradable_tickers: List[str] = [
-        'MSTR US Equity',
-
-        #'MSTR US Equity', 'SNOW US Equity', 'LLY US Equity', 'COIN US Equity',
-        #'QCOM US Equity', 'ULTA US Equity', 'CRM US Equity', 'AAPL US Equity',
-        #'AMZN US Equity', 'MSFT US Equity', 'QQQ US Equity', 'SPY US Equity',
-        #'TSM US Equity', 'META US Equity', 'TSLA US Equity', 'CRWV US Equity',
-        #'VIX Index', 'GOOGL US Equity', 'AMD US Equity',  'ARM US Equity',
-        #'PLTR US Equity', 'VIX Index', 'JPM US Equity', 'C US Equity',
-        #'BMY US Equity','NKE US Equity',
+        'MSTR US Equity','SNOW US Equity','LLY US Equity','COIN US Equity',
+        'QCOM US Equity','ULTA US Equity','CRM US Equity','AAPL US Equity',
+        'AMZN US Equity','MSFT US Equity','QQQ US Equity','SPY US Equity',
+       # 'TSM US Equity','META US Equity','TSLA US Equity','CRWV US Equity',
+       # 'GOOGL US Equity','AMD US Equity','ARM US Equity','PLTR US Equity',
+       # 'JPM US Equity','C US Equity','BMY US Equity','NKE US Equity','TLT US Equity'
     ]
-    macro_tickers: List[str] = [
-        'RTY Index', 'MXWO Index', 'USGG10YR Index', 'USGG2YR Index',
-        'DXY Curncy', 'JPY Curncy', 'EUR Curncy', 'EEM US Equity',
-        'CL1 Comdty', 'HG1 Comdty', 'XAU Curncy', 'XLE US Equity', 'XLK US Equity',
-        #'XLRE US Equity', 'XLC US Equity', 'XLV US Equity', 'XLP US Equity',
-
-
-        'SNOW US Equity', 'LLY US Equity', 'COIN US Equity',
-        'QCOM US Equity', 'ULTA US Equity', 'CRM US Equity', 'AAPL US Equity',
-        'AMZN US Equity', 'MSFT US Equity', 'QQQ US Equity', 'SPY US Equity',
-        'TSM US Equity', 'META US Equity', 'TSLA US Equity', 'CRWV US Equity',
-        'VIX Index', 'GOOGL US Equity', 'AMD US Equity', 'ARM US Equity',
-        'PLTR US Equity', 'VIX Index', 'JPM US Equity', 'C US Equity',
-        'BMY US Equity', 'NKE US Equity',
-
+    macro_tickers: List[str] = ['RTY Index','MXWO Index','USGG10YR Index','USGG2YR Index',
+                                'DXY Curncy','JPY Curncy','EUR Curncy','CL1 Comdty',
+                                'HG1 Comdty','XAU Curncy'
     ]
+    benchmark_ticker: str = 'SPY US Equity'
 
 
-# -----------------------------
-# Event calendar
-# -----------------------------
-class EventsConfig(BaseModel):
-    """Event Calendar Integration Settings"""
-    file_path: str = "data_store/processed/economic_releases.parquet"
-
-    # Filters
-    countries: List[str] = ["US"]
-    include_event_types: Optional[List[str]] = None  # e.g., ["CPI", "FOMC", "NFP"]; None = all
-    include_tickers: List[str] = []  # reserved (not used yet)
-    include_types: List[str] = []  # reserved (not used yet)
-
-    # Relevance & windows
-    high_relevance_threshold: float = 70.0
-    pre_window_days: int = 2
-    post_window_days: int = 2  # reserved (not used yet)
-    post_release_lag_days: int = 1  # shift post-release features to T+1 business day
-
-
-# -----------------------------
-# GA diversity (placeholder)
-# -----------------------------
-class GaDiversityConfig(BaseModel):
-    """Controls for diversity and de-duplication (placeholder)."""
-    min_unique_setups: int = 10
-
-
-# -----------------------------
-# Island Model Configuration
-# -----------------------------
-class IslandConfig(BaseModel):
-    """Island Model Parameters for Genetic Algorithm"""
-    enabled: bool = True
-    n_islands: int = 4
-    migration_interval: int = 5  # generations between migrations
-    migration_size: float = 0.2  # % of island population migrated
-    replace_strategy: str = "worst"  # "worst" | "random"
-    sync_final: bool = True  # merge all islands at end
-
-    # Island-specific population sizes (if different from main)
-    island_population_size: Optional[int] = None  # None = use main population_size / n_islands
-
-    # Migration topology
-    migration_topology: str = "ring"  # "ring" | "random" | "all_to_all"
-
-    # Logging per island
-    log_island_metrics: bool = True
-
-
-# -----------------------------
-# Validation / splits
-# -----------------------------
-class ValidationConfig(BaseModel):
-    """Validation and support thresholds"""
-    min_initial_support: int = 10
-    min_portfolio_support: int = 30
-    embargo_days: int = 10  # days of post-train embargo before test
-
-
-# -----------------------------
-# Options pricing / backtester knobs
-# -----------------------------
-
-class OptionsConfig(BaseModel):
-    """
-    Options simulation settings.
-    """
-    capital_per_trade: float = 10000.0
-    contract_multiplier: int = 100
-    risk_free_rate_mode: Literal["constant", "macro"] = "constant"
-    constant_r: float = 0.0  # <-- was 0.0; set a realistic annual RF so Sortino's MAR > 0
-    allow_nonoptionable: bool = False
-
-    # Tenor selection (business days to expiry)
-    tenor_grid_bd: List[int] = [3, 5, 7]
-    tenor_buffer_k: float = 1.25
-
-    # Intraday trading patterns
-    enable_intraday_patterns: bool = False
-    intraday_patterns: List[str] = ['overnight', 'intraday']  # EOD→Open, Open→Open
-    intraday_use_regular_horizons: bool = False  # If True, intraday patterns test all horizons; if False, only 1-day
-
-    # Enable exit policies
-    exit_policies_enabled: bool = True
-
-    # ===== Policy selection =====
-    # 'timebox_be_trail' (new) OR 'arm_trail' / 'exit' / 'scale_out' (legacy family)
-    pt_behavior: Literal['exit', 'arm_trail', 'scale_out', 'timebox_be_trail', 'regime_aware'] = 'regime_aware'
-
-    # ===== DISABLED - ONLY REGIME-AWARE EXITS FOR EXTREME RUNNERS =====
-    be_trigger_multiple: float = 999.0  # DISABLED - effectively never triggers
-    trail_arm_multiple: float = 999.0  # DISABLED - effectively never triggers
-    exit_trail_frac: float | None = None  # DISABLED - no traditional trailing
-    exit_sl_multiple: float | None = None  # DISABLED - no traditional stops
-    exit_time_cap_days: int | None = None  # DISABLED - let regime-aware handle timing
-
-    # ===== DISABLED - ONLY REGIME-AWARE EXITS FOR EXTREME RUNNERS =====
-    exit_pt_multiple: float | None = None  # DISABLED - no traditional profit targets
-    armed_trail_frac: float | None = None  # DISABLED - no traditional trailing
-    scale_out_frac: float = 0.0
-
-    # ===== NEW: Advanced IV Pricing Configuration =====
-
-    # IV anchor: which maturity to use as base volatility
-    iv_anchor: Literal['1M', '30D', '3M'] = '1M'  # Default: 1M for short-tenor trades
-
-    # Delta bucket: how to select strike and volatility
-    delta_bucket: Literal[
-        'ATM', 'AUTO_BY_DIRECTION', 'CALL_40D', 'CALL_25D', 'CALL_10D', 'PUT_40D', 'PUT_25D', 'PUT_10D'] = 'AUTO_BY_DIRECTION'
-
-    # Strict mode: if True and new IV columns missing, raise error; if False, fallback to 3M
-    strict_new_iv: bool = True
-
-    # Pricing regime for A/B testing
-    pricing_regime: Literal['LEGACY_3M', 'ATM_30D', 'SMILE_1M'] = 'SMILE_1M'
-
-    # IV term structure mapping (fallbacks)
-    iv_map_alpha: float = 0.7
-    power_law_beta: float = -0.15
-
-    # Slippage and guardrails
-    slippage_tiers: Dict[str, float] = {
-        "days_15": 0.0075,
-        "days_30": 0.0050,
-        "days_any": 0.0025,
-    }
-    min_premium: float = 0.30
-    max_contracts: int = 100
-
-
-# -----------------------------
-# Selection / portfolio assembly
-# -----------------------------
-class SelectionConfig(BaseModel):
-    """
-    Selection policy for choosing tickers/horizons used in GA scoring.
-    Includes knobs expected by selection_core (added) + your existing fields.
-    """
-    # Ranking -- UPDATED to use new metrics
-    metric_primary: Literal[
-        "sortino_lb", "expectancy", "sharpe_lb", "omega_ratio", "support"
-    ] = "sortino_lb"
-    metric_tiebreakers: List[str] = ["expectancy", "support"]  # used as tie-breakers
-
-    # Per-ticker gates (optional)
-    per_ticker_min_sharpe_lb: Optional[float] = None
-    per_ticker_min_omega: Optional[float] = None
-    per_ticker_min_sortino_lb: Optional[float] = None  # Added for Sortino
-    per_ticker_min_expectancy: Optional[float] = None  # Added for Expectancy
-
-    # Support requirements
-    min_support_per_ticker: int = 10  # used by selection_core
-
-    # Stepwise assembly thresholds (minimum improvements)
-    stepwise_min_delta_sharpe_lb: float = 0.0
-    stepwise_min_delta_omega: float = 0.0
-
-    # Portfolio size cap
-    max_tickers_in_portfolio: int = 12
-
-    # --- Your existing extra knobs (kept) ---
-    stepwise_chunk: int = 3
-    top_k_per_ticker: int = 2
-    robust_sharpe_alpha: float = 0.2
-    winsor_alpha: float = 0.02
-
-
-# -----------------------------
-# Reporting / metrics behavior
-# -----------------------------
 class ReportingConfig(BaseModel):
-    """Reporting and analysis settings."""
-    base_capital_for_portfolio: float = 100000.0
-    robust_agg_metric: Literal["median", "mean"] = "median"
-    trimmed_alpha: float = 0.05
-    outlier_factor_flag: float = 10.0
+    runs_dir: str = "runs"
+    slate_top_n: int = 40
+    slate_max_per_ticker: int = 3
 
 
-# -----------------------------
-# Stage-1 Recency / Liveness
-# -----------------------------
-class Stage1Config(BaseModel):
-    """Stage-1 recency and liveness gates (OOS only)."""
-    # Fail if last trigger older than this
-    recency_max_days: int = 5
-    # Short-window size for liveness/trade checks
-    short_window_days: int = 5
-    # Require at least this many trades in the short window
-    min_trades_short: int = 1
-    # Cap on max drawdown in the short window (fractional, e.g. 0.15 = 15%)
-    max_drawdown_short: float = 0.55
-
-
-# -----------------------------
-# Stage-2 (MBB) configuration
-# -----------------------------
-class Stage2Config(BaseModel):
-    mbb_B: int = 1000  # bootstrap resamples
-    block_len_method: str = "auto"  # "auto" -> sqrt(T), clamped
-    block_len_min: int = 5
-    block_len_max: int = 50
-    seed: int = 42
-
-
-# -----------------------------
-# Stage-3 (FDR/DSR) configuration
-# -----------------------------
-class Stage3Config(BaseModel):
-    fdr_q: float = 0.10  # BH–FDR level
-
-
-# -----------------------------
-# Regime-Aware Exit Configuration
-# -----------------------------
-class RegimeAwareConfig(BaseModel):
-    """Configuration for regime-aware exit strategies"""
-
-    # Regime detection thresholds
-    risk_on_threshold: float = 0.5
-    risk_off_threshold: float = -0.5
-
-    # Default exit profiles
-    risk_on_profile: Dict[str, float] = {
-        "atr_len": 14, "k_atr_base": 2.5, "k_atr_slope": 0.8, "theta_frac": 0.55,
-        "epsilon": 0.03, "m_em": 1.4, "alpha_vol": 0.25, "z_panic": 2.3, "g_atr": 1.0,
-        "d_pre_hi": 2, "d_pre_lo": 1, "z_pc_tighten": 1.5, "iv_z_cut": 1.0
-    }
-
-    neutral_profile: Dict[str, float] = {
-        "atr_len": 14, "k_atr_base": 2.0, "k_atr_slope": 0.8, "theta_frac": 0.50,
-        "epsilon": 0.03, "m_em": 1.2, "alpha_vol": 0.15, "z_panic": 2.3, "g_atr": 1.0,
-        "d_pre_hi": 2, "d_pre_lo": 1, "z_pc_tighten": 1.5, "iv_z_cut": 1.0
-    }
-
-    risk_off_profile: Dict[str, float] = {
-        "atr_len": 14, "k_atr_base": 1.6, "k_atr_slope": 1.0, "theta_frac": 0.45,
-        "epsilon": 0.03, "m_em": 1.0, "alpha_vol": 0.10, "z_panic": 2.3, "g_atr": 1.2,
-        "d_pre_hi": 3, "d_pre_lo": 2, "z_pc_tighten": 1.2, "iv_z_cut": 1.0
-    }
-
-    # Position management
-    cooldown_days: int = 3
-    max_positions_per_setup: int = 1
-    signal_reset_days: int = 5  # Force signal reset after being true for this many days
-
-    # Enhanced ledger tracking
-    enable_enhanced_ledger: bool = True
-    track_mfe_mae: bool = True
-    track_regime_data: bool = True
-    track_event_data: bool = True
-
-
-# -----------------------------
-# Settings container
-# -----------------------------
 class Settings(BaseModel):
-    """Main container for all project settings"""
+    # Top-level run mode: discover, validate, gauntlet, or full
+    run_mode: Literal['discover', 'validate', 'gauntlet', 'full'] = Field(
+        default='full',
+        description="Controls which parts of the pipeline to run."
+    )
     ga: GaConfig = GaConfig()
-    ga_diversity: GaDiversityConfig = GaDiversityConfig()
-    data: DataConfig = DataConfig()
-    events: EventsConfig = EventsConfig()
     validation: ValidationConfig = ValidationConfig()
-    options: OptionsConfig = OptionsConfig()
-    selection: SelectionConfig = SelectionConfig()
+    splits: HybridSplitConfig = HybridSplitConfig()
+    forecast: ForecastConfig = ForecastConfig()
+    regimes: RegimeConfig = RegimeConfig()
+    robustness: RobustnessConfig = RobustnessConfig()
+    complexity: ComplexityConfig = ComplexityConfig()
+    elv: ElvConfig = ElvConfig()
+    data: DataConfig = DataConfig()
     reporting: ReportingConfig = ReportingConfig()
-    stage1: Stage1Config = Stage1Config()
-    stage2: Stage2Config = Stage2Config()
-    stage3: Stage3Config = Stage3Config()
-    regime_aware: RegimeAwareConfig = RegimeAwareConfig()
+
+    # Back-compat alias so existing code can use settings.validate
+    @property
+    def validate(self) -> ValidationConfig:
+        return self.validation
 
 
-# Instantiate a global settings object for easy import
+# Global settings singleton
 settings = Settings()
 
-# Set default island config
-if settings.ga.islands is None:
-    settings.ga.islands = IslandConfig()
-
-
-def gauntlet_cfg(settings: Settings) -> dict:
-    """Flattened config keys for gauntlet stages (Stage1, Stage2, Stage3)."""
-    return {
-        # Stage-1 Health Check (updated keys to match stage functions)
-        "s1_rolling_window_days": settings.stage1.short_window_days,
-        "s1_min_recent_trades": settings.stage1.min_trades_short,
-        "s1_min_total_trades": 5,  # reasonable default
-        "s1_momentum_window_days": 30,  # reasonable default
-        "s1_min_momentum_trades": 3,   # reasonable default
-
-        # Stage-2 Profitability (updated keys to match stage functions)
-        "s2_min_nav_return_pct": 0.0,
-        "s2_min_total_pnl": 0.0,
-        "s2_min_win_rate": 0.0,
-        "s2_min_payoff_ratio": 0.0,
-        "s2_max_drawdown_pct": 0.50,
-        "s2_recent_days": 30,
-        "s2_min_recent_nav_return": 0.0,
-        "s2_min_recent_trades": 1,
-
-        # Stage-3 Robustness (updated keys to match stage functions)
-        "s3_min_dsr": 0.1,
-        "s3_min_ci_lower": 0.0,
-        "s3_min_stability_ratio": 0.3,
-        "s3_max_stability_ratio": 2.0,
-        "s3_min_sharpe_trend": -0.1,
-        "s3_n_trials": 1,
-        "s3_n_bootstrap": 1000,
-        "s3_confidence": 0.95,
-
-        # Legacy MBB settings (for compatibility)
-        "mbb_B": settings.stage2.mbb_B,
-        "block_len_method": settings.stage2.block_len_method,
-        "block_len_min": settings.stage2.block_len_min,
-        "block_len_max": settings.stage2.block_len_max,
-        "seed": settings.stage2.seed,
-        "fdr_q": settings.stage3.fdr_q,
-    }
-
-
-__all__ = ["Settings", "settings", "gauntlet_cfg"]
+__all__ = ["Settings", "settings"]

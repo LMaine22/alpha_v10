@@ -14,71 +14,54 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
 # ===================================================================
 
 EVENT_FEATURE_MAPPING = {
-    # Tail flags and extreme events
-    'EV__EV_tail_flag_1p5': 'Extreme Event (1.5σ)',
-    'EV__EV_tail_flag_2p5': 'Extreme Event (2.5σ)',
-    'EV__EV_revision_tail_flag': 'Revision Shock',
-    'EV__EV_time_since_tailshock_60': 'Time Since Shock',
-    
-    # Surprise and dispersion
-    'EV__EV_surprise_dispersion_day': 'Surprise Dispersion',
-    'EV__EV_signed_surprise_percentile': 'Surprise Percentile',
-    'EV__EV_net_info_surprise': 'Net Info Surprise',
-    'EV__EV_shock_adjusted_surprise': 'Shock-Adjusted Surprise',
-    
-    # Revisions and memory
-    'EV__EV_revision_z': 'Revision Z-Score',
-    'EV__EV_revision_polarity_memory_3': 'Revision Memory',
-    'EV__EV_revision_vol_252': 'Revision Volatility',
-    
-    # Calendar and timing
-    'EV__EV_forward_calendar_heat_3': 'Calendar Heat',
-    'EV__EV_calendar_vacuum_7': 'Calendar Vacuum',
-    'EV__EV_dense_macro_day_score': 'Macro Day Score',
-    'EV__EV_top_tier_dominance_share': 'Top Tier Dominance',
-    
-    # Clustering and divergence
-    'EV__EV_clustered_tail_count_5': 'Clustered Tails',
-    'EV__EV_infl_vs_growth_divergence': 'Inflation vs Growth',
-    
-    # Legacy features
-    'EV__EV_days_to_high': 'Days to High Impact',
-    'EV__EV_in_window': 'In Event Window',
-    'EV__EV_pre_window': 'Pre-Event Window',
-    'EV__EV_is_event_week': 'Event Week',
-    'EV__EV_after_surprise_z': 'Post-Surprise Z',
-    'EV__EV_after_pos': 'Positive Surprise',
-    'EV__EV_after_neg': 'Negative Surprise',
-    'EV__EV_surprise_ewma_21': 'Surprise EWMA (21d)',
-    'EV__EV_surprise_ewma_63': 'Surprise EWMA (63d)',
-    'EV__EV_tail_intensity_21': 'Tail Intensity (21d)',
-    'EV__EV_dense_macro_window_7': 'Dense Macro Window',
+    # New mapping based on events.py
+    'EV_tail_share': 'Tail Event Share',
+    'EV_revision_z': 'Revision Shock Z-Score',
+    'EV_time_since_tailshock_60': 'Time Since Tail Shock (60d)',
+    'EV_surprise_dispersion_day': 'Surprise Dispersion',
+    'EV_signed_surprise_percentile': 'Surprise Percentile (Signed)',
+    'EV_revision_conflict': 'Revision Conflict',
+    'EV_forward_calendar_heat': 'Calendar Heat',
+    'EV_calendar_vacuum': 'Calendar Vacuum',
+    'EV_dense_macro_day_score': 'Macro Day Score',
+    'EV_top_tier_dominance_share': 'Top Tier Dominance',
+    'EV.bucket_inflation_surp': 'Inflation Surprise',
+    'EV.bucket_labor_surp': 'Labor Surprise',
+    'EV.bucket_growth_surp': 'Growth Surprise',
+    'EV.bucket_housing_surp': 'Housing Surprise',
+    'EV.bucket_sentiment_surp': 'Sentiment Surprise',
+    'EV.bucket_divergence': 'Inflation/Growth Divergence',
+    'EV.bucket_inflation_tail_share': 'Inflation Tail Share',
+    'EV_after_surprise_z': 'Post-Surprise Z-Score',
+    'EV_tail_intensity': 'Tail Intensity',
+    'EV_tail_cooldown': 'Tail Cooldown',
+    'INF.shadow_cpi_z': 'CPI Shadow Indicator',
+    'LAB.shadow_nfp_z': 'NFP Shadow Indicator',
+    'EXP.confidence_proxy': 'Expectations Confidence',
+    'META.day_reliability_index': 'Data Reliability Index',
 }
 
 def _get_interpretable_event_name(feature_name: str) -> str:
-    """Convert generic EV_* feature names to more interpretable event types."""
-    # Check if it's an event feature by looking for event-related patterns
-    event_patterns = [
-        '_in_window', '_pre_window', '_after_surprise', '_tail_flag', 
-        '_surprise_dispersion', '_revision_z', '_net_info_surprise',
-        '_days_to_high', '_is_event_week', '_dense_macro_window'
-    ]
+    """Convert feature names to more interpretable event types."""
+    # Check for event features first
+    if feature_name.startswith(('EV_', 'EV.', 'INF.', 'LAB.', 'EXP.', 'META.')):
+        # Try to find a matching prefix in our map
+        for prefix, readable_name in EVENT_FEATURE_MAPPING.items():
+            if feature_name.startswith(prefix):
+                # Append any suffixes (like .ewm_hf10.5)
+                suffix = feature_name[len(prefix):]
+                # Clean up suffix for display
+                suffix = suffix.replace("_", " ").replace(".", " ").strip()
+                return f"{readable_name} ({suffix})" if suffix else readable_name
+        # Fallback for unmapped event features
+        return feature_name.replace("_", " ").title()
+
+    # Handle non-event features (remove ticker prefix)
+    parts = feature_name.split('_', 1)
+    if len(parts) > 1 and ' ' in parts[0]:  # Heuristic for a ticker
+        return parts[1]
     
-    is_event_feature = any(pattern in feature_name for pattern in event_patterns)
-    
-    if is_event_feature:
-        # Event features are global - remove ticker prefix if present
-        # Look for ticker pattern: "TICKER Event_Feature_Name"
-        parts = feature_name.split('_', 1)
-        if len(parts) == 2 and ' ' in parts[0]:
-            # First part looks like a ticker (contains space), second part is the event feature
-            return parts[1]  # Return just the event feature name
-        else:
-            # No ticker prefix, return as-is
-            return feature_name
-    else:
-        # Non-event feature, keep ticker prefix
-        return feature_name
+    return feature_name
 
 # ===================================================================
 # PRIMITIVE SIGNAL GRAMMAR

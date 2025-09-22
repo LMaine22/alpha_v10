@@ -162,7 +162,7 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
     all_signal_ids = list(signals_df.columns)
 
     # Initialize parents and deduplicate
-    parent_population: List[Tuple[str, List[str]]] = pop.initialize_population(rng, all_signal_ids)
+    parent_population: List[Tuple[str, List[str]]] = pop.initialize_population(rng, all_signal_ids, signals_df)
     parent_population = _dedup_individuals(parent_population)
 
     # Build a single exit policy from config (used for ALL evals)
@@ -196,23 +196,57 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
             if VERBOSE >= 2:
                 _summarize_evals("Parents", evaluated_parents)
             
-            # Print best Sortino and expectancy for this generation
-            best_sortino = -99.0
-            best_expectancy = -9999.0
+            # Print best primary objective (from config) and expectancy if available
+            obj_keys = getattr(getattr(settings, 'ga', object()), 'objectives', None)
+            if not obj_keys or not isinstance(obj_keys, (list, tuple)):
+                obj_keys = ["sharpe_lb", "expectancy", "support"]
+
+            primary_key = str(obj_keys[0]) if obj_keys else "sharpe_lb"
+            secondary_key = "expectancy" if "expectancy" in obj_keys else (obj_keys[1] if len(obj_keys) > 1 else None)
+
+            def _label_for_metric(k: str) -> str:
+                if not k:
+                    return "Metric"
+                if k.endswith("_lb"):
+                    base = k[:-3].replace("_", " ")
+                    return f"{base.title()} LB"
+                return k.replace("_", " ").title()
+
+            best_primary = float("-inf")
+            best_secondary = float("-inf")
             for ind in evaluated_parents:
-                metrics_dict = ind.get('metrics', {})
-                sortino = metrics_dict.get('sortino_lb', -99.0)
-                expectancy = metrics_dict.get('expectancy', -9999.0)
-                
-                if sortino > best_sortino:
-                    best_sortino = sortino
-                if expectancy > best_expectancy:
-                    best_expectancy = expectancy
-            
-            tqdm.write(f"Gen {gen}/{g} | "
-                      f"Best Sortino: {best_sortino:.3f} | "
-                      f"Best Expectancy: {best_expectancy:.1f} | "
-                      f"Pop: {len(evaluated_parents)}")
+                m = ind.get('metrics', {})
+                pv = m.get(primary_key)
+                if pv is not None:
+                    try:
+                        pv = float(pv)
+                        if pv > best_primary:
+                            best_primary = pv
+                    except Exception:
+                        pass
+                if secondary_key:
+                    sv = m.get(secondary_key)
+                    if sv is not None:
+                        try:
+                            sv = float(sv)
+                            if sv > best_secondary:
+                                best_secondary = sv
+                        except Exception:
+                            pass
+
+            prim_label = _label_for_metric(primary_key)
+            sec_label = _label_for_metric(secondary_key) if secondary_key else None
+
+            if secondary_key:
+                tqdm.write(
+                    f"Gen {gen}/{g} | Best {prim_label}: {best_primary:.3f} | "
+                    f"Best {sec_label}: {best_secondary:.3f} | Pop: {len(evaluated_parents)}"
+                )
+            else:
+                tqdm.write(
+                    f"Gen {gen}/{g} | Best {prim_label}: {best_primary:.3f} | "
+                    f"Pop: {len(evaluated_parents)}"
+                )
 
             # Children: build, dedup vs parents+children
             existing_keys = { _dna(ind) for ind in parent_population }
@@ -223,8 +257,8 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                 p1 = min(rng.choice(evaluated_parents, 2, replace=False), key=lambda x: (x["rank"], -x["crowding_distance"]))
                 p2 = min(rng.choice(evaluated_parents, 2, replace=False), key=lambda x: (x["rank"], -x["crowding_distance"]))
 
-                child_ind = pop.crossover(p1["individual"], p2["individual"], rng)
-                child_ind = pop.mutate(child_ind, all_signal_ids, rng)
+                child_ind = pop.crossover(p1["individual"], p2["individual"], rng, signals_df)
+                child_ind = pop.mutate(child_ind, all_signal_ids, rng, signals_df)
                 if not child_ind[1]:
                     continue
 
@@ -236,8 +270,8 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
 
                 # Safety: if mutation space gets stuck, allow reseed
                 if len(children_population) < p and len(existing_keys) > 4 * p:
-                    seedling = pop.mutate(pop.crossover(p1["individual"], p2["individual"], rng),
-                                         all_signal_ids, rng)
+                    seedling = pop.mutate(pop.crossover(p1["individual"], p2["individual"], rng, signals_df),
+                                         all_signal_ids, rng, signals_df)
                     if seedling[1] and _dna(seedling) not in existing_keys:
                         children_population.append(seedling)
                         existing_keys.add(_dna(seedling))
@@ -266,7 +300,16 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                 _summarize_evals("Children", evaluated_children)
 
             tqdm.write(f"Gen {gen}/{g} | Selecting survivors...")
-            combined = evaluated_parents + evaluated_children
+            # Combine and strictly de-duplicate by DNA before sorting
+            combined_raw = evaluated_parents + evaluated_children
+            combined: List[Dict] = []
+            combined_seen: Set[Tuple[str, Tuple[str, ...]]] = set()
+            for ind in combined_raw:
+                k = _dna(ind["individual"]) if isinstance(ind, dict) else None
+                if k is None or k in combined_seen:
+                    continue
+                combined_seen.add(k)
+                combined.append(ind)
 
             fronts = _non_dominated_sort(combined)
             next_gen_parents: List[Dict] = []
@@ -299,7 +342,7 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                 rng_local = np.random.default_rng(settings.ga.seed + gen)
                 while len(next_gen_parents) < p and seeds:
                     base = seeds[int(len(next_gen_parents)) % len(seeds)]
-                    child = pop.mutate(base, all_signal_ids, rng_local)
+                    child = pop.mutate(base, all_signal_ids, rng_local, signals_df)
                     if child[1] and _dna(child) not in existing:
                         next_gen_parents.append({
                             "individual": child,
@@ -318,16 +361,55 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
 
             best_front = fronts[0] if fronts else []
             if best_front:
-                best_sortino = max((ind["objectives"][0] for ind in best_front), default=0.0)
-                best_expectancy = max((ind["objectives"][1] for ind in best_front), default=0.0)
-                pbar.set_postfix({
-                    "Sortino LB": f"{best_sortino:.2f}",
-                    "Expectancy": f"${best_expectancy:.2f}",
-                    "Front Size": len(best_front)
-                }, refresh=True)
+                # Determine indices for primary/secondary based on configured objectives
+                obj_keys = getattr(getattr(settings, 'ga', object()), 'objectives', None)
+                if not obj_keys or not isinstance(obj_keys, (list, tuple)):
+                    obj_keys = ["sharpe_lb", "expectancy", "support"]
+                primary_key = str(obj_keys[0]) if obj_keys else "sharpe_lb"
+                secondary_key = "expectancy" if "expectancy" in obj_keys else (obj_keys[1] if len(obj_keys) > 1 else None)
+                def _label_for_metric(k: str) -> str:
+                    if not k:
+                        return "Metric"
+                    if k.endswith("_lb"):
+                        base = k[:-3].replace("_", " ")
+                        return f"{base.title()} LB"
+                    return k.replace("_", " ").title()
+                idx_primary = 0
+                idx_secondary = 1 if len(obj_keys) > 1 else None
+                # Map indices by finding in obj_keys order
+                try:
+                    idx_primary = int(obj_keys.index(primary_key))
+                except Exception:
+                    idx_primary = 0
+                if secondary_key is not None:
+                    try:
+                        idx_secondary = int(obj_keys.index(secondary_key))
+                    except Exception:
+                        idx_secondary = None
+
+                best_primary_val = max((ind["objectives"][idx_primary] for ind in best_front), default=0.0)
+                out = { _label_for_metric(primary_key): f"{best_primary_val:.2f}", "Front Size": len(best_front) }
+                if idx_secondary is not None:
+                    best_secondary_val = max((ind["objectives"][idx_secondary] for ind in best_front), default=0.0)
+                    out[_label_for_metric(secondary_key)] = f"{best_secondary_val:.2f}"
+                pbar.set_postfix(out, refresh=True)
             else:
-                pbar.set_postfix({"Sortino LB": "0.00", "Expectancy": "$0.00", "Front Size": 0}, refresh=True)
+                # Empty front
+                prim_label = _label_for_metric(primary_key if 'primary_key' in locals() else 'Primary')
+                pbar.set_postfix({prim_label: "0.00", "Front Size": 0}, refresh=True)
             final_fronts = fronts
 
     tqdm.write("Evolution Complete.")
-    return final_fronts[0] if final_fronts else []
+    # Deduplicate the final Pareto front by DNA to avoid duplicate setups
+    if not final_fronts:
+        return []
+    best_front = final_fronts[0]
+    uniq_front: List[Dict] = []
+    seen_keys: Set[Tuple[str, Tuple[str, ...]]] = set()
+    for ind in best_front:
+        key = _dna(ind["individual"]) if isinstance(ind, dict) else None
+        if key is None or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        uniq_front.append(ind)
+    return uniq_front

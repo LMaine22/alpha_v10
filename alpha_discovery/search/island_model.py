@@ -53,11 +53,12 @@ class Island:
     """Represents a single island in the island model."""
     
     def __init__(self, island_id: int, population_size: int, 
-                 all_signal_ids: List[str], base_seed: int):
+                 all_signal_ids: List[str], base_seed: int, signals_df: Optional[pd.DataFrame] = None):
         self.island_id = island_id
         self.population_size = population_size
         self.all_signal_ids = all_signal_ids
         self.base_seed = base_seed
+        self.signals_df = signals_df
         
         # Island-specific RNG for reproducibility
         self.rng = np.random.default_rng(base_seed + island_id)
@@ -72,12 +73,12 @@ class Island:
         self.migration_received = 0
         
         # Initialize population
-        self._initialize_population()
+        self._initialize_population(signals_df)
     
-    def _initialize_population(self):
+    def _initialize_population(self, signals_df: Optional[pd.DataFrame] = None):
         """Initialize the island's population."""
         self.parent_population = pop.initialize_population(
-            self.rng, self.all_signal_ids, self.population_size
+            self.rng, self.all_signal_ids, signals_df, self.population_size
         )
         # Deduplicate
         self.parent_population = nsga._dedup_individuals(self.parent_population)
@@ -143,11 +144,11 @@ class Island:
             parent2 = self._tournament_selection()
             
             # Crossover
-            child = pop.crossover(parent1, parent2, self.rng)
+            child = pop.crossover(parent1, parent2, self.rng, self.signals_df)
             
             # Mutation
             if self.rng.random() < settings.ga.mutation_rate:
-                child = pop.mutate(child, self.all_signal_ids, self.rng)
+                child = pop.mutate(child, self.all_signal_ids, self.rng, self.signals_df)
             
             children.append(child)
         
@@ -335,7 +336,8 @@ class IslandManager:
                 island_id=i,
                 population_size=self.island_pop_size,
                 all_signal_ids=self.all_signal_ids,
-                base_seed=settings.ga.seed
+                base_seed=settings.ga.seed,
+                signals_df=self.signals_df
             )
             self.islands.append(island)
     
@@ -485,8 +487,21 @@ class IslandManager:
         # Collect all evaluated individuals from all islands
         all_individuals = self._get_all_evaluated_individuals()
         
-        # Apply final NSGA-II selection
-        fronts = nsga._non_dominated_sort(all_individuals)
+        # Apply final NSGA-II selection with deduplication guard
+        # Deduplicate combined pool first to prevent duplicate entries in fronts
+        uniq_pool: List[Dict] = []
+        seen_keys = set()
+        for ind in all_individuals:
+            try:
+                key = nsga._dna(ind['individual'])
+            except Exception:
+                key = None
+            if key is None or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            uniq_pool.append(ind)
+
+        fronts = nsga._non_dominated_sort(uniq_pool)
         
         # Select final survivors
         final_population = []
@@ -500,6 +515,17 @@ class IslandManager:
                 final_population.extend(front[:need])
                 break
         
+        # Final dedup pass to ensure uniqueness
+        out: List[Dict] = []
+        seen_final = set()
+        for ind in final_population:
+            k = nsga._dna(ind['individual'])
+            if k in seen_final:
+                continue
+            seen_final.add(k)
+            out.append(ind)
+        final_population = out
+
         return final_population
     
     def _get_all_evaluated_individuals(self) -> List[Dict]:
@@ -514,31 +540,66 @@ class IslandManager:
         if not self.config.log_island_metrics:
             return
         
-        # Get best Sortino and expectancy across all islands
-        best_sortino = -99.0
-        best_expectancy = -9999.0
+        # Determine configured objective labels
+        obj_keys = getattr(getattr(settings, 'ga', object()), 'objectives', None)
+        if not obj_keys or not isinstance(obj_keys, (list, tuple)):
+            obj_keys = ["sharpe_lb", "expectancy", "support"]
+
+        primary_key = str(obj_keys[0]) if obj_keys else "sharpe_lb"
+        secondary_key = "expectancy" if "expectancy" in obj_keys else (obj_keys[1] if len(obj_keys) > 1 else None)
+
+        def _label_for_metric(k: str) -> str:
+            if not k:
+                return "Metric"
+            if k.endswith("_lb"):
+                base = k[:-3].replace("_", " ")
+                return f"{base.title()} LB"
+            return k.replace("_", " ").title()
+
+        # Get best configured metrics across all islands
+        best_primary = float("-inf")
+        best_secondary = float("-inf")
         total_pop = 0
         
         for island in self.islands:
             total_pop += len(island.evaluated_parents)
             for ind in island.evaluated_parents:
                 metrics_dict = ind.get('metrics', {})
-                sortino = metrics_dict.get('sortino_lb', -99.0)
-                expectancy = metrics_dict.get('expectancy', -9999.0)
-                
-                # For Sortino: find the least negative (closest to zero) value
-                if sortino > best_sortino:
-                    best_sortino = sortino
-                # For expectancy: find the highest value
-                if expectancy > best_expectancy:
-                    best_expectancy = expectancy
+                pv = metrics_dict.get(primary_key)
+                if pv is not None:
+                    try:
+                        pv = float(pv)
+                        if pv > best_primary:
+                            best_primary = pv
+                    except Exception:
+                        pass
+                if secondary_key:
+                    sv = metrics_dict.get(secondary_key)
+                    if sv is not None:
+                        try:
+                            sv = float(sv)
+                            if sv > best_secondary:
+                                best_secondary = sv
+                        except Exception:
+                            pass
         
         # Print per-generation summary line
         from tqdm.auto import tqdm
-        tqdm.write(f"Gen {generation}/{settings.ga.generations} | "
-                  f"Best Sortino: {best_sortino:.3f} | "
-                  f"Best Expectancy: {best_expectancy:.1f} | "
-                  f"Total Pop: {total_pop}")
+        prim_label = _label_for_metric(primary_key)
+        if secondary_key:
+            sec_label = _label_for_metric(secondary_key)
+            tqdm.write(
+                f"Gen {generation}/{settings.ga.generations} | "
+                f"Best {prim_label}: {best_primary:.3f} | "
+                f"Best {sec_label}: {best_secondary:.3f} | "
+                f"Total Pop: {total_pop}"
+            )
+        else:
+            tqdm.write(
+                f"Gen {generation}/{settings.ga.generations} | "
+                f"Best {prim_label}: {best_primary:.3f} | "
+                f"Total Pop: {total_pop}"
+            )
         
         # Detailed island metrics (only if verbose)
         if settings.ga.verbose >= 3:

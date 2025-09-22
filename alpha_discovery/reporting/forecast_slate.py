@@ -1,0 +1,406 @@
+# alpha_discovery/reporting/forecast_slate.py
+"""
+Forecast slate generation for the new forecast-based evaluation system.
+Creates trade-ready fields and enforces Top-N and max-per-ticker caps.
+"""
+
+from __future__ import annotations
+import os
+import numpy as np
+import pandas as pd
+from typing import List, Dict, Optional, Any
+
+from ..config import settings
+from ..search.options_mapper import suggest_option_structure
+from . import display_utils as du
+
+
+def _ensure_dir(d: str) -> None:
+    """Ensure directory exists."""
+    os.makedirs(d, exist_ok=True)
+
+
+def _safe_get(d: Dict[str, Any], key: str, default: Any = None) -> Any:
+    """Safely get value from dictionary with default."""
+    try:
+        value = d.get(key, default)
+        # Handle NaN values
+        if isinstance(value, float) and np.isnan(value):
+            return default
+        return value
+    except Exception:
+        return default
+
+
+def _trade_ready_fields(edges: np.ndarray, probs: List[float], tail_cap: float = 0.12) -> Dict[str, float]:
+    """Compute E[move], P_up/down, and specific band masses from bands."""
+    e = np.asarray(edges, dtype=float)
+    p = np.asarray(probs, dtype=float)
+    
+    if e.size < 2 or p.size != e.size - 1:
+        return {
+            "E_move": np.nan, "P_up": np.nan, "P_down": np.nan,
+            "P_3to5": np.nan, "P_gt5": np.nan, "P_m5tom3": np.nan, "P_lt5": np.nan
+        }
+
+    lo = e[:-1]
+    hi = e[1:]
+    mids = (lo + hi) / 2.0
+    
+    # Handle open-ended tails for E_move calculation
+    left_open = np.isclose(lo, -999.0)
+    right_open = np.isclose(hi, 999.0)
+    mids[left_open] = -abs(tail_cap)
+    mids[right_open] = abs(tail_cap)
+
+    E_move = float(np.sum(mids * p))
+
+    # Correctly calculate P_up and P_down, handling the zero-straddling bin
+    p_up = 0.0
+    p_down = 0.0
+    
+    # Bins entirely on the positive side (lo >= 0, but we use > to avoid zero in straddle)
+    p_up += p[lo > 0].sum()
+    
+    # Bins entirely on the negative side
+    p_down += p[hi < 0].sum()
+    
+    # Bin straddling zero
+    straddle_mask = (lo < 0) & (hi > 0)
+    if np.any(straddle_mask):
+        straddle_prob = p[straddle_mask].sum()
+        straddle_lo = lo[straddle_mask][0]
+        straddle_hi = hi[straddle_mask][0]
+        
+        # Apportion probability based on linear interpolation (since bin is uniform)
+        if (straddle_hi - straddle_lo) > 0:
+            up_fraction = straddle_hi / (straddle_hi - straddle_lo)
+            p_up += straddle_prob * up_fraction
+            p_down += straddle_prob * (1.0 - up_fraction)
+
+    # Helper function for probability calculations
+    def _sum_mask(mask):
+        return float(p[mask].sum()) if np.any(mask) else 0.0
+
+    # Calculate probabilities of interest
+    P_3to5 = _sum_mask((np.isclose(lo, 0.03) & np.isclose(hi, 0.05)))
+    P_gt5 = _sum_mask(lo >= 0.05)
+    P_m5tom3 = _sum_mask((np.isclose(lo, -0.05) & np.isclose(hi, -0.03)))
+    P_lt5 = _sum_mask(hi <= -0.05)
+
+    return {
+        "E_move": E_move,
+        "P_up": p_up,
+        "P_down": p_down,
+        "P_3to5": P_3to5,
+        "P_gt5": P_gt5,
+        "P_m5tom3": P_m5tom3,
+        "P_lt5": P_lt5
+    }
+
+
+def _rank_score(metrics: Dict[str, Any]) -> float:
+    """Calculate composite rank score for sorting the slate."""
+    # Primary metrics (higher is better)
+    info_gain = _safe_get(metrics, "info_gain", 0.0)
+    w1_effect = _safe_get(metrics, "w1_effect", 0.0)
+    oos_te = _safe_get(metrics, "oos_te", 0.0)
+    
+    # CRPS (lower is better, so we invert it)
+    crps = _safe_get(metrics, "crps")
+    crps_score = 0.0
+    try:
+        crps_float = float(crps) if crps is not None else np.nan
+        if np.isfinite(crps_float):
+            crps_score = max(0.0, 0.2 - crps_float) * 5.0  # reward CRPS < 0.2
+    except (ValueError, TypeError):
+        crps_score = 0.0
+    
+    # Calibration (lower is better, so we invert it)
+    calib_mae = _safe_get(metrics, "calib_mae")
+    calib_score = 0.0
+    try:
+        calib_float = float(calib_mae) if calib_mae is not None else np.nan
+        if np.isfinite(calib_float):
+            calib_score = max(0.0, 0.1 - calib_float) * 10.0  # reward calib_mae < 0.1
+    except (ValueError, TypeError):
+        calib_score = 0.0
+    
+    # Support (higher is better, but with diminishing returns)
+    support_min = _safe_get(metrics, "support_min", 0)
+    support_score = min(1.0, support_min / 20.0)  # normalize to [0, 1] with cap at 20
+    
+    # Composite score
+    return float(info_gain + w1_effect + oos_te + crps_score + calib_score + support_score)
+
+
+def _apply_ticker_caps(df: pd.DataFrame, max_per_ticker: int) -> pd.DataFrame:
+    """Apply max-per-ticker caps to the dataframe."""
+    if max_per_ticker <= 0:
+        return df
+    
+    # Group by ticker and apply caps
+    capped_rows = []
+    for ticker, group in df.groupby("ticker"):
+        # Sort by rank_score within each ticker group
+        group_sorted = group.sort_values("rank_score", ascending=False)
+        # Take only the top max_per_ticker
+        capped_group = group_sorted.head(max_per_ticker)
+        capped_rows.append(capped_group)
+    
+    if capped_rows:
+        return pd.concat(capped_rows, ignore_index=True)
+    else:
+        return df
+
+
+def write_forecast_slate(
+    pareto_front: List[Dict], 
+    signals_meta: Optional[List[Dict]] = None,
+    run_dir: str = "runs"
+) -> str:
+    """
+    Create a human-friendly forecast slate with trade-ready fields and option structure suggestions.
+    
+    Args:
+        pareto_front: List of Pareto-optimal individuals with metrics
+        signals_meta: Optional metadata for signal name mapping
+        run_dir: Directory to write the CSV file
+        
+    Returns:
+        Path to the written CSV file
+    """
+    _ensure_dir(run_dir)
+    
+    # Build signal ID to label mapping
+    signal_meta_map = du.build_signal_meta_map(signals_meta)
+    
+    # Prepare rows for slate
+    rows = []
+    
+    for individual in pareto_front:
+        metrics = individual.get("metrics", {}) or {}
+        ticker, signal_ids = individual.get("individual", (None, []))
+        
+        # Create human-readable setup description, using pre-computed one if available
+        setup_desc = metrics.get("setup_desc")
+        if not setup_desc:
+            # Fallback for older data or if description was missed
+            setup_desc = du.desc_from_meta(signal_ids, signal_meta_map)
+            if not setup_desc:
+                setup_desc = du.format_setup_description(individual)
+        
+        # Extract band information
+        band_edges = np.array(metrics.get("band_edges") or [], dtype=float)
+        band_probs = list(metrics.get("band_probs") or [])
+        
+        # Calculate trade-ready fields
+        trade_fields = _trade_ready_fields(band_edges, band_probs, tail_cap=0.12)
+        
+        # Calculate rank score
+        rank_score = _rank_score(metrics)
+        
+        # Get suggested option structure
+        band_edges = np.array(metrics.get("band_edges") or [], dtype=float)
+        band_probs = list(metrics.get("band_probs") or [])
+        suggested_structure = suggest_option_structure(band_edges, band_probs)
+        
+        row = {
+            # Basic identification
+            "ticker": ticker or "",
+            "signals": "|".join(signal_ids),
+            "setup_desc": setup_desc,
+            "first_trigger": pd.to_datetime(_safe_get(metrics, "first_trigger")).strftime('%Y-%m-%d') if _safe_get(metrics, "first_trigger") else "",
+            "last_trigger": pd.to_datetime(_safe_get(metrics, "last_trigger")).strftime('%Y-%m-%d') if _safe_get(metrics, "last_trigger") else "",
+            "rank_score": rank_score,
+            "suggested_structure": suggested_structure,
+        }
+        
+        # Dynamically add all numerical metrics from the individual's metric dict
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                row[key] = value
+        
+        # Add trade-ready fields (can overwrite if keys collide, which is fine)
+        row.update({
+            "E_move": trade_fields["E_move"],
+            "P_up": trade_fields["P_up"],
+            "P_down": trade_fields["P_down"],
+            "P(3-5%)": trade_fields["P_3to5"],
+            "P(>5%)": trade_fields["P_gt5"],
+            "P(-5%,-3%)": trade_fields["P_m5tom3"],
+            "P(<-5%)": trade_fields["P_lt5"],
+        })
+        
+        rows.append(row)
+    
+    # Create DataFrame
+    df = pd.DataFrame(rows)
+    
+    if df.empty:
+        print("Warning: No individuals in Pareto front to write to slate")
+        return ""
+    
+    # Apply max-per-ticker caps
+    max_per_ticker = settings.reporting.slate_max_per_ticker
+    df = _apply_ticker_caps(df, max_per_ticker)
+    
+    # Sort by rank score
+    df = df.sort_values(["rank_score", "info_gain", "w1_effect"], ascending=False)
+    
+    # Apply Top-N cap
+    top_n = settings.reporting.slate_top_n
+    if top_n > 0:
+        df = df.head(top_n)
+    
+    # Format percentage columns
+    pct_cols = ["P_up", "P_down", "P(3-5%)", "P(>5%)", "P(-5%,-3%)", "P(<-5%)"]
+    for col in pct_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+
+    # Write forecast slate CSV
+    slate_path = os.path.join(run_dir, "forecast_slate.csv")
+    df.to_csv(slate_path, index=False, float_format="%.4f")
+    
+    print(f"Wrote forecast slate with {len(df)} individuals to: {slate_path}")
+    
+    # Write ticker coverage summary
+    _write_ticker_coverage(df, run_dir)
+    
+    return slate_path
+
+
+def _write_ticker_coverage(df: pd.DataFrame, run_dir: str) -> None:
+    """Write ticker coverage summary CSV."""
+    if df.empty:
+        return
+    
+    coverage = (
+        df.groupby("ticker")
+        .agg(
+            rows=("ticker", "count"),
+            med_support=("support_min", "median"),
+            med_ig=("info_gain", "median"),
+            med_w1=("w1_effect", "median"),
+            med_rank=("rank_score", "median")
+        )
+        .reset_index()
+        .sort_values("rows", ascending=False)
+    )
+    
+    coverage_path = os.path.join(run_dir, "ticker_coverage.csv")
+    coverage.to_csv(coverage_path, index=False)
+    
+    print(f"Wrote ticker coverage summary to: {coverage_path}")
+
+
+def write_forecast_slate_v2(
+    pareto_front: List[Dict], 
+    signals_meta: Optional[List[Dict]] = None,
+    run_dir: str = "runs"
+) -> str:
+    """
+    Alternative version of forecast slate with additional metrics and formatting.
+    This version includes more detailed regime and robustness information.
+    """
+    _ensure_dir(run_dir)
+    
+    # Build signal ID to label mapping
+    signal_meta_map = du.build_signal_meta_map(signals_meta)
+    
+    # Prepare rows for slate
+    rows = []
+    
+    for individual in pareto_front:
+        metrics = individual.get("metrics", {}) or {}
+        ticker, signal_ids = individual.get("individual", (None, []))
+        signal_ids = signal_ids or []
+        
+        # Create human-readable setup description, using pre-computed one if available
+        setup_desc = metrics.get("setup_desc")
+        if not setup_desc:
+            # Fallback for older data or if description was missed
+            setup_desc = du.desc_from_meta(signal_ids, signal_meta_map)
+            if not setup_desc:
+                setup_desc = du.format_setup_description(individual)
+        
+        # Extract band information
+        band_edges = np.array(metrics.get("band_edges") or [], dtype=float)
+        band_probs = list(metrics.get("band_probs") or [])
+        
+        # Calculate trade-ready fields
+        trade_fields = _trade_ready_fields(band_edges, band_probs, tail_cap=0.12)
+        
+        # Calculate rank score
+        rank_score = _rank_score(metrics)
+        
+        # Get suggested option structure
+        band_edges = np.array(metrics.get("band_edges") or [], dtype=float)
+        band_probs = list(metrics.get("band_probs") or [])
+        suggested_structure = suggest_option_structure(band_edges, band_probs)
+        
+        row = {
+            # Basic identification
+            "ticker": ticker or "",
+            "signals": "|".join(signal_ids),
+            "setup_desc": setup_desc,
+            "first_trigger": pd.to_datetime(_safe_get(metrics, "first_trigger")).strftime('%Y-%m-%d') if _safe_get(metrics, "first_trigger") else "",
+            "last_trigger": pd.to_datetime(_safe_get(metrics, "last_trigger")).strftime('%Y-%m-%d') if _safe_get(metrics, "last_trigger") else "",
+            "rank_score": rank_score,
+            "suggested_structure": suggested_structure,
+        }
+
+        # Dynamically add all numerical metrics from the individual's metric dict
+        for key, value in metrics.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                row[key] = value
+
+        # Add trade-ready fields (can overwrite if keys collide, which is fine)
+        row.update({
+            "E_move": trade_fields["E_move"],
+            "P_up": trade_fields["P_up"],
+            "P_down": trade_fields["P_down"],
+            "P(3-5%)": trade_fields["P_3to5"],
+            "P(>5%)": trade_fields["P_gt5"],
+            "P(-5%,-3%)": trade_fields["P_m5tom3"],
+            "P(<-5%)": trade_fields["P_lt5"],
+        })
+        
+        rows.append(row)
+    
+    # Create DataFrame
+    df = pd.DataFrame(rows)
+    
+    if df.empty:
+        print("Warning: No individuals in Pareto front to write to slate v2")
+        return ""
+    
+    # Apply max-per-ticker caps
+    max_per_ticker = settings.reporting.slate_max_per_ticker
+    df = _apply_ticker_caps(df, max_per_ticker)
+    
+    # Sort by rank score
+    df = df.sort_values(["rank_score", "info_gain", "w1_effect"], ascending=False)
+    
+    # Apply Top-N cap
+    top_n = settings.reporting.slate_top_n
+    if top_n > 0:
+        df = df.head(top_n)
+    
+    # Format percentage columns
+    pct_cols = ["P_up", "P_down", "P(3-5%)", "P(>5%)", "P(-5%,-3%)", "P(<-5%)"]
+    for col in pct_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce').apply(lambda x: f"{x:.2%}" if pd.notna(x) else "")
+
+    # Write forecast slate CSV
+    slate_path = os.path.join(run_dir, "forecast_slatev2.csv")
+    df.to_csv(slate_path, index=False, float_format="%.4f")
+    
+    print(f"Wrote forecast slate v2 with {len(df)} individuals to: {slate_path}")
+    
+    # Write ticker coverage summary
+    _write_ticker_coverage(df, run_dir)
+    
+    return slate_path

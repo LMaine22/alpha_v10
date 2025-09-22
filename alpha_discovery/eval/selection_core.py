@@ -15,6 +15,7 @@ import pandas as pd
 from ..config import settings
 from . import metrics as M
 import warnings
+
 warnings.filterwarnings(
     "ignore",
     category=FutureWarning,
@@ -87,57 +88,105 @@ def _daily_returns_for_pair(ledger: pd.DataFrame, ticker: str, horizon: int) -> 
     return s
 
 
-def _compute_metrics_from_returns(daily_returns: pd.Series) -> Dict[str, float]:
+def _calculate_full_metrics_suite(
+    daily_returns: pd.Series,
+    forecast_probs: np.ndarray,
+    band_edges: np.ndarray
+) -> Dict[str, float]:
     """
-    Compute metrics consistent with eval.metrics, but starting
-    from a daily returns series rather than a trade_ledger.
+    Run the full suite of new metrics and return a flattened dictionary.
     """
     if daily_returns is None or daily_returns.empty:
         return {}
 
-    # Winsorize for robustness (using reporting.trimmed_alpha)
+    metrics = {}
+    
+    # Distributional
+    metrics["crps"] = M.crps(forecast_probs, daily_returns.values, band_edges)
+    metrics["calib_mae"] = M.calibration_mae(forecast_probs, daily_returns.values, band_edges)
+    metrics["w1_dist"] = M.wasserstein1(forecast_probs, daily_returns.values, band_edges)
+
+    # Info Theory
+    metrics["info_gain"] = M.info_gain(forecast_probs, daily_returns.values, band_edges)
+    
+    # Dynamics & Complexity
+    dfa_val = M.dfa_alpha(daily_returns)
+    metrics["dfa_alpha"] = dfa_val
+    metrics["dfa_alpha_closeness"] = abs(dfa_val - settings.forecast.dfa_alpha_target) if np.isfinite(dfa_val) else np.nan
+    
+    comp_idx_result = M.complexity_index(daily_returns, config={"dfa_alpha": dfa_val})
+    metrics.update({k: v for k, v in comp_idx_result.items() if k != 'index'}) # Add components
+    metrics["complexity_index"] = comp_idx_result.get("index")
+
+    # TDA (H0 on returns)
+    points = daily_returns.values.reshape(-1, 1)
+    if points.shape[0] > 2:
+        ph0 = M.persistent_homology_h0(points)
+        metrics["h0_total_persistence"] = np.sum(ph0[:, 1] - ph0[:, 0])
+        metrics["h0_max_lifetime"] = np.max(ph0[:, 1] - ph0[:, 0]) if ph0.size > 0 else 0.0
+
+    # Robustness (CV on returns)
+    tscv = M.tscv_robustness(lambda x: x.mean(), data=daily_returns.values, n_splits=5)
+    metrics["tscv_robustness_mean"] = tscv["mean"]
+    metrics["tscv_robustness_std"] = tscv["std"]
+    metrics["tscv_robustness_cov"] = tscv["cov"]
+    
+    # Regimes
+    regime_results = M.detect_regimes(daily_returns.values)
+    states = regime_results.get("states")
+    if states is not None:
+        per_regime = M.regime_metrics(states, daily_returns.values, forecast_probs, band_edges)
+        for k, regime_mets in per_regime.items():
+            for mkey, mval in regime_mets.items():
+                metrics[f"regime_{k}_{mkey}"] = mval
+        
+        worst_crps = M.worst_regime(per_regime, key="crps")
+        metrics["worst_regime_crps"] = worst_crps.get("value")
+        worst_calib = M.worst_regime(per_regime, key="cal_mae")
+        metrics["worst_regime_calib"] = worst_calib.get("value")
+
+    # Add negative versions for minimization objectives in GA
+    for key in ["crps", "calib_mae", "w1_dist", "complexity_index", "tscv_robustness_cov", "dfa_alpha_closeness", "worst_regime_crps", "worst_regime_calib"]:
+        if key in metrics and np.isfinite(metrics[key]):
+            metrics[f"{key}_neg"] = -metrics[key]
+
+    return {k: (v if np.isfinite(v) else 0.0) for k, v in metrics.items()}
+
+
+def _compute_metrics_from_returns(daily_returns: pd.Series, forecast_probs: np.ndarray = None, band_edges: np.ndarray = None) -> Dict[str, float]:
+    """
+    Compute metrics consistent with eval.metrics, now using the full suite.
+    """
+    if daily_returns is None or daily_returns.empty:
+        return {}
+    
+    # Fallback for old calls that don't pass forecast data
+    if forecast_probs is None:
+        forecast_probs = np.ones(len(settings.forecast.band_edges) - 1) / (len(settings.forecast.band_edges) - 1)
+    if band_edges is None:
+        band_edges = np.array(settings.forecast.band_edges)
+
+    # Legacy metrics for compatibility if needed by old selection logic
     alpha = float(getattr(settings.reporting, "trimmed_alpha", 0.05))
-    alpha = min(max(alpha, 0.0), 0.2)  # clamp
     cleaned = M.winsorize(daily_returns, lower_q=alpha, upper_q=1.0 - alpha)
     if cleaned.empty:
         return {}
-
-    # Support = number of daily observations (pre-winsorize count)
-    support = float(len(daily_returns))
-
-    sharpe_stats = M.block_bootstrap_sharpe(cleaned)  # returns dict with sharpe_median/lb/ub
-    omega = M.calculate_omega_ratio(cleaned)
-    max_dd = M.calculate_max_drawdown(cleaned)
-
-    # Annualized return if sufficient length (robust)
-    min_days_for_annualization = 126
-    if len(cleaned) >= min_days_for_annualization:
-        one_plus = 1.0 + cleaned
-        if (one_plus > 0).all():
-            # geometric mean via log returns (safe, no invalid power)
-            log_mean = np.log1p(cleaned).mean() * 252.0
-            # Clip to prevent overflow in exp operation
-            log_mean_clipped = np.clip(log_mean, -20, 20)
-            annualized_return = float(np.exp(log_mean_clipped) - 1.0)
-        else:
-            # fallback: arithmetic scaling if any (1+r_t) <= 0
-            annualized_return = float(cleaned.mean() * 252.0)
-    else:
-        annualized_return = 0.0
-
-    out = {
-        "support": support,
-        "annualized_return": float(annualized_return),
-        "volatility": float(cleaned.std() * np.sqrt(252.0)),
-        "max_drawdown": float(max_dd),
-        "omega_ratio": float(omega),
-        "mean_return": float(cleaned.mean()),
-        "median_return": float(cleaned.median()),
+    
+    legacy_metrics = {
+        "support": float(len(daily_returns)),
+        "sharpe_lb": M.block_bootstrap_sharpe(cleaned).get("sharpe_lb", 0.0),
+        "omega_ratio": M.calculate_omega_ratio(cleaned),
+        "max_drawdown": M.calculate_max_drawdown(cleaned),
     }
-    out.update({k: float(v) for k, v in sharpe_stats.items()})  # sharpe_median, sharpe_lb, sharpe_ub
 
+    # New full suite of metrics
+    full_metrics = _calculate_full_metrics_suite(daily_returns, forecast_probs, band_edges)
+
+    # Combine
+    combined = {**legacy_metrics, **full_metrics}
+    
     # Replace NaNs/infs defensively
-    return {k: (0.0 if (v is None or not np.isfinite(v)) else float(v)) for k, v in out.items()}
+    return {k: (0.0 if (v is None or not np.isfinite(v)) else float(v)) for k, v in combined.items()}
 
 
 def _metric_key(metrics: Dict[str, float], name: str) -> float:
@@ -223,15 +272,21 @@ def _precompute_candidate_series(full_ledger: pd.DataFrame,
 # Public API
 # =========================
 
-def score_ticker_horizon(ledger: pd.DataFrame, ticker: str, horizon: int) -> Dict[str, float]:
+def score_ticker_horizon(ledger: pd.DataFrame, ticker: str, horizon: int, forecast_data: Optional[Dict] = None) -> Dict[str, float]:
     """Score a single (ticker, horizon) pair."""
     returns = _daily_returns_for_pair(ledger, ticker, horizon)
-    return _compute_metrics_from_returns(returns)
+    
+    # Extract forecast data if available
+    forecast_probs = forecast_data.get("probs") if forecast_data else None
+    band_edges = forecast_data.get("edges") if forecast_data else None
+
+    return _compute_metrics_from_returns(returns, forecast_probs, band_edges)
 
 
 def select_best_horizon_per_ticker(
     ledger: pd.DataFrame,
     min_support_per_ticker: Optional[int] = None,
+    forecasts: Optional[Dict] = None, # Pass full forecast dict here
 ) -> List[TickerBest]:
     """Pick best horizon per ticker by primary metric with tie-breakers and gates."""
     if ledger is None or ledger.empty:
@@ -257,7 +312,9 @@ def select_best_horizon_per_ticker(
         best_choice: Optional[TickerBest] = None
 
         for h in horizons:
-            m = score_ticker_horizon(ledger, tk, h)
+            # Pass the specific forecast for this ticker/horizon if available
+            forecast_data = forecasts.get(tk, {}).get(h) if forecasts else None
+            m = score_ticker_horizon(ledger, tk, h, forecast_data=forecast_data)
             if not m:
                 continue
             if m.get("support", 0.0) < float(min_support_per_ticker):

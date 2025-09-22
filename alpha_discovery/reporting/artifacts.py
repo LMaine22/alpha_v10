@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Iterable
 
 import pandas as pd
 from datetime import datetime
 
 from ..config import Settings  # do not import global settings here
+from . import display_utils as du
+from ..core.splits import HybridSplits
+from .diagnostics import write_split_audit
+from .pareto_csv import write_pareto_csv
+from .forecast_slate import write_forecast_slate
+from ..eval.regime import RegimeModel
 
 
 # ------------ run directory helpers ------------
@@ -95,101 +102,7 @@ def _align_to_reference(df: pd.DataFrame, ref_cols: Optional[List[str]]) -> pd.D
 
 # ------------ presentation helpers ------------
 
-def _format_setup_description(sol: Dict[str, Any]) -> str:
-    """
-    Fallback: derive a one-line description from `setup` (list/dicts) or `signals`.
-    """
-    desc = (sol.get("description") or "").strip()
-    if desc:
-        return desc
-
-    # Handle new (ticker, [signals]) DNA
-    setup_items = sol.get("individual", sol.get("setup"))
-    if isinstance(setup_items, tuple) and len(setup_items) == 2:
-        _, setup_signal_items = setup_items
-    else:
-        setup_signal_items = setup_items or sol.get("signals") or []
-
-    parts: List[str] = []
-    for item in setup_signal_items:
-        if isinstance(item, dict):
-            label = item.get("label") or item.get("name") or item.get("id") or str(item)
-            op = item.get("op") or item.get("operator")
-            parts.append(f"{label} {op}".strip() if op else str(label))
-        else:
-            parts.append(str(item))
-    return " AND ".join(p for p in parts if p)
-
-
-def _build_signal_meta_map(signals_metadata: Optional[Iterable[Dict[str, Any]]]) -> Dict[str, Dict[str, Any]]:
-    """
-    Build a metadata lookup map keyed by multiple possible identifiers for robustness.
-    """
-    meta_map: Dict[str, Dict[str, Any]] = {}
-    if not signals_metadata:
-        return meta_map
-    for m in signals_metadata:
-        if not isinstance(m, dict):
-            continue
-        for key_field in ("signal_id", "id", "name"):
-            v = m.get(key_field)
-            if v is not None:
-                meta_map[str(v)] = m
-    return meta_map
-
-
-def _extract_signal_id_token(item: Any) -> str:
-    """
-    Given a setup item (string or dict), return the best-guess identifier string.
-    """
-    if isinstance(item, dict):
-        for k in ("signal_id", "id", "name", "label"):
-            if item.get(k) is not None:
-                return str(item[k])
-        return str(item)
-    return str(item)
-
-
-def _desc_from_meta(setup_items: Any, meta_map: Dict[str, Dict[str, Any]]) -> str:
-    """
-    Build a one-line description from signal metadata.
-    """
-    if isinstance(setup_items, (list, tuple)):
-        it = setup_items
-    elif setup_items is None:
-        it = []
-    else:
-        it = [setup_items]
-
-    parts: List[str] = []
-    for s in it:
-        key = _extract_signal_id_token(s)
-        meta = meta_map.get(key, {})
-        desc = (meta.get("description") or "").strip()
-        if not desc:
-            label = meta.get("label") or meta.get("name") or meta.get("id") or key
-            op = None
-            if isinstance(s, dict):
-                op = s.get("operator") or s.get("op")
-            if not op:
-                op = meta.get("operator") or meta.get("op")
-            desc = f"{label} {op}".strip() if op else str(label)
-        parts.append(desc)
-    return " AND ".join(p for p in parts if p)
-
-
-def _signal_ids_str(setup_items: Any) -> str:
-    """
-    Canonical comma-separated list of signal identifiers for CSV.
-    """
-    if isinstance(setup_items, (list, tuple)):
-        # Sort signals to match setup_id ordering for consistency
-        signal_ids = [_extract_signal_id_token(x) for x in setup_items]
-        return ", ".join(sorted(signal_ids))
-    if setup_items is None:
-        return ""
-    return _extract_signal_id_token(setup_items)
-
+# All presentation helpers moved to display_utils.py
 
 # ------------ per-fold TRAIN artifact writers ------------
 
@@ -262,6 +175,7 @@ def _format_date(dt: Any) -> str:
 
 
 def _settings_to_json(settings_model: Settings) -> str:
+    """Safely dump pydantic settings to JSON."""
     if hasattr(settings_model, "model_dump_json"):
         return settings_model.model_dump_json(indent=4)
     return settings_model.json(indent=4)
@@ -326,195 +240,81 @@ def _compound_total_return(daily_returns: pd.Series) -> float:
 
 # ------------ main saver (TRAIN-only artifacts) ------------
 
+def _df_to_individual_list(df: pd.DataFrame) -> list[Dict[str, Any]]:
+    rows = []
+    for _, r in df.iterrows():
+        try:
+            individual = eval(r['individual'])
+        except Exception:
+            continue
+        metrics = r.to_dict()
+        rows.append({"individual": individual, "metrics": metrics})
+    return rows
+
 def save_results(
-        all_fold_results: List[Dict[str, Any]],
-        signals_metadata: List[Dict[str, Any]],
-        settings: Settings,
-        output_dir: Optional[str] = None,
+    final_results_df: pd.DataFrame,
+    signals_metadata: List[Dict[str, Any]],
+    run_dir: str,
+    splits: HybridSplits,
+    settings: Settings,
+    regime_model: Optional[RegimeModel] = None
 ) -> None:
     """
-    Persist TRAIN results of a run, correctly handling the new specialized DNA.
+    Main entry point for saving all run artifacts.
+    This orchestrates calls to specialized writers for each artifact.
     """
-    if not all_fold_results:
-        print("No solutions were found in any fold. Nothing to save.")
-        return
+    print("\n--- Saving All Run Artifacts ---")
+    _ensure_dir(run_dir)
 
-    print("\n--- Saving In-Sample Training Results ---")
-
-    if output_dir is None:
-        output_dir = _ensure_run_dir(base="runs")
-    else:
-        _ensure_dir(output_dir)
-
-    config_path: str = os.path.join(output_dir, 'config.json')
+    # 1. Save config and split audit
+    config_path = os.path.join(run_dir, 'config.json')
     with open(config_path, 'w') as f:
         f.write(_settings_to_json(settings))
     print(f"Configuration saved to: {config_path}")
-
-    signal_meta_map = _build_signal_meta_map(signals_metadata)
-
-    summary_rows: List[Dict[str, Any]] = []
-    all_trade_ledgers: List[pd.DataFrame] = []
-
-    print("Generating final reports from winning setups across all folds (TRAIN-only)...")
-
-    for i, solution in enumerate(all_fold_results):
-        # --- DEFINITIVE FIX for <null> values and key mismatches ---
-        dna = solution.get('individual') or solution.get('setup', (None, []))
-        if isinstance(dna, tuple) and len(dna) == 2:
-            specialized_ticker, setup_signal_items = dna
-        else:
-            specialized_ticker = 'UNKNOWN'
-            setup_signal_items = []
-
-        # Create unique SETUP_XXXX format matching the new system
-        try:
-            if setup_signal_items:
-                # Generate unique setup ID based on ticker and signals combination
-                key = (specialized_ticker, tuple(sorted(setup_signal_items)))
-                if not hasattr(save_results, '_setup_counter'):
-                    save_results._setup_counter = 0
-                    save_results._setup_id_map = {}
-                
-                if key not in save_results._setup_id_map:
-                    save_results._setup_counter += 1
-                    save_results._setup_id_map[key] = f"SETUP_{save_results._setup_counter:04d}"
-                
-                setup_id = save_results._setup_id_map[key]
-            else:
-                setup_id = f"SETUP_{i:04d}"
-        except Exception:
-            setup_id = f"SETUP_{i:04d}"
-
-        direction = solution.get('direction', 'N/A')
-        # --- END FIX ---
-
-        fold_num = solution.get('fold', 0)
-        rank = solution.get('rank', None)
-
-        sig_str = _signal_ids_str(setup_signal_items)
-        desc = _desc_from_meta(setup_signal_items, signal_meta_map)
-        if not desc:
-            desc = _format_setup_description(solution)
-
-        perf_metrics = solution.get('metrics', {}) or {}
-
-        ledger = solution.get('trade_ledger', pd.DataFrame())
-
-        if isinstance(ledger, pd.DataFrame) and not ledger.empty:
-            ledger_with_id = ledger.copy()
-            ledger_with_id['fold'] = fold_num
-            ledger_with_id['solution_rank'] = rank
-            ledger_with_id['setup_id'] = setup_id
-
-            trades_count = int(len(ledger_with_id))
-            sum_capital_allocated = float(
-                pd.to_numeric(ledger_with_id.get('capital_allocated', 0), errors="coerce").fillna(0).sum())
-            sum_pnl_dollars = float(
-                pd.to_numeric(ledger_with_id.get('pnl_dollars', 0), errors="coerce").fillna(0).sum())
-
-            daily_returns = _portfolio_daily_returns_from_ledger(ledger_with_id, settings)
-            nav_total_return_pct = _compound_total_return(daily_returns)
-
-            first_dt = _format_date(ledger_with_id['trigger_date'].min())
-            last_dt = _format_date(ledger_with_id['trigger_date'].max())
-
-            # Using original 'best_performing_ticker' calculation logic from your file
-            try:
-                best_tkr_series = ledger_with_id.groupby('ticker')['pnl_pct'].mean()
-                # Since this is specialized, there's only one ticker, but this is robust
-                best_performing_ticker = best_tkr_series.idxmax() if not best_tkr_series.empty else specialized_ticker
-            except Exception:
-                best_performing_ticker = specialized_ticker
-
-            flat_record = {
-                'setup_id': setup_id,
-                'fold': fold_num,
-                'rank': rank,
-                'specialized_ticker': specialized_ticker,
-                'direction': direction,  # <<< CORRECTED KEY
-                'best_performing_ticker': best_performing_ticker,
-                'first_trigger_date': first_dt,
-                'last_trigger_date': last_dt,
-                'trades_count': trades_count,
-                'sum_capital_allocated': sum_capital_allocated,
-                'sum_pnl_dollars': sum_pnl_dollars,
-                'nav_total_return_pct': nav_total_return_pct,
-                'final_nav': float(_get_base_portfolio_capital(settings) * (1.0 + nav_total_return_pct)),
-                'description': desc,
-                'signal_ids': sig_str,
-                **perf_metrics
-            }
-            summary_rows.append(flat_record)
-            all_trade_ledgers.append(ledger_with_id)
-
-        else:  # Handle case where there is no ledger
-            flat_record = {
-                'setup_id': setup_id,
-                'fold': fold_num,
-                'rank': rank,
-                'specialized_ticker': specialized_ticker,
-                'direction': direction,  # <<< CORRECTED KEY
-                'best_performing_ticker': specialized_ticker,
-                'first_trigger_date': '',
-                'last_trigger_date': '',
-                'trades_count': 0,
-                'sum_capital_allocated': 0.0,
-                'sum_pnl_dollars': 0.0,
-                'nav_total_return_pct': 0.0,
-                'final_nav': float(_get_base_portfolio_capital(settings)),
-                'description': desc,
-                'signal_ids': sig_str,
-                **perf_metrics
-            }
-            summary_rows.append(flat_record)
-
-    summary_df = pd.DataFrame(summary_rows)
-
-    ordered_cols = [
-        'setup_id', 'fold', 'rank', 'specialized_ticker', 'direction', 'description',
-        'signal_ids', 'sortino_lb', 'expectancy', 'support', 'sharpe_lb', 'omega_ratio',
-        'max_drawdown', 'trades_count', 'sum_pnl_dollars', 'nav_total_return_pct', 'final_nav',
-        'first_trigger_date', 'last_trigger_date', 'best_performing_ticker'
-    ]
-
-    existing_cols = [c for c in ordered_cols if c in summary_df.columns]
-    remaining_cols = sorted([c for c in summary_df.columns if c not in existing_cols])
-    summary_df = summary_df[existing_cols + remaining_cols]
-
-    if 'nav_total_return_pct' in summary_df.columns:
-        summary_df['nav_total_return_pct'] = (
-                pd.to_numeric(summary_df['nav_total_return_pct'], errors="coerce").fillna(0.0) * 100.0
-        ).round(2).map(lambda x: f"{x:.2f} %")
-
-    # Create pareto directory
-    pareto_dir = os.path.join(output_dir, 'pareto')
-    _ensure_dir(pareto_dir)
     
-    summary_path: str = os.path.join(pareto_dir, 'pareto_front_summary.csv')
-    summary_df.to_csv(summary_path, index=False, float_format='%.4f')
-    print(f"Enriched summary saved to: {summary_path}")
+    write_split_audit(splits, run_dir)
+    
+    # Add human-readable description
+    meta_map = du.build_signal_meta_map(signals_metadata)
+    def get_desc(row):
+        try:
+            _, signals = eval(row['individual'])
+            return du.desc_from_meta(signals, meta_map)
+        except: return "Invalid setup"
+    final_results_df['description'] = final_results_df.apply(get_desc, axis=1)
 
-    if all_trade_ledgers:
-        full_trade_ledger_df = pd.concat(all_trade_ledgers, ignore_index=True)
+    # Save the main ELV-scored Pareto front
+    final_results_df['individual'] = final_results_df['individual'].astype(str)
+    pareto_path = os.path.join(run_dir, "pareto_front_elv.csv")
+    final_results_df.to_csv(pareto_path, index=False, float_format='%.4f')
+    print(f"ELV-scored Pareto front saved to: {pareto_path}")
 
-        ledger_order = [
-            "setup_id", "fold", "solution_rank",
-            "trigger_date", "exit_date",
-            "ticker", "horizon_days", "direction", "exit_policy_id", "exit_reason",
-            "strike", "entry_underlying", "exit_underlying",
-            "entry_iv", "exit_iv",
-            "entry_option_price", "exit_option_price",
-            "contracts", "capital_allocated", "capital_allocated_used",
-            "pnl_dollars", "pnl_pct",
-        ]
-        existing_ledger_cols = [c for c in ledger_order if c in full_trade_ledger_df.columns]
-        remaining_cols = [c for c in full_trade_ledger_df.columns if c not in existing_ledger_cols]
-        full_trade_ledger_df = full_trade_ledger_df.reindex(columns=existing_ledger_cols + remaining_cols)
+    # Save the Forecast Slate
+    pf_list = _df_to_individual_list(final_results_df)
+    write_forecast_slate(pf_list, signals_metadata, run_dir)
+    
+    # Save Regime Diagnostics
+    if regime_model:
+        write_regime_artifacts(regime_model, run_dir)
 
-        ledger_path: str = os.path.join(pareto_dir, 'pareto_front_trade_ledger.csv')
-        full_trade_ledger_df.to_csv(ledger_path, index=False, float_format='%.6f')
-        print(f"Full options trade ledger saved to: {ledger_path}")
-    else:
-        print("No trade ledgers found to save.")
+
+def write_regime_artifacts(regime_model: RegimeModel, run_dir: str):
+    """Saves the regime model parameters and summary to disk."""
+    diag_dir = os.path.join(run_dir, "diagnostics", "regimes")
+    os.makedirs(diag_dir, exist_ok=True)
+    
+    # Save model params to JSON
+    meta = {
+        "anchor_model_id": regime_model.anchor_model_id,
+        "n_regimes": regime_model.n_regimes,
+        "features_used": regime_model.features_used,
+        "means": regime_model.original_means.tolist(),
+        "covariances": regime_model.model.covars_.tolist(),
+        "scaler_mean": regime_model.scaler.mean_.tolist(),
+        "scaler_scale": regime_model.scaler.scale_.tolist()
+    }
+    with open(os.path.join(diag_dir, "regime_model.json"), 'w') as f:
+        json.dump(meta, f, indent=4)
+        
+    print(f"Regime model artifacts saved to: {diag_dir}")
 
