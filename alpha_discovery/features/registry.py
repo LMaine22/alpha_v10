@@ -2,10 +2,15 @@
 import numpy as np
 import pandas as pd
 from typing import Dict, Callable, List, Tuple
+from functools import lru_cache
+from joblib import Parallel, delayed, Memory
 
 from ..config import settings
 from . import core as f
 from ..data.events import build_event_features  # daily EV_* features from your events.py
+
+# Setup caching
+memory = Memory(location='./cache', verbose=0)
 
 
 # ----------------------
@@ -304,10 +309,15 @@ def _partial_correlation(df: pd.DataFrame, asset: str, bench: str, window: int) 
 # ----------------------
 # Event bundle / interactions
 # ----------------------
+@memory.cache
+def _cached_build_event_features():
+    """Cached version of build_event_features to avoid recomputation."""
+    return build_event_features()
+
 def _ev_bundle(index_like) -> pd.DataFrame:
     EV = None
     try:
-        EV = build_event_features()
+        EV = _cached_build_event_features()
     except Exception as e:
         # do NOT hide the error — surface it loudly
         print(f"[events] ERROR: {e}")
@@ -335,11 +345,43 @@ EV_INTERACT: Dict[str, Callable[[pd.DataFrame, pd.DataFrame, str], pd.Series]] =
 }
 
 
+def _compute_single_asset_features(ticker: str, df: pd.DataFrame, feature_specs: Dict) -> Dict[str, pd.Series]:
+    """Compute all features for a single asset - parallelized."""
+    feats = {}
+    for name, fn in feature_specs.items():
+        col = f"{ticker}_{name}"
+        try:
+            s = pd.to_numeric(fn(df, ticker), errors="coerce").shift(1)
+            feats[col] = s
+        except Exception as e:
+            print(f"[feat warn] {col}: {e}")
+    return feats
+
+def _compute_pairwise_features(ticker: str, bench: str, df: pd.DataFrame, pair_specs: Dict) -> Dict[str, pd.Series]:
+    """Compute pairwise features for a single asset - parallelized."""
+    feats = {}
+    for name, fn in pair_specs.items():
+        col = f"{ticker}_{name}"
+        try:
+            result = fn(df, ticker, bench)
+            if isinstance(result, tuple):
+                s_corr, s_lag = result
+                feats[col] = pd.to_numeric(s_corr, errors="coerce").shift(1)
+                feats[f"{col}_lag"] = pd.to_numeric(s_lag, errors="coerce").shift(1)
+            else:
+                s = pd.to_numeric(result, errors="coerce").shift(1)
+                feats[col] = s
+        except Exception as e:
+            print(f"[pair warn] {col}: {e}")
+    return feats
+
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     """
     Input: wide panel with columns like '<TICKER>_<FIELD>' indexed by daily dates.
     Output: feature matrix X (all features shifted by 1 day; EV_* already leak-safe upstream).
     """
+    print("Building feature matrix with parallelization...")
+    
     tradables: List[str] = list(dict.fromkeys(getattr(settings.data, "tradable_tickers", TICKS_ALL)))
     bench = getattr(settings.data, "benchmark_ticker", SPY if SPY in TICKS_ALL else SPX)
     macro_ticks: List[str] = list(getattr(settings.data, "macro_tickers", []))
@@ -347,47 +389,43 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
     feats: Dict[str, pd.Series] = {}
 
-    # ---- Macro once ----
+    # ---- Macro once (sequential - small) ----
+    print("  Computing macro features...")
     for name, fn in MACRO_SPECS.items():
         try:
             feats[name] = pd.to_numeric(fn(df), errors="coerce").shift(1)
         except Exception as e:
             print(f"[macro warn] {name}: {e}")
 
-    # ---- Single-asset ----
-    for t in all_ticks:
-        for name, fn in FEAT.items():
-            col = f"{t}_{name}"
-            try:
-                s = pd.to_numeric(fn(df, t), errors="coerce").shift(1)
-                feats[col] = s
-            except Exception as e:
-                print(f"[feat warn] {col}: {e}")
+    # ---- Single-asset features (parallelized) ----
+    print(f"  Computing single-asset features for {len(all_ticks)} tickers...")
+    single_asset_results = Parallel(n_jobs=-1, batch_size="auto")(
+        delayed(_compute_single_asset_features)(t, df, FEAT) for t in all_ticks
+    )
+    
+    # Merge single-asset results
+    for result in single_asset_results:
+        feats.update(result)
 
-    # ---- Pairwise vs benchmark ----
-    for t in tradables:
-        if t == bench:
-            continue
-        for name, fn in PAIR_SPECS.items():
-            col = f"{t}_{name}"
-            try:
-                # Handle tuple returns for lead-lag features
-                result = fn(df, t, bench)
-                if isinstance(result, tuple):
-                    # For lead-lag, store both correlation and lag
-                    s_corr, s_lag = result
-                    feats[col] = pd.to_numeric(s_corr, errors="coerce").shift(1)
-                    feats[f"{col}_lag"] = pd.to_numeric(s_lag, errors="coerce").shift(1)
-                else:
-                    s = pd.to_numeric(result, errors="coerce").shift(1)
-                    feats[col] = s
-            except Exception as e:
-                print(f"[pair warn] {col}: {e}")
+    # ---- Pairwise vs benchmark (parallelized) ----
+    print(f"  Computing pairwise features for {len(tradables)} tickers...")
+    pairwise_tickers = [t for t in tradables if t != bench]
+    if pairwise_tickers:
+        pairwise_results = Parallel(n_jobs=-1, batch_size="auto")(
+            delayed(_compute_pairwise_features)(t, bench, df, PAIR_SPECS) for t in pairwise_tickers
+        )
+        
+        # Merge pairwise results
+        for result in pairwise_results:
+            feats.update(result)
 
-    # ---- EV bundle & interactions ----
+    # ---- EV bundle & interactions (cached) ----
+    print("  Computing event features...")
     EV = _ev_bundle(df.index)
     for c in EV.columns:
         feats[c] = EV[c]  # already leak-safe upstream
+    
+    print("  Computing event interactions...")
     for t in tradables:
         for name, fn in EV_INTERACT.items():
             col = f"{t}_{name}"
@@ -397,6 +435,7 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
                 print(f"[ev warn] {col}: {e}")
 
     # ---- Assemble (avoid fragmentation) ----
+    print("  Assembling feature matrix...")
     X = pd.DataFrame(feats).sort_index()
     
     # Drop non-event columns that are all-NaN, keep EV/COND/EXP/META/day_* even if sparse
@@ -419,14 +458,29 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     # Combine back together
     X = pd.concat([X_non_event, X_event], axis=1)
 
-    # ---- Quality masks / flags ----
-    for t in tradables:
-        volz = f.zscore_rolling(_col(df,t,"PX_VOLUME"),63)
-        toz  = f.zscore_rolling(_col(df,t,"TURNOVER"),63)
-        X[f"{t}_gate.liquid_flag"] = ((volz>0) & (toz>0)).astype(float).shift(1)
-        X[f"{t}_gate.opt_avail_flag"] = _options_available(df,t).shift(1)
+    # ---- Quality masks / flags (parallelized) ----
+    print("  Computing quality gates...")
+    def _compute_gates(ticker):
+        volz = f.zscore_rolling(_col(df,ticker,"PX_VOLUME"),63)
+        toz  = f.zscore_rolling(_col(df,ticker,"TURNOVER"),63)
+        liquid_flag = ((volz>0) & (toz>0)).astype(float).shift(1)
+        opt_flag = _options_available(df,ticker).shift(1)
+        return {
+            f"{ticker}_gate.liquid_flag": liquid_flag,
+            f"{ticker}_gate.opt_avail_flag": opt_flag
+        }
+    
+    gate_results = Parallel(n_jobs=-1, batch_size="auto")(
+        delayed(_compute_gates)(t) for t in tradables
+    )
+    
+    for result in gate_results:
+        feats.update(result)
+        for col, series in result.items():
+            X[col] = series
 
     # ---- Cross-sectional ranks - EXPANDED ----
+    print("  Computing cross-sectional ranks...")
     def _cs_rank(stub: str, outname: str):
         nonlocal X
         cols = [f"{t}_{stub}" for t in tradables if f"{t}_{stub}" in X.columns]
@@ -528,4 +582,5 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     _sector_neutral_z("px.mom_21", "sn.z_mom_21")
     _sector_neutral_z("vol.rv_21", "sn.z_rv_21")
 
+    print(f"Feature matrix complete: {X.shape[1]} features, {X.shape[0]} observations")
     return X

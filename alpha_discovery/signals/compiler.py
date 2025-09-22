@@ -5,6 +5,7 @@ import numpy as np
 import warnings
 import re
 from typing import List, Dict, Tuple, Optional
+from joblib import Parallel, delayed
 from ..features import core as fcore
 
 # Suppress pandas FutureWarnings for cleaner output
@@ -223,6 +224,120 @@ PRIMITIVE_RULES = {
 # THE SIGNAL COMPILER
 # ===================================================================
 
+def _process_single_feature(feature_name: str, feature_series: pd.Series, 
+                          liquid_flag: pd.Series, opt_avail_flag: pd.Series,
+                          macro_vacuum_gate: Optional[pd.Series], 
+                          macro_momentum_gate: Optional[pd.Series]) -> List[Tuple[str, pd.Series, Dict]]:
+    """Process a single feature to generate signals - parallelized."""
+    if feature_series.empty or pd.api.types.is_bool_dtype(feature_series.dtype):
+        return []
+
+    generated_signals: List[Tuple[str, pd.Series, Dict]] = []
+    is_z = _is_z_like(feature_name)
+    is_cs = _is_cs_rank(feature_name)
+
+    # 1. Percentile and Mean-Reversion Rules
+    if not is_cs:
+        ranks = feature_series.rank(pct=True)
+        for rule in PRIMITIVE_RULES['percentile']:
+            is_upper = rule['enter'] > 0.5
+            sig = apply_hysteresis_and_dwell(
+                ranks, rule['enter'], rule['exit'], MIN_DWELL_TIME, COOLDOWN_PERIOD, is_upper
+            )
+            meta = {'rule_type': 'percentile', 'condition': f"enter_{rule['enter']}_exit_{rule['exit']}", 'name': rule['name']}
+            generated_signals.append((feature_name, sig, meta))
+
+        for rule in PRIMITIVE_RULES['mean_reversion']:
+            if rule['name'] == 'reverts_from_high':
+                extreme = ranks > rule['extreme_thresh']
+                sig = extreme.shift(1, fill_value=False) & ~extreme
+            else: # reverts_from_low
+                extreme = ranks < rule['extreme_thresh']
+                sig = extreme.shift(1, fill_value=False) & ~extreme
+            meta = {'rule_type': 'mean_reversion', 'condition': f"cross_back_{rule['extreme_thresh']}", 'name': rule['name']}
+            generated_signals.append((feature_name, sig, meta))
+
+    # 2. Z-Score Rules
+    if is_z: # Native Z-scores
+        for rule in PRIMITIVE_RULES['z_score_native']:
+            is_upper = rule['enter'] > 0
+            sig = apply_hysteresis_and_dwell(
+                feature_series, rule['enter'], rule['exit'], MIN_DWELL_TIME, COOLDOWN_PERIOD, is_upper
+            )
+            meta = {'rule_type': 'z_score_native', 'condition': f"enter_{rule['enter']}_exit_{rule['exit']}", 'name': rule['name']}
+            generated_signals.append((feature_name, sig, meta))
+    elif not is_cs: # Derived Z-scores (don't z-score a rank)
+        z_scores = fcore.zscore_rolling(feature_series, 60)
+        for rule in PRIMITIVE_RULES['z_score_derived']:
+            is_upper = rule['enter'] > 0
+            sig = apply_hysteresis_and_dwell(
+                z_scores, rule['enter'], rule['exit'], MIN_DWELL_TIME, COOLDOWN_PERIOD, is_upper
+            )
+            meta = {'rule_type': 'z_score_derived', 'condition': f"enter_{rule['enter']}_exit_{rule['exit']}", 'name': rule['name']}
+            generated_signals.append((feature_name, sig, meta))
+
+    # 3. Cross-Sectional Quantile Rules
+    if is_cs:
+        for rule in PRIMITIVE_RULES['cs_quantile']:
+            sig = feature_series >= rule['threshold'] if rule['operator'] == '>=' else feature_series <= rule['threshold']
+            meta = {'rule_type': 'cs_quantile', 'condition': f"{rule['operator']} {rule['threshold']}", 'name': rule['name']}
+            generated_signals.append((feature_name, sig, meta))
+
+    # Process and gate the signals
+    processed_signals = []
+    for feature_name, signal_series, base_meta in generated_signals:
+        if not signal_series.any():
+            continue
+
+        # Apply base liquidity gate
+        gated_signal = signal_series & liquid_flag
+        applied_gates = ['liquid']
+
+        # Apply options availability gate for options-driven features
+        if 'opt.' in feature_name.lower():
+            gated_signal &= opt_avail_flag
+            applied_gates.append('options')
+        
+        # Store the baseline gated signal
+        if gated_signal.any():
+            interpretable_name = _get_interpretable_event_name(feature_name)
+            meta = {
+                'feature_name': feature_name,
+                'rule_type': base_meta['rule_type'],
+                'condition': base_meta['condition'],
+                'gates': ','.join(applied_gates),
+                'window': _parse_window_from_name(feature_name),
+                'description': f"{interpretable_name} {base_meta['name']}"
+            }
+            processed_signals.append((gated_signal, meta))
+
+        # Create macro-gated versions
+        if macro_vacuum_gate is not None and (gated_signal & macro_vacuum_gate).any():
+            macro_gates = applied_gates + ['macro_vacuum']
+            meta = {
+                'feature_name': feature_name,
+                'rule_type': base_meta['rule_type'],
+                'condition': base_meta['condition'],
+                'gates': ','.join(macro_gates),
+                'window': _parse_window_from_name(feature_name),
+                'description': f"{interpretable_name} {base_meta['name']} (in Macro Vacuum)"
+            }
+            processed_signals.append((gated_signal & macro_vacuum_gate, meta))
+
+        if macro_momentum_gate is not None and (gated_signal & macro_momentum_gate).any():
+            macro_gates = applied_gates + ['macro_momentum']
+            meta = {
+                'feature_name': feature_name,
+                'rule_type': base_meta['rule_type'],
+                'condition': base_meta['condition'],
+                'gates': ','.join(macro_gates),
+                'window': _parse_window_from_name(feature_name),
+                'description': f"{interpretable_name} {base_meta['name']} (with Macro Momentum)"
+            }
+            processed_signals.append((gated_signal & macro_momentum_gate, meta))
+
+    return processed_signals
+
 def compile_signals(feature_matrix: pd.DataFrame) -> Tuple[pd.DataFrame, List[Dict]]:
     """
     Compiles a feature matrix into a rich set of binary primitive signals using
@@ -230,13 +345,7 @@ def compile_signals(feature_matrix: pd.DataFrame) -> Tuple[pd.DataFrame, List[Di
     """
     print("Compiling primitive signals from feature matrix...")
 
-    all_signals: Dict[str, pd.Series] = {}
-    all_metadata: List[Dict] = []
-    signal_id_counter = 0
-
     # --- Prepare Gating Series ---
-    # These flags are used to filter signals based on market conditions.
-    # We use .get() to avoid errors if a gate column is not in the matrix.
     liquid_flag = feature_matrix.get('liquid_flag', pd.Series(True, index=feature_matrix.index))
     opt_avail_flag = feature_matrix.get('opt_avail_flag', pd.Series(True, index=feature_matrix.index))
 
@@ -245,125 +354,39 @@ def compile_signals(feature_matrix: pd.DataFrame) -> Tuple[pd.DataFrame, List[Di
     macro_vacuum_gate = ev_density < ev_density.median() if ev_density is not None else None
     
     infl_mem = feature_matrix.get('infl_mem_hf21')
-    macro_momentum_gate = infl_mem > infl_mem.median() if infl_mem is not None else None # Example: fire when strong
+    macro_momentum_gate = infl_mem > infl_mem.median() if infl_mem is not None else None
 
-    # --- Main Loop: Iterate through each feature column ---
+    # --- Prepare features for parallel processing ---
+    features_to_process = []
     for feature_name in feature_matrix.columns:
-        # Skip columns that are gates themselves
         if feature_name in ['liquid_flag', 'opt_avail_flag', 'EV_week_density', 'infl_mem_hf21']:
             continue
-
         feature_series = feature_matrix[feature_name].dropna()
-        if feature_series.empty or pd.api.types.is_bool_dtype(feature_series.dtype):
-            continue
+        if not feature_series.empty and not pd.api.types.is_bool_dtype(feature_series.dtype):
+            features_to_process.append((feature_name, feature_series))
 
-        # --- Generate signals for the current feature ---
-        generated_signals: List[Tuple[pd.Series, Dict]] = []
-        is_z = _is_z_like(feature_name)
-        is_cs = _is_cs_rank(feature_name)
+    print(f"  Processing {len(features_to_process)} features in parallel...")
 
-        # 1. Percentile and Mean-Reversion Rules
-        if not is_cs:
-            ranks = feature_series.rank(pct=True)
-            for rule in PRIMITIVE_RULES['percentile']:
-                is_upper = rule['enter'] > 0.5
-                sig = apply_hysteresis_and_dwell(
-                    ranks, rule['enter'], rule['exit'], MIN_DWELL_TIME, COOLDOWN_PERIOD, is_upper
-                )
-                meta = {'rule_type': 'percentile', 'condition': f"enter_{rule['enter']}_exit_{rule['exit']}", 'name': rule['name']}
-                generated_signals.append((sig, meta))
+    # --- Parallel processing ---
+    all_processed_signals = Parallel(n_jobs=-1, batch_size="auto")(
+        delayed(_process_single_feature)(
+            feature_name, feature_series, liquid_flag, opt_avail_flag, 
+            macro_vacuum_gate, macro_momentum_gate
+        ) for feature_name, feature_series in features_to_process
+    )
 
-            for rule in PRIMITIVE_RULES['mean_reversion']:
-                if rule['name'] == 'reverts_from_high':
-                    extreme = ranks > rule['extreme_thresh']
-                    sig = extreme.shift(1, fill_value=False) & ~extreme
-                else: # reverts_from_low
-                    extreme = ranks < rule['extreme_thresh']
-                    sig = extreme.shift(1, fill_value=False) & ~extreme
-                meta = {'rule_type': 'mean_reversion', 'condition': f"cross_back_{rule['extreme_thresh']}", 'name': rule['name']}
-                generated_signals.append((sig, meta))
+    # --- Flatten and collect results ---
+    all_signals: Dict[str, pd.Series] = {}
+    all_metadata: List[Dict] = []
+    signal_id_counter = 0
 
-        # 2. Z-Score Rules
-        if is_z: # Native Z-scores
-            for rule in PRIMITIVE_RULES['z_score_native']:
-                is_upper = rule['enter'] > 0
-                sig = apply_hysteresis_and_dwell(
-                    feature_series, rule['enter'], rule['exit'], MIN_DWELL_TIME, COOLDOWN_PERIOD, is_upper
-                )
-                meta = {'rule_type': 'z_score_native', 'condition': f"enter_{rule['enter']}_exit_{rule['exit']}", 'name': rule['name']}
-                generated_signals.append((sig, meta))
-        elif not is_cs: # Derived Z-scores (don't z-score a rank)
-            z_scores = fcore.zscore_rolling(feature_series, 60)
-            for rule in PRIMITIVE_RULES['z_score_derived']:
-                is_upper = rule['enter'] > 0
-                sig = apply_hysteresis_and_dwell(
-                    z_scores, rule['enter'], rule['exit'], MIN_DWELL_TIME, COOLDOWN_PERIOD, is_upper
-                )
-                meta = {'rule_type': 'z_score_derived', 'condition': f"enter_{rule['enter']}_exit_{rule['exit']}", 'name': rule['name']}
-                generated_signals.append((sig, meta))
-
-        # 3. Cross-Sectional Quantile Rules
-        if is_cs:
-            for rule in PRIMITIVE_RULES['cs_quantile']:
-                sig = feature_series >= rule['threshold'] if rule['operator'] == '>=' else feature_series <= rule['threshold']
-                meta = {'rule_type': 'cs_quantile', 'condition': f"{rule['operator']} {rule['threshold']}", 'name': rule['name']}
-                generated_signals.append((sig, meta))
-
-        # --- Process, Gate, and Store Generated Signals ---
-        for signal_series, base_meta in generated_signals:
-            if not signal_series.any():
-                continue
-
-            # Apply base liquidity gate
-            gated_signal = signal_series & liquid_flag
-            applied_gates = ['liquid']
-
-            # Apply options availability gate for options-driven features
-            if 'opt.' in feature_name.lower():
-                gated_signal &= opt_avail_flag
-                applied_gates.append('options')
-            
-            # --- Store the baseline gated signal ---
-            if gated_signal.any():
-                signal_id = f"SIG_{signal_id_counter:05d}"
-                all_signals[signal_id] = gated_signal
-                
-                interpretable_name = _get_interpretable_event_name(feature_name)
-                all_metadata.append({
-                    'signal_id': signal_id,
-                    'feature_name': feature_name,
-                    'rule_type': base_meta['rule_type'],
-                    'condition': base_meta['condition'],
-                    'gates': ','.join(applied_gates),
-                    'window': _parse_window_from_name(feature_name),
-                    'description': f"{interpretable_name} {base_meta['name']}"
-                })
-                signal_id_counter += 1
-
-            # --- Optionally, create macro-gated versions ---
-            if macro_vacuum_gate is not None and (gated_signal & macro_vacuum_gate).any():
-                signal_id = f"SIG_{signal_id_counter:05d}"
-                all_signals[signal_id] = gated_signal & macro_vacuum_gate
-                macro_gates = applied_gates + ['macro_vacuum']
-                all_metadata.append({
-                    'signal_id': signal_id, 'feature_name': feature_name, 'rule_type': base_meta['rule_type'],
-                    'condition': base_meta['condition'], 'gates': ','.join(macro_gates),
-                    'window': _parse_window_from_name(feature_name),
-                    'description': f"{interpretable_name} {base_meta['name']} (in Macro Vacuum)"
-                })
-                signal_id_counter += 1
-
-            if macro_momentum_gate is not None and (gated_signal & macro_momentum_gate).any():
-                signal_id = f"SIG_{signal_id_counter:05d}"
-                all_signals[signal_id] = gated_signal & macro_momentum_gate
-                macro_gates = applied_gates + ['macro_momentum']
-                all_metadata.append({
-                    'signal_id': signal_id, 'feature_name': feature_name, 'rule_type': base_meta['rule_type'],
-                    'condition': base_meta['condition'], 'gates': ','.join(macro_gates),
-                    'window': _parse_window_from_name(feature_name),
-                    'description': f"{interpretable_name} {base_meta['name']} (with Macro Momentum)"
-                })
-                signal_id_counter += 1
+    for processed_signals in all_processed_signals:
+        for signal_series, meta in processed_signals:
+            signal_id = f"SIG_{signal_id_counter:05d}"
+            all_signals[signal_id] = signal_series
+            meta['signal_id'] = signal_id
+            all_metadata.append(meta)
+            signal_id_counter += 1
 
     # --- Finalize and Clean Up ---
     if not all_signals:
