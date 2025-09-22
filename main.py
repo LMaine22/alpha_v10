@@ -15,6 +15,7 @@ from alpha_discovery.core.splits import create_hybrid_splits, HybridSplits
 from alpha_discovery.eval.validation import run_full_pipeline
 from alpha_discovery.eval.elv import calculate_elv_and_labels
 from alpha_discovery.eval.regime import RegimeModel
+from alpha_discovery.reporting.tradeable_setups import write_tradeable_setups
 
 
 # Try to import the loader to build parquet if missing
@@ -194,7 +195,20 @@ def main():
     # --- Reporting Phase ---
     print("\n--- All folds complete. Saving final ELV-scored results. ---")
     run_dir = create_run_dir()
-    save_results(final_results_df, signals_meta, run_dir, splits, settings, anchor_regime_model) # Will be enhanced in Step 7
+    
+    # Save the main artifacts (pareto front, forecast slate, etc.)
+    # The save_results function now returns the path to the forecast_slate.csv
+    forecast_slate_path = save_results(final_results_df, signals_meta, run_dir, splits, settings, anchor_regime_model)
+    
+    # --- Generate Actionable Trade Report ---
+    if forecast_slate_path and os.path.exists(forecast_slate_path):
+        print("\n--- Generating Actionable Trade Report ---")
+        forecast_df = pd.read_csv(forecast_slate_path)
+        end_of_data_date = master_df.index.max()
+        write_tradeable_setups(forecast_df, end_of_data_date, run_dir)
+    else:
+        print("\n--- Skipping Actionable Trade Report (forecast slate not found) ---")
+
     print(f"\nSaved final aggregated results to: {run_dir}")
 
 

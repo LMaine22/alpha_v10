@@ -6,12 +6,12 @@ from datetime import date
 
 class GaConfig(BaseModel):
     """Genetic Algorithm parameters (model-agnostic, NSGA-compatible)."""
-    population_size: int = 50
-    generations: int = 5
+    population_size: int = 300
+    generations: int = 7
     elitism_rate: float = 0.1
     mutation_rate: float = 0.35
     crossover_rate: float = 0.75
-    seed: int = 172 # keep visible in run_dir names
+    seed: int = 173 # keep visible in run_dir names
 
     # Setup grammar — PAIRS ONLY
     setup_lengths_to_explore: List[int] = [2]
@@ -44,7 +44,7 @@ class GaConfig(BaseModel):
 
 
     # Island model knobs
-    islands: Optional[dict] = None
+    islands: Optional[dict] = {}
     islands_count: int = 4
     migration_interval: int = 2
     migration_size: int = 8
@@ -93,7 +93,7 @@ class HybridSplitConfig(BaseModel):
 
 class ForecastConfig(BaseModel):
     """Forecast + scoring knobs for return distributions."""
-    horizons: List[int] = [3, 5, 8, 10]
+    horizons: List[int] = [5, 8, 10]
     default_horizon: int = 5
     price_field: str = "PX_LAST"
 
@@ -140,7 +140,7 @@ class ElvConfig(BaseModel):
     specialist_coverage_floor: float = 0.40
 
     # Gates
-    gate_min_oos_triggers: int = 15
+    gate_min_oos_triggers: int = 5  # Lowered from 15 to allow more setups to qualify
     gate_crps_percentile: float = 0.60
     gate_ig_percentile: float = 0.70
     gate_mi_max: float = 0.7
@@ -186,9 +186,9 @@ class DataConfig(BaseModel):
         'MSTR US Equity','SNOW US Equity','LLY US Equity','COIN US Equity',
         'QCOM US Equity','ULTA US Equity','CRM US Equity','AAPL US Equity',
         'AMZN US Equity','MSFT US Equity','QQQ US Equity','SPY US Equity',
-       # 'TSM US Equity','META US Equity','TSLA US Equity','CRWV US Equity',
-       # 'GOOGL US Equity','AMD US Equity','ARM US Equity','PLTR US Equity',
-       # 'JPM US Equity','C US Equity','BMY US Equity','NKE US Equity','TLT US Equity'
+        'TSM US Equity','META US Equity','TSLA US Equity','CRWV US Equity',
+        'GOOGL US Equity','AMD US Equity','ARM US Equity','PLTR US Equity',
+        'JPM US Equity','C US Equity','BMY US Equity','NKE US Equity','TLT US Equity'
     ]
     macro_tickers: List[str] = ['RTY Index','MXWO Index','USGG10YR Index','USGG2YR Index',
                                 'DXY Curncy','JPY Curncy','EUR Curncy','CL1 Comdty',

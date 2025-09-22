@@ -16,7 +16,8 @@ from ..eval.metrics import (
     tda,
     robustness,
     regime,
-    aggregate
+    aggregate,
+    causality
 )
 from ..reporting import display_utils as du
 
@@ -405,6 +406,20 @@ def _evaluate_one_setup(
     metrics["redundancy_mi"] = _avg_pairwise_mi(signals_df, setup)
     metrics["first_trigger"] = trigger_dates.min()
     metrics["last_trigger"] = trigger_dates.max()
+
+    # --- Transfer Entropy Calculation ---
+    best_h = metrics.get("best_horizon")
+    if best_h:
+        r_series = unconditional_returns[best_h].loc[trigger_dates.min():trigger_dates.max()]
+        s_series = _trigger_mask(signals_df, setup).loc[r_series.index]
+        # Use number of bands as bins for TE; ensure at least 3
+        te_bins = max(3, int(len(band_edges) - 1))
+        te_res = causality.transfer_entropy_causality(r_series, s_series, lag=1, bins=te_bins)
+        metrics["transfer_entropy"] = float(te_res.get("te_x_to_y", 0.0))
+        metrics["transfer_entropy_p_value"] = float(te_res.get("p_value", np.nan))
+    else:
+        metrics["transfer_entropy"] = np.nan
+        metrics["transfer_entropy_p_value"] = np.nan
     
     # Generate the human-readable description here
     meta_map = du.build_signal_meta_map(signals_metadata)
@@ -422,6 +437,7 @@ def _evaluate_one_setup(
     target_dfa = settings.forecast.dfa_alpha_target
     metrics["dfa_alpha_closeness_neg"] = -abs(metrics.get("dfa_alpha", target_dfa) - target_dfa)
     metrics["redundancy_neg"] = -metrics.get("redundancy_mi", 1e6)
+    metrics["transfer_entropy_neg"] = -metrics.get("transfer_entropy", 1e6)
     
     # Final objectives list for the GA, respecting the configurable complexity vs. redundancy choice
     ga_objectives = list(settings.ga.objectives)
@@ -441,18 +457,25 @@ def _evaluate_one_setup(
         "ticker": ticker,
         "signals": "|".join(setup),
         "setup_desc": setup_desc,
-        # Raw metrics for ELV consumption
+        # Raw metrics for ELV consumption - explicitly include both raw and regular names
+        "crps_raw": metrics.get("crps"),
+        "pinball_q10_raw": metrics.get("pinball_q10"),
+        "pinball_q90_raw": metrics.get("pinball_q90"),
+        "info_gain_raw": metrics.get("info_gain"),
+        "w1_effect_raw": metrics.get("w1_effect"),
+        "calib_mae_raw": metrics.get("calib_mae"),
+        "dfa_alpha_raw": metrics.get("dfa_alpha"),
+        "sensitivity_delta_edge_raw": metrics.get("sensitivity_delta_edge"),
+        "redundancy_mi_raw": metrics.get("redundancy_mi"),
+        "complexity_metric_raw": metrics.get(settings.complexity.metric) or metrics.get("complexity_index"),
+        "bootstrap_p_value_raw": metrics.get("bootstrap_p_value"),
+        # ELV expected names
         "edge_crps_raw": metrics.get("crps"),
         "edge_pin_q10_raw": metrics.get("pinball_q10"),
         "edge_pin_q90_raw": metrics.get("pinball_q90"),
         "edge_ig_raw": metrics.get("info_gain"),
         "edge_w1_raw": metrics.get("w1_effect"),
         "edge_calib_mae_raw": metrics.get("calib_mae"),
-        "dfa_alpha_raw": metrics.get("dfa_alpha"),
-        "sensitivity_delta_edge_raw": metrics.get("sensitivity_delta_edge"),
-        "redundancy_mi_raw": metrics.get("redundancy_mi"),
-        "complexity_metric_raw": metrics.get(settings.complexity.metric) or metrics.get("complexity_index"),
-        "bootstrap_p_value_raw": metrics.get("bootstrap_p_value"),
         **metrics
     }
 
@@ -463,34 +486,6 @@ def _evaluate_one_setup(
         "rank": np.inf,
         "crowding_distance": 0.0,
     }
-
-
-# TE estimator
-def _transfer_entropy_discrete(r: pd.Series, s: pd.Series, edges_r: np.ndarray) -> float:
-    r_t = r.shift(0)
-    r_tp1 = r.shift(-1)
-    df = pd.DataFrame({"r_t": r_t, "r_tp1": r_tp1, "s": s.astype(int)}).dropna()
-    if df.empty:
-        return 0.0
-    df["b_t"] = np.digitize(df["r_t"].values, edges_r) - 1
-    df["b_tp1"] = np.digitize(df["r_tp1"].values, edges_r) - 1
-    df = df[(df["b_t"] >= 0) & (df["b_t"] < len(edges_r)-1) & (df["b_tp1"] >= 0) & (df["b_tp1"] < len(edges_r)-1)]
-    if df.empty:
-        return 0.0
-    counts = df.groupby(["b_tp1", "b_t", "s"]).size().astype(float)
-    counts_bt_s = counts.groupby(level=[1,2]).sum()
-    counts_bt = counts.groupby(level=1).sum()
-    K = (len(edges_r)-1)
-    total = counts.sum()
-    te = 0.0
-    for (b_tp1, b_t, s_val), c_xyz in counts.items():
-        c_bt_s = counts_bt_s.get((b_t, s_val), 0.0)
-        c_bt = counts_bt.get(b_t, 0.0)
-        p1 = (c_xyz + 1.0) / (c_bt_s + K)
-        c_sum_over_s = sum(counts.get((b_tp1, b_t, sv), 0.0) for sv in [0,1])
-        p0 = (c_sum_over_s + 1.0) / (c_bt + K)
-        te += (c_xyz / total) * np.log(max(p1 / max(p0, 1e-12), 1e-12))
-    return float(max(te, 0.0))
 
 
 # Cache wrapper

@@ -3,7 +3,7 @@
 Information-theoretic metrics (no placeholders).
 """
 from __future__ import annotations
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
@@ -99,59 +99,74 @@ def mutual_information(x_values: np.ndarray,
         logfrac = np.where(frac > 0, np.log2(frac), 0.0)
     return float(np.sum(Pxy * logfrac))
 
-def transfer_entropy(x_values: np.ndarray,
-                     y_values: np.ndarray,
-                     lag: int = 1,
-                     bins: int = 10) -> float:
+def transfer_entropy(x: Union[pd.Series, np.ndarray], y: Union[pd.Series, np.ndarray], lag: int = 1, bins: int = 3) -> float:
     """
-    TE_{X→Y} using discretization:
-    I(Y_t ; X_{t-1} | Y_{t-1})
+    Calculate the Transfer Entropy from series x to series y using discrete bins.
+    TE_{X→Y} ≈ ∑ p(y_t, y_{t-1}, x_{t-1}) log [ p(y_t | y_{t-1}, x_{t-1}) / p(y_t | y_{t-1}) ]
+    Returns 0.0 on insufficient data.
     """
-    x = _as_1d(x_values); y = _as_1d(y_values)
-    if x.size <= lag or y.size <= lag:
-        return np.nan
+    try:
+        L = int(max(1, lag))
+        B = int(max(3, bins))
+    except Exception:
+        L = 1
+        B = 3
 
-    # Align series
-    Yt = y[lag:]
-    Ylag = y[:-lag]
-    Xlag = x[:-lag]
-    n = min(Yt.size, Ylag.size, Xlag.size)
-    Yt = Yt[:n]; Ylag = Ylag[:n]; Xlag = Xlag[:n]
+    x = np.asarray(x, dtype=float).ravel()
+    y = np.asarray(y, dtype=float).ravel()
 
-    # Discretize with quantile bins for robustness
-    def qbin(v, k):
-        qs = np.quantile(v, np.linspace(0, 1, k+1))
-        # Ensure strictly increasing (dedupe)
-        qs = np.unique(qs)
-        # If collapse, fallback to uniform bins
-        if qs.size < k+1:
-            qs = np.linspace(v.min()-1e-9, v.max()+1e-9, k+1)
-        idx = np.clip(np.digitize(v, qs[1:-1], right=False), 0, k-1)
-        return idx
+    N = min(x.size, y.size)
+    if N <= L + 5:
+        return 0.0
 
-    Yi = qbin(Yt, bins)
-    Yl = qbin(Ylag, bins)
-    Xl = qbin(Xlag, bins)
+    x = x[:N]
+    y = y[:N]
 
-    # Joint counts P(Yt, Ylag, Xlag)
-    J = np.zeros((bins, bins, bins), dtype=float)
-    for a, b, c in zip(Yi, Yl, Xl):
-        J[a, b, c] += 1.0
-    J += 1.0  # Laplace
-    P = J / J.sum()
+    # Build lagged arrays
+    y_t = y[L:]
+    y_p = y[:-L]
+    x_p = x[:-L]
 
-    # Marginals
-    Py_y = P.sum(axis=2)                      # P(Yt, Ylag)
-    Py = Py_y.sum(axis=1, keepdims=True)      # P(Yt)
-    Py_lag = Py_y.sum(axis=0, keepdims=True)  # P(Ylag)
-    Px_lag = P.sum(axis=(0, 1), keepdims=True)  # P(Xlag)
+    # Drop any NaNs
+    mask = np.isfinite(y_t) & np.isfinite(y_p) & np.isfinite(x_p)
+    if mask.sum() <= 5:
+        return 0.0
+    y_t = y_t[mask]
+    y_p = y_p[mask]
+    x_p = x_p[mask]
 
-    # TE = sum P(y_t,y_{t-1},x_{t-1}) log [ P(y_t | y_{t-1}, x_{t-1}) / P(y_t | y_{t-1}) ]
+    # Discretize each variable into B bins using histogram edges
+    try:
+        y_t_edges = np.histogram_bin_edges(y_t, bins=B)
+        y_p_edges = np.histogram_bin_edges(y_p, bins=B)
+        x_p_edges = np.histogram_bin_edges(x_p, bins=B)
+
+        y_t_bins = np.clip(np.digitize(y_t, y_t_edges) - 1, 0, B - 1)
+        y_p_bins = np.clip(np.digitize(y_p, y_p_edges) - 1, 0, B - 1)
+        x_p_bins = np.clip(np.digitize(x_p, x_p_edges) - 1, 0, B - 1)
+    except Exception:
+        return 0.0
+
+    # Joint counts with Laplace smoothing
+    counts = np.ones((B, B, B), dtype=float)  # +1 Laplace
+    np.add.at(counts, (y_t_bins, y_p_bins, x_p_bins), 1.0)
+
+    Pypx = counts / counts.sum()
+    Pyx = Pypx.sum(axis=0)          # sum over y_t -> P(y_p, x_p)
+    Py = Pypx.sum(axis=(0, 2))      # sum over y_t,x_p -> P(y_p)
+    Py_t_y_p = Pypx.sum(axis=2)     # P(y_t, y_p)
+
+    # Conditional probabilities with EPS guards
     with np.errstate(divide='ignore', invalid='ignore'):
-        P_y_given_yl_xl = P / np.maximum(Py_lag * Px_lag, EPS)
-        P_y_given_yl = Py_y / np.maximum(Py_lag, EPS)
-        ratio = P_y_given_yl_xl / np.maximum(P_y_given_yl[:, :, None], EPS)
-        logratio = np.where(ratio > 0, np.log2(ratio), 0.0)
-    return float(np.sum(P * logratio))
+        P_y_t_given_y_p_x_p = Pypx / (Pyx[None, :, :] + EPS)
+        P_y_t_given_y_p = Py_t_y_p / (Py[None, :] + EPS)
+        ratio = P_y_t_given_y_p_x_p / (P_y_t_given_y_p[:, :, None] + EPS)
+        log_ratio = np.where(ratio > 0, np.log2(ratio), 0.0)
+        te = np.sum(Pypx * log_ratio)
+
+    if not np.isfinite(te):
+        return 0.0
+    return float(te)
+
 
 __all__ = ["entropy", "conditional_entropy", "info_gain", "mutual_information", "transfer_entropy"]

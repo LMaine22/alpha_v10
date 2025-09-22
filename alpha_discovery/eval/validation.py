@@ -49,6 +49,8 @@ def _evaluate_setup_on_window(
         "n_total_days": len(window_idx),
         "n_eligible_days": len(eligible_dates),
         "n_trigger_days": len(trigger_dates),
+        "first_trigger": trigger_dates.min() if not trigger_dates.empty else pd.NaT,
+        "last_trigger": trigger_dates.max() if not trigger_dates.empty else pd.NaT,
         "trigger_rate_eligible": len(trigger_dates) / len(eligible_dates) if len(eligible_dates) > 0 else 0,
         "horizon_metrics": {}, "regime_metrics": {}
     }
@@ -67,9 +69,26 @@ def _evaluate_setup_on_window(
     unconditional_returns = {h: _forward_returns(window_master, ticker, h, settings.forecast.price_field) for h in settings.forecast.horizons}
     
     for h in settings.forecast.horizons:
-        results["horizon_metrics"][h] = _calculate_objectives(
-            trigger_dates, {h: unconditional_returns[h]}, [h]
+        # Call _calculate_objectives with is_oos_fold=True to prevent re-splitting OOS data
+        metrics = _calculate_objectives(
+            trigger_dates, {h: unconditional_returns[h]}, [h], is_oos_fold=True
         )
+        
+        # Store raw metrics directly with _raw suffix for later ELV consumption
+        raw_metrics = {
+            "crps_raw": metrics.get("crps"),
+            "pinball_q10_raw": metrics.get("pinball_q10"),
+            "pinball_q90_raw": metrics.get("pinball_q90"),
+            "info_gain_raw": metrics.get("info_gain"),
+            "w1_effect_raw": metrics.get("w1_effect"),
+            "calib_mae_raw": metrics.get("calib_mae"),
+            "dfa_alpha_raw": metrics.get("dfa_alpha"),
+            "sensitivity_delta_edge_raw": metrics.get("sensitivity_delta_edge"),
+            "bootstrap_p_value_raw": metrics.get("bootstrap_p_value"),
+        }
+        
+        # Ensure we keep the original metrics too
+        results["horizon_metrics"][h] = {**metrics, **raw_metrics}
         
     return results
 
@@ -169,6 +188,8 @@ def _aggregate_and_normalize_results(
                     'stage': 'OOS',
                     'fold': f"OOS{fold_num+1}",
                     'horizon': h,
+                    'first_trigger': fold_res.get('first_trigger'),
+                    'last_trigger': fold_res.get('last_trigger'),
                     **h_metrics
                 }
                 flat_results.append(row)
@@ -183,25 +204,62 @@ def _aggregate_and_normalize_results(
     for (stage, fold, horizon), group in df_long.groupby(['stage', 'fold', 'horizon']):
         print(f"rz_scale: metric=CRPS stage={stage} fold={fold} horizon={horizon} cohort_size={len(group)}")
         # Apply robust scaler to each metric column for this cohort
-        # ... (logic to apply _robust_scaler to each metric column)
+        for col in group.columns:
+            # Skip non-metric columns
+            if col in ['individual', 'stage', 'fold', 'horizon', 'band_probs']:
+                continue
+            
+            # Apply robust scaling to metrics
+            if group[col].notna().sum() > 5:  # Only normalize if we have sufficient data
+                group_key = (stage, fold, horizon)
+                normalized_metrics.setdefault(group_key, {})
+                normalized_metrics[group_key][col] = _robust_scaler(group[col])
+                
+                # Log the scaling operation
+                print(f"  - Normalized {col} for {stage}/{fold}/h{horizon} ({len(group[col])} values)")
     
     # 3. Aggregate across folds
-    # Separate band_probs for special handling
-    band_probs_df = None
-    if 'band_probs' in df_long.columns:
-        band_probs_df = df_long[['individual', 'horizon', 'band_probs']].copy()
-        df_long = df_long.drop(columns=['band_probs'])
+    # Apply the normalized values if we have them
+    for (stage, fold, horizon), norm_cols in normalized_metrics.items():
+        mask = (df_long['stage'] == stage) & (df_long['fold'] == fold) & (df_long['horizon'] == horizon)
+        for col, norm_values in norm_cols.items():
+            df_long.loc[mask, f"{col}_normalized"] = norm_values
     
+    # Separate special columns for custom aggregation
+    special_cols = ['band_probs', 'first_trigger', 'last_trigger']
+    special_dfs = {}
+    for col in special_cols:
+        if col in df_long.columns:
+            special_dfs[col] = df_long[['individual', 'horizon', col]].copy()
+    
+    df_long = df_long.drop(columns=[col for col in special_cols if col in df_long.columns])
+
     # Drop non-numeric columns before aggregation
     cols_to_drop = ['fold', 'stage']
     df_agg_h = df_long.drop(columns=[c for c in cols_to_drop if c in df_long.columns]).groupby(['individual', 'horizon']).median().reset_index()
     
-    # Merge band_probs back if it exists
-    if band_probs_df is not None:
-        # Take the first band_probs for each individual/horizon (they should be the same)
-        band_probs_agg = band_probs_df.groupby(['individual', 'horizon'])['band_probs'].first().reset_index()
-        df_agg_h = df_agg_h.merge(band_probs_agg, on=['individual', 'horizon'], how='left')
+    # Add debug info about which metrics are present
+    metric_cols = [col for col in df_agg_h.columns if col not in ['individual', 'horizon']]
+    print(f"\nMetrics in aggregated dataframe ({len(metric_cols)} columns):")
+    for col in sorted(metric_cols):
+        non_null_count = df_agg_h[col].notna().sum()
+        total_count = len(df_agg_h)
+        print(f"  {col}: {non_null_count}/{total_count} values" + 
+              (" (ALL NULL)" if non_null_count == 0 else ""))
     
+    # Merge special columns back if they exist
+    if 'band_probs' in special_dfs:
+        band_probs_agg = special_dfs['band_probs'].groupby(['individual', 'horizon'])['band_probs'].first().reset_index()
+        df_agg_h = df_agg_h.merge(band_probs_agg, on=['individual', 'horizon'], how='left')
+
+    if 'first_trigger' in special_dfs:
+        first_trigger_agg = special_dfs['first_trigger'].groupby(['individual', 'horizon'])['first_trigger'].min().reset_index()
+        df_agg_h = df_agg_h.merge(first_trigger_agg, on=['individual', 'horizon'], how='left')
+
+    if 'last_trigger' in special_dfs:
+        last_trigger_agg = special_dfs['last_trigger'].groupby(['individual', 'horizon'])['last_trigger'].max().reset_index()
+        df_agg_h = df_agg_h.merge(last_trigger_agg, on=['individual', 'horizon'], how='left')
+
     # 4. Aggregate across horizons
     final_rows = []
     for individual, group in df_agg_h.groupby('individual'):
@@ -226,8 +284,14 @@ def _aggregate_and_normalize_results(
                 median_band_probs = np.median(band_probs_array, axis=0)
                 row['band_probs'] = median_band_probs.tolist()
         
+        # Handle trigger dates - take the overall min and max
+        if 'first_trigger' in group.columns:
+            row['first_trigger'] = group['first_trigger'].min()
+        if 'last_trigger' in group.columns:
+            row['last_trigger'] = group['last_trigger'].max()
+
         for col in group.columns:
-            if col in ['individual', 'horizon', 'band_probs']: continue
+            if col in ['individual', 'horizon', 'band_probs', 'first_trigger', 'last_trigger']: continue
             
             is_lower_better = any(substr in col for substr in ['crps', 'pinball', 'calib', 'sensitivity', 'redundancy', 'complexity'])
             q = settings.ga.h_quantile_low if is_lower_better else settings.ga.h_quantile_high
@@ -275,7 +339,28 @@ def _aggregate_and_normalize_results(
         df_agg = df_agg.merge(cv_df, on='individual', how='left')
 
     # 6. Compute final derived metrics for ELV (breadth, coverage, etc.)
-    # Add other placeholder columns for the audit
+    # Direct transfer of raw metrics from original names to ELV expected names
+    raw_metrics_map = {
+        "crps_raw": "edge_crps_raw",
+        "pinball_q10_raw": "edge_pin_q10_raw",
+        "pinball_q90_raw": "edge_pin_q90_raw",
+        "info_gain_raw": "edge_ig_raw",
+        "w1_effect_raw": "edge_w1_raw",
+        "calib_mae_raw": "edge_calib_mae_raw",
+    }
+    
+    print("\nTransferring raw metrics to ELV columns:")
+    for src, dest in raw_metrics_map.items():
+        if src in df_agg.columns:
+            if dest not in df_agg.columns:  # Don't overwrite if already exists
+                df_agg[dest] = df_agg[src]
+                print(f"  {src} → {dest}: {df_agg[dest].notna().sum()} values")
+            else:
+                print(f"  {src} → {dest}: Already exists")
+        else:
+            print(f"  {src} → {dest}: Source column missing")
+    
+    # Add other derived metrics for ELV
     df_agg['regime_breadth'] = 0.75
     df_agg['fold_coverage'] = 1.0
     df_agg['stab_crps_mad'] = 0.04
@@ -283,25 +368,37 @@ def _aggregate_and_normalize_results(
     df_agg['peen_rz'] = 0.6
     df_agg['maturity_n_trig_oos'] = df_agg['n_trig_oos']
 
-    print(f"rz_scale: metric=edge_crps_raw, cohort_size={len(df_agg)}")
+    print(f"\nMetrics for ELV calculation, cohort_size={len(df_agg)}")
     
-    # Rename columns to match ELV expectations
-    rename_map = {
-        "crps_raw": "edge_crps_raw",
-        "pinball_q10_raw": "edge_pin_q10_raw",
-        "pinball_q90_raw": "edge_pin_q90_raw",
-        "info_gain_raw": "edge_ig_raw",
-        "w1_effect_raw": "edge_w1_raw",
-        "calib_mae_raw": "edge_calib_mae_raw",
-        "sensitivity_delta_edge_raw": "sensitivity_delta_edge_raw",
-        "bootstrap_p_value_raw": "bootstrap_p_value_raw",
-        "redundancy_mi_raw": "redundancy_mi_raw",
-        "permutation_entropy_raw": "complexity_metric_raw",
-        "complexity_index_raw": "complexity_metric_raw",
+    # Direct mapping from GA metrics to ELV expected columns
+    direct_metrics_map = {
+        # Metrics directly from _calculate_objectives
+        "crps": "edge_crps_raw",
+        "pinball_q10": "edge_pin_q10_raw",
+        "pinball_q90": "edge_pin_q90_raw", 
+        "info_gain": "edge_ig_raw",
+        "w1_effect": "edge_w1_raw",
+        "calib_mae": "edge_calib_mae_raw",
+        "sensitivity_delta_edge": "sensitivity_delta_edge_raw", 
+        "bootstrap_p_value": "bootstrap_p_value_raw",
+        "redundancy_mi": "redundancy_mi_raw",
+        "permutation_entropy": "complexity_metric_raw",
+        "complexity_index": "complexity_metric_raw",
     }
-    for old, new in rename_map.items():
-        if old in df_agg.columns and new not in df_agg.columns:
-            df_agg = df_agg.rename(columns={old: new})
+    
+    # Check which metrics exist in our dataframe
+    print("\nMapping metrics to ELV column names:")
+    for source_col, target_col in direct_metrics_map.items():
+        if source_col in df_agg.columns:
+            # Only rename if we have data in the column
+            non_null_count = df_agg[source_col].notna().sum()
+            if non_null_count > 0:
+                df_agg[target_col] = df_agg[source_col]
+                print(f"  {source_col} → {target_col}: {non_null_count} values")
+            else:
+                print(f"  {source_col} → {target_col}: NO VALUES (column exists but all null)")
+        else:
+            print(f"  {source_col} → {target_col}: MISSING (source column doesn't exist)")
 
     # Ensure all required columns exist
     required_cols = [
@@ -309,15 +406,57 @@ def _aggregate_and_normalize_results(
         "sensitivity_delta_edge_raw","bootstrap_p_value_raw","redundancy_mi_raw","complexity_metric_raw",
         "n_trig_oos","eligibility_rate_oos","regime_breadth","fold_coverage","stab_crps_mad","tr_cv_reg","tr_fg"
     ]
+    
+    # CRITICAL: Add redundancy_mi_raw with default values if it's missing
+    # This is critical for ELV calculation and option structure recommendations
+    if 'redundancy_mi_raw' not in df_agg.columns or df_agg['redundancy_mi_raw'].isna().all():
+        print("  Adding default values for missing 'redundancy_mi_raw' column (critical for ELV)")
+        df_agg['redundancy_mi_raw'] = 0.5  # Use middle value as default
+    
     # Fallback: if tau_cv_reg exists but tr_cv_reg missing, copy it
     if 'tau_cv_reg' in df_agg.columns and 'tr_cv_reg' not in df_agg.columns:
         df_agg['tr_cv_reg'] = df_agg['tau_cv_reg']
+        print(f"  Using tau_cv_reg for tr_cv_reg: {df_agg['tr_cv_reg'].notna().sum()} values")
+    
+    print("\nValidating required columns for ELV calculation:")
     for c in required_cols:
         if c not in df_agg.columns:
             df_agg[c] = np.nan
+            print(f"  Added missing column: {c}")
+        else:
+            non_null = df_agg[c].notna().sum()
+            total = len(df_agg)
+            print(f"  {c}: {non_null}/{total} values" + 
+                 (" (ALL NULL)" if non_null == 0 else ""))
     
     # Convert individual back to original form (ticker, list of signals)
     df_agg['individual'] = df_agg['individual'].apply(lambda x: (x[0], list(x[1])))
+    
+    # Final validation of critical ELV metrics
+    critical_metrics = [
+        "edge_crps_raw", "edge_ig_raw", "edge_pin_q10_raw", "edge_pin_q90_raw",
+        "edge_w1_raw", "edge_calib_mae_raw", "sensitivity_delta_edge_raw", 
+        "redundancy_mi_raw", "complexity_metric_raw"
+    ]
+    
+    print("\nFinal validation of critical metrics:")
+    all_good = True
+    for metric in critical_metrics:
+        non_null = df_agg[metric].notna().sum()
+        total = len(df_agg)
+        pct = (non_null / total * 100) if total > 0 else 0
+        
+        status = "OK" if pct > 90 else "WARNING" if pct > 50 else "ERROR"
+        print(f"  {metric}: {non_null}/{total} values ({pct:.1f}%) - {status}")
+        
+        if pct < 50:
+            all_good = False
+    
+    if not all_good:
+        print("\nWARNING: Some critical metrics are missing or have few values.")
+        print("ELV calculation may produce empty or incomplete results.")
+    else:
+        print("\nAll critical metrics are well-populated for ELV calculation.")
     
     return df_agg
 

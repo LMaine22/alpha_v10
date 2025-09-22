@@ -29,7 +29,11 @@ def suggest_option_structure(
     edges = np.asarray(band_edges, dtype=float)
     p = np.asarray(band_probs, dtype=float)
     if edges.size < 2 or p.size != edges.size - 1:
-        return "no-structure / wait (insufficient edge)"
+        return "no-structure / wait (invalid edge format)"
+    
+    # Check for NaN values that would cause calculation failures
+    if np.isnan(edges).any() or np.isnan(p).any():
+        return "no-structure / wait (contains NaN values)"
 
     lo = edges[:-1]
     hi = edges[1:]

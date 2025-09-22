@@ -258,10 +258,13 @@ def save_results(
     splits: HybridSplits,
     settings: Settings,
     regime_model: Optional[RegimeModel] = None
-) -> None:
+) -> str:
     """
     Main entry point for saving all run artifacts.
     This orchestrates calls to specialized writers for each artifact.
+    
+    Returns:
+        The path to the generated forecast slate CSV.
     """
     print("\n--- Saving All Run Artifacts ---")
     _ensure_dir(run_dir)
@@ -287,30 +290,41 @@ def save_results(
         except Exception as e:
             print(f"Error getting description: {e}")
             return "Invalid setup"
-    final_results_df['description'] = final_results_df.apply(get_desc, axis=1)
+    final_results_df['setup_desc'] = final_results_df.apply(get_desc, axis=1)
 
-    # Convert individual tuples to clean string representation
+    # Convert individual tuples to clean string representation for CSV
+    # but keep the original tuple form for passing to write_forecast_slate
+    df_for_csv = final_results_df.copy()
+    
     def clean_individual_str(ind):
         if isinstance(ind, str):
             return ind
         ticker, signals = ind
-        # Convert numpy strings to regular strings
         ticker_str = str(ticker) if hasattr(ticker, '__str__') else ticker
         signals_list = [str(s) if hasattr(s, '__str__') else s for s in signals]
         return str((ticker_str, signals_list))
     
-    final_results_df['individual'] = final_results_df['individual'].apply(clean_individual_str)
+    df_for_csv['individual'] = df_for_csv['individual'].apply(clean_individual_str)
     pareto_path = os.path.join(run_dir, "pareto_front_elv.csv")
-    final_results_df.to_csv(pareto_path, index=False, float_format='%.4f')
+    df_for_csv.to_csv(pareto_path, index=False, float_format='%.4f')
     print(f"ELV-scored Pareto front saved to: {pareto_path}")
 
     # Save the Forecast Slate
-    pf_list = _df_to_individual_list(final_results_df)
-    write_forecast_slate(pf_list, signals_metadata, run_dir)
+    # Convert DataFrame back to list of dicts for the writer function
+    pf_list = []
+    for _, row in final_results_df.iterrows():
+        metrics = row.to_dict()
+        # The 'individual' is already in the correct tuple format in final_results_df
+        individual = metrics.pop('individual')
+        pf_list.append({'individual': individual, 'metrics': metrics})
+
+    forecast_slate_path = write_forecast_slate(pf_list, signals_metadata, run_dir)
     
     # Save Regime Diagnostics
     if regime_model:
         write_regime_artifacts(regime_model, run_dir)
+        
+    return forecast_slate_path
 
 
 def write_regime_artifacts(regime_model: RegimeModel, run_dir: str):

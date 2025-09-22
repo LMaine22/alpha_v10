@@ -56,11 +56,8 @@ def _get_interpretable_event_name(feature_name: str) -> str:
         # Fallback for unmapped event features
         return feature_name.replace("_", " ").title()
 
-    # Handle non-event features (remove ticker prefix)
-    parts = feature_name.split('_', 1)
-    if len(parts) > 1 and ' ' in parts[0]:  # Heuristic for a ticker
-        return parts[1]
-    
+    # For non-event features, the full feature name is the description.
+    # This preserves the ticker prefix for inter-market signals.
     return feature_name
 
 # ===================================================================

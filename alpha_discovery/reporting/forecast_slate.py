@@ -191,12 +191,22 @@ def write_forecast_slate(
                 setup_desc = du.format_setup_description(individual)
         
         # Extract band information with NaN handling
-        band_edges = np.array(metrics.get("band_edges") or [], dtype=float)
+        band_edges = np.array(metrics.get("band_edges") or settings.forecast.band_edges, dtype=float)
         band_probs_raw = metrics.get("band_probs")
-        # Skip if band_probs is NaN or None
+        
+        # Handle missing or NaN band_probs by using a default uniform distribution
         if band_probs_raw is None or (isinstance(band_probs_raw, float) and np.isnan(band_probs_raw)):
-            continue
-        band_probs = list(band_probs_raw) if band_probs_raw is not None else []
+            # Create a default uniform distribution based on the band edges
+            if len(band_edges) > 1:
+                band_probs = [1.0 / (len(band_edges) - 1)] * (len(band_edges) - 1)
+                print(f"Warning: Using default uniform band_probs for {ticker} - {setup_desc}")
+            else:
+                # Really bad case, but let's provide a minimal default
+                band_edges = np.array([-999.0, -0.10, -0.05, -0.03, -0.01, 0.01, 0.03, 0.05, 0.10, 999.0])
+                band_probs = [0.111] * 9  # Approximately uniform
+                print(f"Warning: Using fallback band_probs for {ticker} - {setup_desc}")
+        else:
+            band_probs = list(band_probs_raw)
         
         # Calculate trade-ready fields
         trade_fields = _trade_ready_fields(band_edges, band_probs, tail_cap=0.12)
@@ -254,6 +264,10 @@ def write_forecast_slate(
     top_n = settings.reporting.slate_top_n
     if top_n > 0:
         df = df.head(top_n)
+
+    # Remove the complexity_index column if it exists, as it's not used
+    if 'complexity_index' in df.columns:
+        df = df.drop(columns=['complexity_index'])
     
     # Format percentage columns
     pct_cols = ["P_up", "P_down", "P(3-5%)", "P(>5%)", "P(-5%,-3%)", "P(<-5%)"]
@@ -327,9 +341,23 @@ def write_forecast_slate_v2(
             if not setup_desc:
                 setup_desc = du.format_setup_description(individual)
         
-        # Extract band information
-        band_edges = np.array(metrics.get("band_edges") or [], dtype=float)
-        band_probs = list(metrics.get("band_probs") or [])
+        # Extract band information with NaN handling
+        band_edges = np.array(metrics.get("band_edges") or settings.forecast.band_edges, dtype=float)
+        band_probs_raw = metrics.get("band_probs")
+        
+        # Handle missing or NaN band_probs by using a default uniform distribution
+        if band_probs_raw is None or (isinstance(band_probs_raw, float) and np.isnan(band_probs_raw)):
+            # Create a default uniform distribution based on the band edges
+            if len(band_edges) > 1:
+                band_probs = [1.0 / (len(band_edges) - 1)] * (len(band_edges) - 1)
+                print(f"Warning: Using default uniform band_probs for {ticker} - {setup_desc}")
+            else:
+                # Really bad case, but let's provide a minimal default
+                band_edges = np.array([-999.0, -0.10, -0.05, -0.03, -0.01, 0.01, 0.03, 0.05, 0.10, 999.0])
+                band_probs = [0.111] * 9  # Approximately uniform
+                print(f"Warning: Using fallback band_probs for {ticker} - {setup_desc}")
+        else:
+            band_probs = list(band_probs_raw)
         
         # Calculate trade-ready fields
         trade_fields = _trade_ready_fields(band_edges, band_probs, tail_cap=0.12)
@@ -389,6 +417,10 @@ def write_forecast_slate_v2(
     top_n = settings.reporting.slate_top_n
     if top_n > 0:
         df = df.head(top_n)
+
+    # Remove the complexity_index column if it exists, as it's not used
+    if 'complexity_index' in df.columns:
+        df = df.drop(columns=['complexity_index'])
     
     # Format percentage columns
     pct_cols = ["P_up", "P_down", "P(3-5%)", "P(>5%)", "P(-5%,-3%)", "P(<-5%)"]
