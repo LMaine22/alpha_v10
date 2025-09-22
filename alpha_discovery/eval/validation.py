@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from collections import defaultdict
 from tqdm import tqdm
+from joblib import Parallel, delayed, Memory
 
 from ..config import settings
 from ..core.splits import HybridSplits
@@ -13,6 +14,9 @@ from ..eval.metrics.robustness import page_hinkley
 from ..eval.regime import fit_regimes, assign_regimes, align_and_map_regimes, RegimeModel
 from ..eval.selection import get_trigger_mask, get_eligibility_mask
 from .elv import _robust_scaler
+
+# Setup caching for expensive operations
+memory = Memory(location='./cache', verbose=0)
 
 
 def _forward_returns(master_df: pd.DataFrame, ticker: str, k: int, price_field: str) -> pd.Series:
@@ -23,6 +27,7 @@ def _forward_returns(master_df: pd.DataFrame, ticker: str, k: int, price_field: 
         return pd.Series(index=master_df.index, dtype=float)
     return px.shift(-k) / px - 1.0
 
+@memory.cache
 def _evaluate_setup_on_window(
     setup: Tuple[str, List[str]],
     window_idx: pd.DatetimeIndex,
@@ -93,6 +98,50 @@ def _evaluate_setup_on_window(
     return results
 
 
+@memory.cache
+def _cached_fit_regimes(train_data: pd.DataFrame, price_col: str) -> Optional[RegimeModel]:
+    """Cached regime fitting to avoid recomputation."""
+    return fit_regimes(train_data, price_col)[0]
+
+def _process_single_cv_candidate(
+    setup_dict: Dict,
+    splits: HybridSplits,
+    signals_df: pd.DataFrame,
+    master_df: pd.DataFrame,
+    feature_matrix: pd.DataFrame,
+    signals_meta: List[Dict],
+    aligned_models: List[RegimeModel],
+    oos_occupancy: Dict[int, float]
+) -> Tuple[Tuple, Dict]:
+    """Process a single candidate for CV metrics - parallelized."""
+    individual = setup_dict['individual']
+    ticker, signals = individual
+    hashable_individual = (ticker, tuple(signals))
+    
+    # Calculate trigger rates per regime, per fold
+    regime_rates_by_fold = defaultdict(list)
+    for i, (train_idx, _) in enumerate(splits.discovery_cv):
+        fold_eval = _evaluate_setup_on_window(individual, train_idx, signals_df, master_df, feature_matrix, signals_meta, aligned_models[i])
+        regime_triggers = fold_eval['regime_metrics'].get('regime_triggers', {})
+        regime_days = fold_eval['regime_metrics'].get('regime_days', {})
+        for r, n_days in regime_days.items():
+            rate = regime_triggers.get(r, 0) / n_days if n_days > 0 else 0
+            regime_rates_by_fold[r].append(rate)
+
+    # Median over folds
+    median_rates_per_regime = {r: np.median(rates) for r, rates in regime_rates_by_fold.items()}
+    
+    # Blend with OOS weights
+    tau_cv_reg = sum(oos_occupancy.get(r, 0) * rate for r, rate in median_rates_per_regime.items())
+    
+    result = {
+        'tr_cv_reg': tau_cv_reg,
+        'tr_cv_reg_weights': oos_occupancy,
+        'tr_cv_reg_rates': median_rates_per_regime
+    }
+    
+    return hashable_individual, result
+
 def _calculate_discovery_metrics(
     discovery_candidates: List[Dict],
     splits: HybridSplits,
@@ -107,9 +156,15 @@ def _calculate_discovery_metrics(
     """
     print("\n--- Calculating Discovery CV Metrics (including regime-weighted trigger rates) ---")
     
-    # Fit a regime model on each CV train fold
+    # Fit a regime model on each CV train fold (cached)
     price_col = f"{settings.data.benchmark_ticker}_{settings.forecast.price_field}"
-    cv_regime_models = [fit_regimes(master_df.loc[train_idx], price_col)[0] for train_idx, _ in splits.discovery_cv]
+    print("  Fitting regime models for CV folds...")
+    cv_regime_models = []
+    for train_idx, _ in splits.discovery_cv:
+        train_data = master_df.loc[train_idx]
+        model = _cached_fit_regimes(train_data, price_col)
+        cv_regime_models.append(model)
+    
     cv_regime_models = [m for m in cv_regime_models if m is not None]
 
     if not cv_regime_models:
@@ -136,33 +191,19 @@ def _calculate_discovery_metrics(
         K = anchor_model.n_regimes
         oos_occupancy = {r: 1.0 / K for r in range(K)}
 
-    cv_metrics_map = defaultdict(dict)
-    for setup_dict in tqdm(discovery_candidates, desc="Calculating CV metrics", unit="candidate"):
-        individual = setup_dict['individual']
-        
-        # Convert individual to hashable form for dictionary key
-        ticker, signals = individual
-        hashable_individual = (ticker, tuple(signals))
-        
-        # Calculate trigger rates per regime, per fold
-        regime_rates_by_fold = defaultdict(list)
-        for i, (train_idx, _) in enumerate(splits.discovery_cv):
-            fold_eval = _evaluate_setup_on_window(individual, train_idx, signals_df, master_df, feature_matrix, signals_meta, aligned_models[i])
-            regime_triggers = fold_eval['regime_metrics'].get('regime_triggers', {})
-            regime_days = fold_eval['regime_metrics'].get('regime_days', {})
-            for r, n_days in regime_days.items():
-                rate = regime_triggers.get(r, 0) / n_days if n_days > 0 else 0
-                regime_rates_by_fold[r].append(rate)
+    # Parallel processing of candidates
+    print(f"  Processing {len(discovery_candidates)} candidates in parallel...")
+    cv_results = Parallel(n_jobs=-1, batch_size="auto")(
+        delayed(_process_single_cv_candidate)(
+            setup_dict, splits, signals_df, master_df, feature_matrix, 
+            signals_meta, aligned_models, oos_occupancy
+        ) for setup_dict in discovery_candidates
+    )
 
-        # Median over folds
-        median_rates_per_regime = {r: np.median(rates) for r, rates in regime_rates_by_fold.items()}
-        
-        # Blend with OOS weights
-        tau_cv_reg = sum(oos_occupancy.get(r, 0) * rate for r, rate in median_rates_per_regime.items())
-        
-        cv_metrics_map[hashable_individual]['tr_cv_reg'] = tau_cv_reg
-        cv_metrics_map[hashable_individual]['tr_cv_reg_weights'] = oos_occupancy
-        cv_metrics_map[hashable_individual]['tr_cv_reg_rates'] = median_rates_per_regime
+    # Convert results to dictionary
+    cv_metrics_map = defaultdict(dict)
+    for hashable_individual, result in cv_results:
+        cv_metrics_map[hashable_individual] = result
 
     return cv_metrics_map
 
@@ -461,6 +502,38 @@ def _aggregate_and_normalize_results(
     return df_agg
 
 
+def _process_single_candidate(
+    setup_dict: Dict,
+    splits: HybridSplits,
+    signals_df: pd.DataFrame,
+    master_df: pd.DataFrame,
+    feature_matrix: pd.DataFrame,
+    signals_meta: List[Dict]
+) -> Dict:
+    """Process a single candidate for OOS and Gauntlet evaluation - parallelized."""
+    setup = setup_dict['individual']
+    
+    # OOS Evaluation
+    oos_fold_results = []
+    for j, oos_idx in enumerate(splits.oos):
+        fold_result = _evaluate_setup_on_window(setup, oos_idx, signals_df, master_df, feature_matrix, signals_meta)
+        oos_fold_results.append(fold_result)
+
+    # Gauntlet Evaluation
+    gauntlet_results = {}
+    if splits.gauntlet is not None and not splits.gauntlet.empty:
+        gauntlet_results = _evaluate_setup_on_window(setup, splits.gauntlet, signals_df, master_df, feature_matrix, signals_meta)
+        ph_series = [h.get('crps', np.nan) for h_res in gauntlet_results.get('horizon_metrics', {}).values() for h in [h_res]]
+        gauntlet_results['page_hinkley_alarm'] = page_hinkley(ph_series).get('alarm', 0) if ph_series else 0
+    else:
+        gauntlet_results['page_hinkley_alarm'] = 0
+
+    return {
+        "individual": setup,
+        "oos_results": oos_fold_results,
+        "gauntlet_results": gauntlet_results
+    }
+
 def run_full_pipeline(
     candidates: List[Dict],
     discovery_results: List[Dict],
@@ -475,38 +548,20 @@ def run_full_pipeline(
     # --- 1. Calculate Discovery-Phase Metrics (e.g., tau_cv_reg) ---
     cv_metrics_map = _calculate_discovery_metrics(discovery_results, splits, signals_df, master_df, feature_matrix, signals_meta)
     
-    # --- 2. Run OOS and Gauntlet Evaluation ---
-    all_results = []
+    # --- 2. Run OOS and Gauntlet Evaluation (parallelized) ---
     print(f"\n--- Running OOS & Gauntlet Evaluation for {len(candidates)} candidates ---")
+    print(f"  Processing {len(candidates)} candidates in parallel...")
 
-    # Use tqdm progress bar for candidate evaluation
-    for i, setup_dict in enumerate(tqdm(candidates, desc="Evaluating candidates", unit="candidate")):
-        setup = setup_dict['individual']
-        
-        # OOS Evaluation
-        oos_fold_results = []
-        for j, oos_idx in enumerate(splits.oos):
-            # Remove per-candidate printing, just evaluate silently
-            fold_result = _evaluate_setup_on_window(setup, oos_idx, signals_df, master_df, feature_matrix, signals_meta)
-            oos_fold_results.append(fold_result)
+    # Check if gauntlet is empty (print once)
+    if splits.gauntlet is None or splits.gauntlet.empty:
+        print("  - Note: Gauntlet window is empty for this run")
 
-        # Gauntlet Evaluation
-        gauntlet_results = {}
-        if splits.gauntlet is not None and not splits.gauntlet.empty:
-            gauntlet_results = _evaluate_setup_on_window(setup, splits.gauntlet, signals_df, master_df, feature_matrix, signals_meta)
-            ph_series = [h.get('crps', np.nan) for h_res in gauntlet_results.get('horizon_metrics', {}).values() for h in [h_res]]
-            gauntlet_results['page_hinkley_alarm'] = page_hinkley(ph_series).get('alarm', 0) if ph_series else 0
-        else:
-            # Only print this once, not for every candidate
-            if i == 0:
-                print("  - Note: Gauntlet window is empty for this run")
-            gauntlet_results['page_hinkley_alarm'] = 0
-
-        all_results.append({
-            "individual": setup,
-            "oos_results": oos_fold_results,
-            "gauntlet_results": gauntlet_results
-        })
+    # Parallel processing of candidates
+    all_results = Parallel(n_jobs=-1, batch_size="auto")(
+        delayed(_process_single_candidate)(
+            setup_dict, splits, signals_df, master_df, feature_matrix, signals_meta
+        ) for setup_dict in tqdm(candidates, desc="Evaluating candidates", unit="candidate")
+    )
     
     # For the audit, we'll create one sample result to pass to the aggregator
     sample_result = {
