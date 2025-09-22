@@ -190,9 +190,13 @@ def write_forecast_slate(
             if not setup_desc:
                 setup_desc = du.format_setup_description(individual)
         
-        # Extract band information
+        # Extract band information with NaN handling
         band_edges = np.array(metrics.get("band_edges") or [], dtype=float)
-        band_probs = list(metrics.get("band_probs") or [])
+        band_probs_raw = metrics.get("band_probs")
+        # Skip if band_probs is NaN or None
+        if band_probs_raw is None or (isinstance(band_probs_raw, float) and np.isnan(band_probs_raw)):
+            continue
+        band_probs = list(band_probs_raw) if band_probs_raw is not None else []
         
         # Calculate trade-ready fields
         trade_fields = _trade_ready_fields(band_edges, band_probs, tail_cap=0.12)
@@ -200,9 +204,7 @@ def write_forecast_slate(
         # Calculate rank score
         rank_score = _rank_score(metrics)
         
-        # Get suggested option structure
-        band_edges = np.array(metrics.get("band_edges") or [], dtype=float)
-        band_probs = list(metrics.get("band_probs") or [])
+        # Get suggested option structure (reuse validated band arrays)
         suggested_structure = suggest_option_structure(band_edges, band_probs)
         
         row = {
@@ -280,7 +282,7 @@ def _write_ticker_coverage(df: pd.DataFrame, run_dir: str) -> None:
         df.groupby("ticker")
         .agg(
             rows=("ticker", "count"),
-            med_support=("support_min", "median"),
+            med_support=("n_trig_oos", "median"),
             med_ig=("info_gain", "median"),
             med_w1=("w1_effect", "median"),
             med_rank=("rank_score", "median")

@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
 from collections import defaultdict
+from tqdm import tqdm
 
 from ..config import settings
 from ..core.splits import HybridSplits
@@ -117,7 +118,7 @@ def _calculate_discovery_metrics(
         oos_occupancy = {r: 1.0 / K for r in range(K)}
 
     cv_metrics_map = defaultdict(dict)
-    for setup_dict in discovery_candidates:
+    for setup_dict in tqdm(discovery_candidates, desc="Calculating CV metrics", unit="candidate"):
         individual = setup_dict['individual']
         
         # Convert individual to hashable form for dictionary key
@@ -230,7 +231,8 @@ def _aggregate_and_normalize_results(
             
             is_lower_better = any(substr in col for substr in ['crps', 'pinball', 'calib', 'sensitivity', 'redundancy', 'complexity'])
             q = settings.ga.h_quantile_low if is_lower_better else settings.ga.h_quantile_high
-            row[f"{col}_raw"] = group[col].quantile(q / 100.0)
+            # Keep original names here; downstream rename will map to edge_*_raw
+            row[col] = group[col].quantile(q / 100.0)
             
         final_rows.append(row)
         
@@ -263,7 +265,7 @@ def _aggregate_and_normalize_results(
     # Keep as hashable tuples for merging
     cv_df = pd.DataFrame([{
         'individual': k,  # Keep as tuple for merging
-        'tau_cv_reg': v.get('tr_cv_reg', np.nan)
+        'tr_cv_reg': v.get('tr_cv_reg', np.nan)  # Fixed column name
     } for k, v in cv_metrics_map.items()])
 
     if not temp_df.empty:
@@ -285,17 +287,17 @@ def _aggregate_and_normalize_results(
     
     # Rename columns to match ELV expectations
     rename_map = {
-        "crps": "edge_crps_raw",
-        "pinball_q10": "edge_pin_q10_raw",
-        "pinball_q90": "edge_pin_q90_raw",
-        "info_gain": "edge_ig_raw",
-        "w1_effect": "edge_w1_raw",
-        "calib_mae": "edge_calib_mae_raw",
-        "sensitivity_delta_edge": "sensitivity_delta_edge_raw",
-        "bootstrap_p_value": "bootstrap_p_value_raw",
-        "redundancy_mi": "redundancy_mi_raw",
-        "permutation_entropy": "complexity_metric_raw",
-        "complexity_index": "complexity_metric_raw",
+        "crps_raw": "edge_crps_raw",
+        "pinball_q10_raw": "edge_pin_q10_raw",
+        "pinball_q90_raw": "edge_pin_q90_raw",
+        "info_gain_raw": "edge_ig_raw",
+        "w1_effect_raw": "edge_w1_raw",
+        "calib_mae_raw": "edge_calib_mae_raw",
+        "sensitivity_delta_edge_raw": "sensitivity_delta_edge_raw",
+        "bootstrap_p_value_raw": "bootstrap_p_value_raw",
+        "redundancy_mi_raw": "redundancy_mi_raw",
+        "permutation_entropy_raw": "complexity_metric_raw",
+        "complexity_index_raw": "complexity_metric_raw",
     }
     for old, new in rename_map.items():
         if old in df_agg.columns and new not in df_agg.columns:
@@ -305,8 +307,11 @@ def _aggregate_and_normalize_results(
     required_cols = [
         "edge_crps_raw","edge_pin_q10_raw","edge_pin_q90_raw","edge_ig_raw","edge_w1_raw","edge_calib_mae_raw",
         "sensitivity_delta_edge_raw","bootstrap_p_value_raw","redundancy_mi_raw","complexity_metric_raw",
-        "n_trig_oos","eligibility_rate_oos","regime_breadth","fold_coverage","stab_crps_mad","tau_cv_reg","tr_fg"
+        "n_trig_oos","eligibility_rate_oos","regime_breadth","fold_coverage","stab_crps_mad","tr_cv_reg","tr_fg"
     ]
+    # Fallback: if tau_cv_reg exists but tr_cv_reg missing, copy it
+    if 'tau_cv_reg' in df_agg.columns and 'tr_cv_reg' not in df_agg.columns:
+        df_agg['tr_cv_reg'] = df_agg['tau_cv_reg']
     for c in required_cols:
         if c not in df_agg.columns:
             df_agg[c] = np.nan
@@ -335,27 +340,28 @@ def run_full_pipeline(
     all_results = []
     print(f"\n--- Running OOS & Gauntlet Evaluation for {len(candidates)} candidates ---")
 
-    for setup_dict in candidates:
+    # Use tqdm progress bar for candidate evaluation
+    for i, setup_dict in enumerate(tqdm(candidates, desc="Evaluating candidates", unit="candidate")):
         setup = setup_dict['individual']
         
         # OOS Evaluation
         oos_fold_results = []
-        for i, oos_idx in enumerate(splits.oos):
-            print(f"  - Evaluating setup on OOS Fold {i+1}/{len(splits.oos)}: {oos_idx.min().date()} to {oos_idx.max().date()}")
+        for j, oos_idx in enumerate(splits.oos):
+            # Remove per-candidate printing, just evaluate silently
             fold_result = _evaluate_setup_on_window(setup, oos_idx, signals_df, master_df, feature_matrix, signals_meta)
             oos_fold_results.append(fold_result)
 
         # Gauntlet Evaluation
         gauntlet_results = {}
         if splits.gauntlet is not None and not splits.gauntlet.empty:
-            print(f"  - Evaluating setup on Gauntlet: {splits.gauntlet.min().date()} to {splits.gauntlet.max().date()}")
             gauntlet_results = _evaluate_setup_on_window(setup, splits.gauntlet, signals_df, master_df, feature_matrix, signals_meta)
             ph_series = [h.get('crps', np.nan) for h_res in gauntlet_results.get('horizon_metrics', {}).values() for h in [h_res]]
             gauntlet_results['page_hinkley_alarm'] = page_hinkley(ph_series).get('alarm', 0) if ph_series else 0
         else:
-            print("  - Gauntlet window empty -> skipped")
+            # Only print this once, not for every candidate
+            if i == 0:
+                print("  - Note: Gauntlet window is empty for this run")
             gauntlet_results['page_hinkley_alarm'] = 0
-
 
         all_results.append({
             "individual": setup,

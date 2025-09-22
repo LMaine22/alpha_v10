@@ -102,10 +102,6 @@ def build_signals(master_df: pd.DataFrame):
     return signals_df, signals_meta
 
 
-# -----------------------------
-# Human-readable helpers
-# -----------------------------
-
 
 
 # -----------------------------
@@ -170,6 +166,27 @@ def main():
 
     # --- OOS & Gauntlet Evaluation Phase ---
     pre_elv_df = run_full_pipeline(unique_candidates, all_discovery_results, splits, signals_df, master_df, feature_matrix, signals_meta)
+
+    # Debug: Check pre_elv_df before ELV calculation
+    print("\n--- Debug: pre_elv_df info ---")
+    print(f"Shape: {pre_elv_df.shape}")
+    print(f"Columns: {pre_elv_df.columns.tolist()}")
+    print(f"Sample individual values: {pre_elv_df['individual'].head()}")
+    print(f"\nNon-null counts by column:")
+    null_info = pre_elv_df.notna().sum().sort_values()
+    for col, count in null_info.items():
+        if count == 0:
+            print(f"  {col}: {count} (ALL NULL)")
+        elif count < len(pre_elv_df):
+            print(f"  {col}: {count} ({len(pre_elv_df) - count} null)")
+    
+    # Check specifically for edge metrics
+    edge_cols = [col for col in pre_elv_df.columns if 'edge_' in col and '_raw' in col]
+    if edge_cols:
+        print(f"\nEdge metrics check ({len(edge_cols)} columns):")
+        for col in edge_cols:
+            non_null = pre_elv_df[col].notna().sum()
+            print(f"  {col}: {non_null} non-null values")
 
     # --- ELV Scoring & Labeling Phase ---
     final_results_df = calculate_elv_and_labels(pre_elv_df)

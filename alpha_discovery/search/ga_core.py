@@ -221,9 +221,11 @@ def _calculate_objectives(
             
             # --- Tune-up: Handle sparse triggers ---
             if r_test_cond.size < 5:
+                #print(f"WARNING: Horizon {h} fold skipped: only {r_test_cond.size} test triggers (<5)")
                 continue # Skip fold/horizon if insufficient test triggers
 
             if r_train_cond.size < min_sup_fold:
+                #print(f"WARNING: Horizon {h} fold skipped: only {r_train_cond.size} train triggers (<{min_sup_fold})")
                 continue
 
             forecast_probs = _histogram_probs(r_train_cond.values, band_edges)
@@ -244,6 +246,8 @@ def _calculate_objectives(
                     fold_metric_values.setdefault(key, []).append(value)
         
         if not fold_band_probs:
+            if is_oos_fold:
+                print(f"WARNING: No usable folds for horizon {h} in OOS window (all skipped)")
             continue
         
         # Aggregate metrics and band_probs across folds

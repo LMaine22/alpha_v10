@@ -76,6 +76,15 @@ def calculate_elv_and_labels(cohort_df: pd.DataFrame) -> pd.DataFrame:
     df.loc[mask_gate, 'edge_oos'] = 0.0
 
     # --- 2. LiveTriggerRate_Prior Component ---
+    # Check if required columns exist
+    if 'tr_cv_reg' not in df.columns:
+        print("Warning: 'tr_cv_reg' column missing, using default value")
+        df['tr_cv_reg'] = elv_cfg.live_trigger_rate_cv_weight  # or some sensible default
+    
+    if 'tr_fg' not in df.columns:
+        print("Warning: 'tr_fg' column missing, using default value")
+        df['tr_fg'] = 0.0
+    
     df['live_tr_prior'] = (
         elv_cfg.live_trigger_rate_cv_weight * df['tr_cv_reg'] +
         elv_cfg.live_trigger_rate_fg_weight * df['tr_fg']

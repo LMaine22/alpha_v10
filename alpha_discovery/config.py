@@ -7,11 +7,11 @@ from datetime import date
 class GaConfig(BaseModel):
     """Genetic Algorithm parameters (model-agnostic, NSGA-compatible)."""
     population_size: int = 50
-    generations: int = 4
+    generations: int = 5
     elitism_rate: float = 0.1
     mutation_rate: float = 0.35
     crossover_rate: float = 0.75
-    seed: int = 170 # keep visible in run_dir names
+    seed: int = 172 # keep visible in run_dir names
 
     # Setup grammar — PAIRS ONLY
     setup_lengths_to_explore: List[int] = [2]

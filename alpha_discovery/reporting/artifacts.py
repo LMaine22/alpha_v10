@@ -278,13 +278,28 @@ def save_results(
     meta_map = du.build_signal_meta_map(signals_metadata)
     def get_desc(row):
         try:
-            _, signals = eval(row['individual'])
+            # Handle both tuple and string representations
+            if isinstance(row['individual'], str):
+                _, signals = eval(row['individual'])
+            else:
+                _, signals = row['individual']
             return du.desc_from_meta(signals, meta_map)
-        except: return "Invalid setup"
+        except Exception as e:
+            print(f"Error getting description: {e}")
+            return "Invalid setup"
     final_results_df['description'] = final_results_df.apply(get_desc, axis=1)
 
-    # Save the main ELV-scored Pareto front
-    final_results_df['individual'] = final_results_df['individual'].astype(str)
+    # Convert individual tuples to clean string representation
+    def clean_individual_str(ind):
+        if isinstance(ind, str):
+            return ind
+        ticker, signals = ind
+        # Convert numpy strings to regular strings
+        ticker_str = str(ticker) if hasattr(ticker, '__str__') else ticker
+        signals_list = [str(s) if hasattr(s, '__str__') else s for s in signals]
+        return str((ticker_str, signals_list))
+    
+    final_results_df['individual'] = final_results_df['individual'].apply(clean_individual_str)
     pareto_path = os.path.join(run_dir, "pareto_front_elv.csv")
     final_results_df.to_csv(pareto_path, index=False, float_format='%.4f')
     print(f"ELV-scored Pareto front saved to: {pareto_path}")
