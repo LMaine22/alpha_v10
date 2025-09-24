@@ -49,9 +49,14 @@ def _dna(individual: Tuple[str, List[str]]) -> Tuple[str, Tuple[str, ...]]:
 
 def _forward_returns(master_df: pd.DataFrame, ticker: str, k: int, price_field: str) -> pd.Series:
     col = f"{ticker}_{price_field}"
-    px = pd.to_numeric(master_df.get(col), errors="coerce")
-    if px is None or px.empty:
+    px_raw = master_df.get(col)
+    if px_raw is None:
         return pd.Series(index=master_df.index, dtype=float)
+    
+    px = pd.to_numeric(px_raw, errors="coerce")
+    if px is None or (hasattr(px, 'empty') and px.empty):
+        return pd.Series(index=master_df.index, dtype=float)
+    
     fwd = px.shift(-k) / px - 1.0
     return fwd
 
@@ -247,8 +252,7 @@ def _calculate_objectives(
                     fold_metric_values.setdefault(key, []).append(value)
         
         if not fold_band_probs:
-            if is_oos_fold:
-                print(f"WARNING: No usable folds for horizon {h} in OOS window (all skipped)")
+            # Silently skip horizons where no folds were usable (e.g., at end of OOS window)
             continue
         
         # Aggregate metrics and band_probs across folds

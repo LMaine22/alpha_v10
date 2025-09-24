@@ -38,12 +38,28 @@ def calculate_elv_and_labels(cohort_df: pd.DataFrame) -> pd.DataFrame:
     elv_cfg = settings.elv
     df = cohort_df.copy()
 
+    # --- Pre-computation: Ensure all raw metrics exist ---
+    # The validation pipeline sometimes produces metrics without the `_raw` suffix.
+    # We will create the `_raw` versions here if they don't exist, ensuring
+    # consistency for downstream consumers like Hart Score.
+    raw_metric_map = {
+        'transfer_entropy': 'transfer_entropy_raw',
+        'redundancy_mi': 'redundancy_mi_raw',
+        'permutation_entropy': 'complexity_metric_raw', # Assuming permutation is default
+        'complexity_index': 'complexity_metric_raw'
+    }
+    for source, target in raw_metric_map.items():
+        if source in df.columns and target not in df.columns:
+            df[target] = df[source]
+            print(f"Created '{target}' from source column '{source}'.")
+
     # Debug input metrics
     print("\n=== ELV Calculation Input Check ===")
     key_metrics = [
         "edge_crps_raw", "edge_pin_q10_raw", "edge_pin_q90_raw", "edge_ig_raw", 
         "edge_w1_raw", "edge_calib_mae_raw", "sensitivity_delta_edge_raw",
-        "bootstrap_p_value_raw", "redundancy_mi_raw", "complexity_metric_raw"
+        "bootstrap_p_value_raw", "redundancy_mi_raw", "complexity_metric_raw",
+        "transfer_entropy_raw"
     ]
     
     print("Non-null counts by column:")
@@ -59,7 +75,8 @@ def calculate_elv_and_labels(cohort_df: pd.DataFrame) -> pd.DataFrame:
     # Fill missing values in key fields to prevent NaN propagation
     fill_zero_cols = ['edge_crps_raw', 'edge_pin_q10_raw', 'edge_pin_q90_raw', 
                      'edge_ig_raw', 'edge_w1_raw', 'edge_calib_mae_raw', 
-                     'sensitivity_delta_edge_raw', 'bootstrap_p_value_raw']
+                     'sensitivity_delta_edge_raw', 'bootstrap_p_value_raw',
+                     'transfer_entropy_raw']
     
     # First, ensure all required columns exist
     for col in fill_zero_cols:
@@ -158,48 +175,86 @@ def calculate_elv_and_labels(cohort_df: pd.DataFrame) -> pd.DataFrame:
     mask_gate = (df['n_trig_oos'] < adjusted_gate) & (~df['dormant_qualified_flag'])
     df.loc[mask_gate, 'edge_oos'] = 0.0
 
-    # --- 2. LiveTriggerRate_Prior Component ---
-    # Check if required columns exist
+    # --- 2. LiveTriggerRate_Prior Component (recency-aware) ---
+    # Required inputs
     if 'tr_cv_reg' not in df.columns:
         print("Warning: 'tr_cv_reg' column missing, using default value")
-        df['tr_cv_reg'] = elv_cfg.live_trigger_rate_cv_weight  # or some sensible default
-    
+        df['tr_cv_reg'] = 0.0
     if 'tr_fg' not in df.columns:
         print("Warning: 'tr_fg' column missing, using default value")
         df['tr_fg'] = 0.0
     
-    df['live_tr_prior'] = (
+    # Base prior from regime-weighted CV and foreground estimates
+    base_prior = (
         elv_cfg.live_trigger_rate_cv_weight * df['tr_cv_reg'] +
         elv_cfg.live_trigger_rate_fg_weight * df['tr_fg']
     )
-    df['live_tr_prior'] = np.minimum(1.0, df['live_tr_prior'] / elv_cfg.trigger_rate_saturation)
+    
+    # Short-term rate proxy: use rolling/foreground if available, else fall back to base
+    short_term = df.get('tr_short_term', df['tr_fg']).fillna(0.0)
+    blended_rate = elv_cfg.trigger_rate_blend_base_weight * base_prior + (1 - elv_cfg.trigger_rate_blend_base_weight) * short_term
+    
+    # Recency override using last_trigger and current end date
+    # Estimate days_since_trigger if available
+    if 'last_trigger' in df.columns:
+        last_trigger_dt = pd.to_datetime(df['last_trigger'], errors='coerce')
+        # Use end_date from settings if available; else use max date in cohort (if provided)
+        end_date = pd.to_datetime(settings.data.end_date)
+        days_since = (end_date - last_trigger_dt).dt.days
+    else:
+        days_since = pd.Series(np.inf, index=df.index)
+    
+    # Recent boost decays with days_since; if very recent, force to strong value
+    tau_days = elv_cfg.recency_tau_days_default
+    recent_boost = np.exp(-np.clip(days_since, 0, None) / max(tau_days, 1))
+    recent_override = (np.clip(days_since, 0, None) <= elv_cfg.recency_override_days)
+    
+    # Trigger prior is max of recent activity and blended base rate
+    live_tr_prior_raw = np.maximum(recent_boost, blended_rate)
+    # If within override window, push to 1.0 before saturation
+    live_tr_prior_raw[recent_override] = 1.0
+    
+    # Apply saturation
+    df['live_tr_prior'] = np.minimum(1.0, live_tr_prior_raw / max(elv_cfg.trigger_rate_saturation, 1e-9))
 
-    # --- 3. CoverageFactor Component ---
-    # Ensure we have the required columns
-    if 'regime_breadth' not in df.columns:
-        print("Warning: 'regime_breadth' column missing, using default value 0.5")
-        df['regime_breadth'] = 0.5
-    df['regime_breadth'] = df['regime_breadth'].fillna(0.5)
+    # --- 3. CoverageFactor Component (composite) ---
+    # Regime coverage: share of regimes with positive OOS edge (if available), else use regime_breadth
+    if 'regime_positive_share' in df.columns:
+        cover_reg = df['regime_positive_share'].clip(0, 1).fillna(0.5)
+    else:
+        if 'regime_breadth' not in df.columns:
+            print("Warning: 'regime_breadth' column missing, using default value 0.5")
+            df['regime_breadth'] = 0.5
+        cover_reg = df['regime_breadth'].fillna(0.5)
     
-    if 'fold_coverage' not in df.columns:
-        print("Warning: 'fold_coverage' column missing, using default value 0.5")
-        df['fold_coverage'] = 0.5
-    df['fold_coverage'] = df['fold_coverage'].fillna(0.5)
+    # Support coverage: normalize recent OOS triggers; prefer last 126 days if present
+    if 'n_trig_oos_recent' in df.columns:
+        cover_sup = np.minimum(1.0, df['n_trig_oos_recent'] / max(settings.elv.maturity_n_triggers / 2, 1))
+    else:
+        cover_sup = np.minimum(1.0, df['n_trig_oos'] / max(settings.elv.maturity_n_triggers, 1))
+    cover_sup = pd.Series(cover_sup, index=df.index).fillna(0.5)
     
-    # Calculate stability component with robust error handling
-    try:
-        stability_component = 1 - _robust_scaler(df['stab_crps_mad'])
-    except Exception as e:
-        print(f"Warning: Error calculating stability component: {e}")
-        stability_component = pd.Series(0.5, index=df.index)
-    stability_component = stability_component.fillna(0.5)
+    # Band certainty: 1 - normalized entropy if band_probs available; else fallback
+    if 'band_probs' in df.columns:
+        def entropy_row(probs):
+            try:
+                p = np.array(probs, dtype=float)
+                p = p / (p.sum() + 1e-12)
+                h = -(p * np.log(p + 1e-12)).sum()
+                h_max = np.log(len(p)) if len(p) > 0 else 1.0
+                return 1.0 - (h / max(h_max, 1e-9))
+            except Exception:
+                return 0.5
+        cover_band = df['band_probs'].apply(entropy_row)
+    else:
+        cover_band = pd.Series(0.5, index=df.index)
+    cover_band = cover_band.fillna(0.5)
     
-    # Calculate coverage factor
     df['coverage_factor'] = (
-        elv_cfg.coverage_regime_breadth_weight * df['regime_breadth'] +
-        elv_cfg.coverage_fold_coverage_weight * df['fold_coverage'] +
-        elv_cfg.coverage_stability_weight * stability_component
-    )
+        elv_cfg.coverage_regime_breadth_weight * cover_reg +
+        elv_cfg.coverage_fold_coverage_weight * cover_sup +
+        elv_cfg.coverage_stability_weight * cover_band
+    ).clip(0, 1)
     df['coverage_factor'] = df['coverage_factor'].fillna(0.5)
 
     # --- 4. PenaltyAdj Component ---

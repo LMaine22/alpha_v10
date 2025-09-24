@@ -100,38 +100,13 @@ def _trade_ready_fields(edges: np.ndarray, probs: List[float], tail_cap: float =
 
 
 def _rank_score(metrics: Dict[str, Any]) -> float:
-    """Calculate composite rank score for sorting the slate."""
-    # Primary metrics (higher is better)
-    info_gain = _safe_get(metrics, "info_gain", 0.0)
-    w1_effect = _safe_get(metrics, "w1_effect", 0.0)
-    oos_te = _safe_get(metrics, "oos_te", 0.0)
-    
-    # CRPS (lower is better, so we invert it)
-    crps = _safe_get(metrics, "crps")
-    crps_score = 0.0
-    try:
-        crps_float = float(crps) if crps is not None else np.nan
-        if np.isfinite(crps_float):
-            crps_score = max(0.0, 0.2 - crps_float) * 5.0  # reward CRPS < 0.2
-    except (ValueError, TypeError):
-        crps_score = 0.0
-    
-    # Calibration (lower is better, so we invert it)
-    calib_mae = _safe_get(metrics, "calib_mae")
-    calib_score = 0.0
-    try:
-        calib_float = float(calib_mae) if calib_mae is not None else np.nan
-        if np.isfinite(calib_float):
-            calib_score = max(0.0, 0.1 - calib_float) * 10.0  # reward calib_mae < 0.1
-    except (ValueError, TypeError):
-        calib_score = 0.0
-    
-    # Support (higher is better, but with diminishing returns)
-    support_min = _safe_get(metrics, "support_min", 0)
-    support_score = min(1.0, support_min / 20.0)  # normalize to [0, 1] with cap at 20
-    
-    # Composite score
-    return float(info_gain + w1_effect + oos_te + crps_score + calib_score + support_score)
+    """
+    DEPRECATED: This function's logic was flawed and is being replaced.
+    The HartIndex is now the primary ranking score for the forecast slate.
+    This function now simply returns the HartIndex if present.
+    """
+    # The HartIndex is the new, primary composite rank score.
+    return float(_safe_get(metrics, "hart_index", 0.0))
 
 
 def _apply_ticker_caps(df: pd.DataFrame, max_per_ticker: int) -> pd.DataFrame:
@@ -258,7 +233,7 @@ def write_forecast_slate(
     df = _apply_ticker_caps(df, max_per_ticker)
     
     # Sort by rank score
-    df = df.sort_values(["rank_score", "info_gain", "w1_effect"], ascending=False)
+    df = df.sort_values("rank_score", ascending=False)
     
     # Apply Top-N cap
     top_n = settings.reporting.slate_top_n
@@ -411,7 +386,7 @@ def write_forecast_slate_v2(
     df = _apply_ticker_caps(df, max_per_ticker)
     
     # Sort by rank score
-    df = df.sort_values(["rank_score", "info_gain", "w1_effect"], ascending=False)
+    df = df.sort_values("rank_score", ascending=False)
     
     # Apply Top-N cap
     top_n = settings.reporting.slate_top_n

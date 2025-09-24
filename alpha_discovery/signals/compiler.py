@@ -124,7 +124,7 @@ def _deduplicate_signals(
 
     print("  Deduplicating signal set...")
     metadata_map = {m['signal_id']: m for m in metadata_list}
-    hashes = signals_df.apply(lambda s: pd.util.hash_pandas_object(s.values, index=False).sum(), axis=0)
+    hashes = signals_df.apply(lambda s: pd.util.hash_pandas_object(s, index=False).sum(), axis=0)
 
     unique_signals_metadata = {}
     duplicates_removed = 0
@@ -200,8 +200,8 @@ PRIMITIVE_RULES = {
     ],
     # Rules for features that are already z-scores
     'z_score_native': [
-        {'name': 'is_very_high_z', 'enter': 1.75, 'exit': 1.25},
-        {'name': 'is_very_low_z', 'enter': -1.75, 'exit': -1.25},
+        {'name': 'is_very_high_z', 'enter': 1.5, 'exit': 1.25},
+        {'name': 'is_very_low_z', 'enter': -1.5, 'exit': -1.25},
     ],
     # Rules for features we convert to z-scores
     'z_score_derived': [
@@ -395,6 +395,8 @@ def compile_signals(feature_matrix: pd.DataFrame) -> Tuple[pd.DataFrame, List[Di
 
     # Combine all boolean series into a single dataframe
     signals_df = pd.DataFrame(all_signals).fillna(False).astype(bool)
+
+    print(f"  Generated {len(all_signals)} total signals before deduplication.")
 
     # Deduplicate identical signals
     final_signals_df, final_metadata = _deduplicate_signals(signals_df, all_metadata)

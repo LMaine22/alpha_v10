@@ -45,9 +45,14 @@ def initialize_population(
     pop_size = population_size or settings.ga.population_size
     print(f"Initializing specialized population of size {pop_size}...")
     population: List[Tuple[str, List[str]]] = []
-    tradable_tickers = settings.data.tradable_tickers
+    
+    # Use effective tradable tickers (respects single ticker mode)
+    tradable_tickers = settings.data.effective_tradable_tickers
+    if settings.data.single_ticker_mode:
+        print(f"Single ticker mode enabled: only creating setups for {settings.data.single_ticker_mode}")
+    
     if not tradable_tickers:
-        raise ValueError("Cannot initialize population: settings.data.tradable_tickers is empty.")
+        raise ValueError("Cannot initialize population: no tradable tickers available.")
 
     # Use a set to ensure we don't create duplicate setups in the first generation
     seen_dna = set()
@@ -100,8 +105,12 @@ def crossover(
     ticker2, signals2 = parent2
 
     # --- Crossover Ticker ---
-    # The child inherits the ticker from one of the parents randomly.
-    child_ticker = ticker1 if rng.random() < 0.5 else ticker2
+    # In single ticker mode, child must use the single ticker
+    if settings.data.single_ticker_mode:
+        child_ticker = settings.data.single_ticker_mode
+    else:
+        # The child inherits the ticker from one of the parents randomly.
+        child_ticker = ticker1 if rng.random() < 0.5 else ticker2
 
     # --- Crossover Signals ---
     # Pool all unique signals from both parents
@@ -159,7 +168,9 @@ def mutate(
         return individual # No mutation occurs
 
     ticker, setup = individual
-    tradable_tickers = settings.data.tradable_tickers
+    
+    # Use effective tradable tickers (respects single ticker mode)
+    tradable_tickers = settings.data.effective_tradable_tickers
 
     # Decide whether to mutate the ticker or a signal
     if rng.random() < TICKER_MUTATION_PROB and len(tradable_tickers) > 1:

@@ -7,11 +7,11 @@ from datetime import date
 class GaConfig(BaseModel):
     """Genetic Algorithm parameters (model-agnostic, NSGA-compatible)."""
     population_size: int = 300
-    generations: int = 7
+    generations: int = 15
     elitism_rate: float = 0.1
-    mutation_rate: float = 0.35
-    crossover_rate: float = 0.75
-    seed: int = 173 # keep visible in run_dir names
+    mutation_rate: float = 0.3
+    crossover_rate: float = 0.7
+    seed: int = 190 # keep visible in run_dir names
 
     # Setup grammar — PAIRS ONLY
     setup_lengths_to_explore: List[int] = [2]
@@ -30,6 +30,7 @@ class GaConfig(BaseModel):
         "dfa_alpha_closeness_neg",
         "sensitivity_scan_neg",
         "redundancy_neg",  # Default, can be swapped with complexity
+        "transfer_entropy_neg",  # Added new Transfer Entropy objective
     ]
 
     # Penalty objective for GA (complexity vs redundancy)
@@ -53,6 +54,13 @@ class GaConfig(BaseModel):
     run_gauntlet: bool = False
     run_strict_oos_gauntlet: bool = False
     run_diagnostic_replay: bool = False
+
+
+class PostSimulationConfig(BaseModel):
+    """Configuration for the post-discovery options simulation."""
+    enabled: bool = True
+    hart_index_threshold: int = 55
+    top_n_candidates: int = 25
 
 
 class ValidationConfig(BaseModel):
@@ -93,7 +101,7 @@ class HybridSplitConfig(BaseModel):
 
 class ForecastConfig(BaseModel):
     """Forecast + scoring knobs for return distributions."""
-    horizons: List[int] = [5, 8, 10]
+    horizons: List[int] = [2,4]
     default_horizon: int = 5
     price_field: str = "PX_LAST"
 
@@ -131,6 +139,11 @@ class ElvConfig(BaseModel):
     live_trigger_rate_fg_weight: float = 0.3
     trigger_rate_saturation: float = 0.12 # tau_sat
 
+    # Recency-aware trigger prior
+    recency_override_days: int = 3           # If triggered within K days, boost to 1.0
+    recency_tau_days_default: int = 21       # Default decay constant for recent boost
+    trigger_rate_blend_base_weight: float = 0.6  # Weight on base (CV) vs short-term rate
+
     # Dormancy
     dormancy_eligibility_threshold: float = 0.02 # 2% of days
 
@@ -140,11 +153,11 @@ class ElvConfig(BaseModel):
     specialist_coverage_floor: float = 0.40
 
     # Gates
-    gate_min_oos_triggers: int = 5  # Lowered from 15 to allow more setups to qualify
-    gate_crps_percentile: float = 0.60
-    gate_ig_percentile: float = 0.70
-    gate_mi_max: float = 0.7
-    gate_sensitivity_max_drop: float = 0.20
+    gate_min_oos_triggers: int = 2  # Further lowered from 3 to allow more setups to qualify
+    gate_crps_percentile: float = 0.45  # Lowered from 0.50 to be more permissive
+    gate_ig_percentile: float = 0.55  # Lowered from 0.60 to be more permissive
+    gate_mi_max: float = 0.85  # Increased from 0.8 to allow more signal diversity
+    gate_sensitivity_max_drop: float = 0.30  # Increased from 0.25 to allow more setups
 
     # Disqualification
     disqualify_calib_mae_percentile: float = 0.90
@@ -161,6 +174,7 @@ class ElvConfig(BaseModel):
     edge_calibration_weight: float = 0.10
 
     # CoverageFactor component weights
+    # Reinterpreted as: regime coverage, support coverage, band certainty
     coverage_regime_breadth_weight: float = 0.5
     coverage_fold_coverage_weight: float = 0.3
     coverage_stability_weight: float = 0.2
@@ -180,27 +194,99 @@ class DataConfig(BaseModel):
     excel_file_path: str = 'data_store/raw/bb_data.xlsx'
     parquet_file_path: str = 'data_store/processed/bb_data.parquet'
     start_date: date = date(2018, 1, 1)
-    end_date: date = date(2025, 9, 18)
+    end_date: date = date(2025, 9, 23)
 
     tradable_tickers: List[str] = [
-        'MSTR US Equity','SNOW US Equity','LLY US Equity','COIN US Equity',
-        'QCOM US Equity','ULTA US Equity','CRM US Equity','AAPL US Equity',
+        'MSTR US Equity','SNOW US Equity','LLY US Equity','COIN US Equity', 
+        'NVDA US Equity', 'AVGO US Equity','SMCI US Equity',
+        'QCOM US Equity', 'CRM US Equity','AAPL US Equity',
         'AMZN US Equity','MSFT US Equity','QQQ US Equity','SPY US Equity',
         'TSM US Equity','META US Equity','TSLA US Equity','CRWV US Equity',
         'GOOGL US Equity','AMD US Equity','ARM US Equity','PLTR US Equity',
-        'JPM US Equity','C US Equity','BMY US Equity','NKE US Equity','TLT US Equity'
+        'IBM US Equity', 'MU US Equity', 'ORCL US Equity', 'ACN US Equity', 
+        'NVO US Equity', 'TXN US Equity', 'JPM US Equity','C US Equity',
+        'BMY US Equity','NKE US Equity', 'TLT US Equity'
+
+        
     ]
+    
+    # Single ticker mode: if set, only this ticker will be used for trading setups
+    # All other tradable_tickers will be treated like macro_tickers (signals only, no setups)
+    single_ticker_mode: Optional[str] = None  # Example: 'AAPL US Equity' to focus on AAPL only
+
+    # Sector mode: pick one or more named groups; union forms tradables for this run
+    sector_modes: Optional[List[str]] = ["Semiconductors"]
+    include_macro_etfs_in_tradables: bool = False  # If False, SPY/QQQ/TLT remain macro-only
+    sector_groups: dict = {
+        "Tech & AI Platforms": [
+            'AAPL US Equity','MSFT US Equity','AMZN US Equity','GOOGL US Equity','META US Equity',
+            'CRM US Equity','ORCL US Equity','SNOW US Equity','PLTR US Equity','IBM US Equity',
+            'ACN US Equity','TSLA US Equity','NKE US Equity'
+        ],
+        "Semiconductors": [
+            'NVDA US Equity','AMD US Equity','AVGO US Equity','QCOM US Equity','TXN US Equity',
+            'TSM US Equity','ARM US Equity','MU US Equity','SMCI US Equity','CRWV US Equity'
+        ],
+        "Crypto Proxies": [
+            'COIN US Equity','MSTR US Equity'
+        ],
+        "Healthcare": [
+            'LLY US Equity','NVO US Equity','BMY US Equity'
+        ],
+        "Financials": [
+            'JPM US Equity','C US Equity'
+        ],
+        "MacroETFs": [
+            'SPY US Equity','QQQ US Equity','TLT US Equity'
+        ],
+    }
+    macro_etfs: List[str] = ['SPY US Equity','QQQ US Equity','TLT US Equity']
     macro_tickers: List[str] = ['RTY Index','MXWO Index','USGG10YR Index','USGG2YR Index',
                                 'DXY Curncy','JPY Curncy','EUR Curncy','CL1 Comdty',
-                                'HG1 Comdty','XAU Curncy'
+                                'HG1 Comdty','XAU Curncy', 'VIX Index', 'JPM US Equity',
+                                'C US Equity','BMY US Equity','NKE US Equity', 'TLT US Equity'
+
     ]
     benchmark_ticker: str = 'SPY US Equity'
+
+    @property
+    def effective_tradable_tickers(self) -> List[str]:
+        """Returns the list of tickers that will be used for creating trading setups."""
+        if self.single_ticker_mode:
+            if self.single_ticker_mode not in self.tradable_tickers:
+                raise ValueError(f"Single ticker mode ticker '{self.single_ticker_mode}' not found in tradable_tickers")
+            return [self.single_ticker_mode]
+        # Sector mode override: union of selected sector groups
+        if self.sector_modes:
+            selected: List[str] = []
+            for grp in self.sector_modes:
+                members = self.sector_groups.get(grp, [])
+                selected.extend(members)
+            # Deduplicate and optionally exclude macro ETFs
+            selected_unique = list(dict.fromkeys(selected))
+            if not self.include_macro_etfs_in_tradables:
+                selected_unique = [t for t in selected_unique if t not in self.macro_etfs]
+            return selected_unique
+        # Default: use configured tradables, optionally exclude macro ETFs
+        base = list(self.tradable_tickers)
+        if not self.include_macro_etfs_in_tradables:
+            base = [t for t in base if t not in self.macro_etfs]
+        return base
+
+    @property
+    def effective_macro_tickers(self) -> List[str]:
+        """Macro tickers for feature-only roles; ensures MacroETFs always included unless promoted."""
+        tradables = set(self.effective_tradable_tickers)
+        macros = list(dict.fromkeys(self.macro_tickers + self.macro_etfs))
+        # Keep only those not in tradables
+        macros = [t for t in macros if t not in tradables]
+        return macros
 
 
 class ReportingConfig(BaseModel):
     runs_dir: str = "runs"
-    slate_top_n: int = 40
-    slate_max_per_ticker: int = 3
+    slate_top_n: int = 120  # Increased from 80
+    slate_max_per_ticker: int = 7  # Increased from 5
 
 
 class Settings(BaseModel):
@@ -219,6 +305,7 @@ class Settings(BaseModel):
     elv: ElvConfig = ElvConfig()
     data: DataConfig = DataConfig()
     reporting: ReportingConfig = ReportingConfig()
+    simulation: PostSimulationConfig = PostSimulationConfig()
 
     # Back-compat alias so existing code can use settings.validate
     @property

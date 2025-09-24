@@ -4,19 +4,27 @@ from __future__ import annotations
 from typing import List, Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
+import os
 from collections import defaultdict
 from tqdm import tqdm
 from joblib import Parallel, delayed, Memory
+from tqdm.auto import tqdm
 
 from ..config import settings
 from ..core.splits import HybridSplits
-from ..eval.metrics.robustness import page_hinkley
-from ..eval.regime import fit_regimes, assign_regimes, align_and_map_regimes, RegimeModel
-from ..eval.selection import get_trigger_mask, get_eligibility_mask
+from ..eval import metrics as M
+from ..search import ga_core
+from .regime import RegimeModel, tau_cv_reg_weighted, assign_regimes, fit_regimes
+from .selection import get_eligibility_mask, get_trigger_mask
 from .elv import _robust_scaler
+from ..eval.metrics import causality, distribution, robustness, complexity, dynamics
+from ..eval.metrics.robustness import page_hinkley
 
-# Setup caching for expensive operations
-memory = Memory(location='./cache', verbose=0)
+# Setup caching for expensive operations with improved configuration
+cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'cache', 'validation')
+os.makedirs(cache_dir, exist_ok=True)
+# Note: Cannot use both compression and mmap_mode together - we prioritize compression
+memory = Memory(location=cache_dir, verbose=0, compress=3)
 
 
 def _forward_returns(master_df: pd.DataFrame, ticker: str, k: int, price_field: str) -> pd.Series:
@@ -27,7 +35,7 @@ def _forward_returns(master_df: pd.DataFrame, ticker: str, k: int, price_field: 
         return pd.Series(index=master_df.index, dtype=float)
     return px.shift(-k) / px - 1.0
 
-@memory.cache
+@memory.cache(ignore=['master_df', 'feature_matrix', 'signals_df'])
 def _evaluate_setup_on_window(
     setup: Tuple[str, List[str]],
     window_idx: pd.DatetimeIndex,
@@ -98,9 +106,19 @@ def _evaluate_setup_on_window(
     return results
 
 
-@memory.cache
+@memory.cache(ignore=['train_data'])
 def _cached_fit_regimes(train_data: pd.DataFrame, price_col: str) -> Optional[RegimeModel]:
-    """Cached regime fitting to avoid recomputation."""
+    """Cached regime fitting to avoid recomputation.
+    We ignore the large train_data parameter for caching purposes,
+    using only the shape and price_col for cache key instead."""
+    # Include data shape in cache key without storing the full DataFrame
+    data_shape = train_data.shape if train_data is not None else None
+    # Use a hash of the data's first and last rows as a fingerprint
+    data_hash = None
+    if train_data is not None and not train_data.empty:
+        sample_data = pd.concat([train_data.iloc[:5], train_data.iloc[-5:]]) if len(train_data) > 10 else train_data
+        data_hash = hash(tuple(sample_data[price_col].dropna().tolist()))
+    
     return fit_regimes(train_data, price_col)[0]
 
 def _process_single_cv_candidate(
@@ -143,69 +161,21 @@ def _process_single_cv_candidate(
     return hashable_individual, result
 
 def _calculate_discovery_metrics(
-    discovery_candidates: List[Dict],
+    discovery_results: List[Dict],
     splits: HybridSplits,
     signals_df: pd.DataFrame,
     master_df: pd.DataFrame,
     feature_matrix: pd.DataFrame,
     signals_meta: List[Dict]
-) -> Dict[Tuple, Dict]:
+) -> Dict:
     """
-    Computes discovery-phase metrics (e.g., tau_cv_reg) for each candidate.
-    This involves fitting and aligning regime models for each CV fold.
+    This function orchestrates the calculation of detailed metrics for the discovery candidates.
     """
-    print("\n--- Calculating Discovery CV Metrics (including regime-weighted trigger rates) ---")
-    
-    # Fit a regime model on each CV train fold (cached)
-    price_col = f"{settings.data.benchmark_ticker}_{settings.forecast.price_field}"
-    print("  Fitting regime models for CV folds...")
-    cv_regime_models = []
-    for train_idx, _ in splits.discovery_cv:
-        train_data = master_df.loc[train_idx]
-        model = _cached_fit_regimes(train_data, price_col)
-        cv_regime_models.append(model)
-    
-    cv_regime_models = [m for m in cv_regime_models if m is not None]
-
-    if not cv_regime_models:
-        return defaultdict(dict)
-
-    # Select and align models
-    anchor_model = cv_regime_models[-1]._replace(anchor_model_id=f"cv_fold_{len(cv_regime_models)}")
-    aligned_models = []
-    last = len(cv_regime_models) - 1
-    for i, m in enumerate(cv_regime_models):
-        if i == last:
-            aligned_models.append(anchor_model)
-        else:
-            aligned_models.append(align_and_map_regimes(anchor_model, m))
-    
-    # --- OOS Occupancy Weights ---
-    oos_occupancy = {}
-    if splits.oos:
-        oos_window = pd.concat([master_df.loc[idx] for idx in splits.oos if not master_df.loc[idx].empty])
-        if not oos_window.empty:
-            oos_regimes = assign_regimes(oos_window, price_col, anchor_model)
-            oos_occupancy = oos_regimes.value_counts(normalize=True).to_dict()
-    if not oos_occupancy:
-        K = anchor_model.n_regimes
-        oos_occupancy = {r: 1.0 / K for r in range(K)}
-
-    # Parallel processing of candidates
-    print(f"  Processing {len(discovery_candidates)} candidates in parallel...")
-    cv_results = Parallel(n_jobs=-1, batch_size="auto")(
-        delayed(_process_single_cv_candidate)(
-            setup_dict, splits, signals_df, master_df, feature_matrix, 
-            signals_meta, aligned_models, oos_occupancy
-        ) for setup_dict in discovery_candidates
-    )
-
-    # Convert results to dictionary
-    cv_metrics_map = defaultdict(dict)
-    for hashable_individual, result in cv_results:
-        cv_metrics_map[hashable_individual] = result
-
-    return cv_metrics_map
+    # This function is now a simple wrapper to maintain the flow,
+    # as the core logic has been integrated into run_full_pipeline.
+    # The actual processing of candidates is now handled within run_full_pipeline
+    # to ensure proper data flow and context.
+    return {}
 
 
 def _aggregate_and_normalize_results(

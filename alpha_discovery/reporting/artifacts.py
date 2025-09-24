@@ -257,7 +257,10 @@ def save_results(
     run_dir: str,
     splits: HybridSplits,
     settings: Settings,
-    regime_model: Optional[RegimeModel] = None
+    regime_model: Optional[RegimeModel] = None,
+    simulation_summary: Optional[pd.DataFrame] = None,
+    simulation_ledger: Optional[pd.DataFrame] = None,
+    correlation_report: Optional[str] = None
 ) -> str:
     """
     Main entry point for saving all run artifacts.
@@ -323,8 +326,38 @@ def save_results(
     # Save Regime Diagnostics
     if regime_model:
         write_regime_artifacts(regime_model, run_dir)
+
+    # Save simulation artifacts if they exist
+    if simulation_summary is not None:
+        write_simulation_summary(simulation_summary, run_dir)
+    if simulation_ledger is not None:
+        write_simulation_ledger(simulation_ledger, run_dir)
+    if correlation_report is not None:
+        write_correlation_report(correlation_report, run_dir)
         
     return forecast_slate_path
+
+
+def write_simulation_summary(summary_df: pd.DataFrame, run_dir: str):
+    """Saves the simulation summary to a CSV file."""
+    path = os.path.join(run_dir, "simulation_summary.csv")
+    summary_df.to_csv(path, index=False, float_format="%.4f")
+    print(f"Simulation summary saved to: {path}")
+
+def write_simulation_ledger(ledger_df: pd.DataFrame, run_dir: str):
+    """Saves the full simulation trade ledger to a CSV file."""
+    path = os.path.join(run_dir, "simulation_trade_ledger.csv")
+    ledger_df.to_csv(path, index=False, float_format="%.4f")
+    print(f"Simulation trade ledger saved to: {path}")
+
+def write_correlation_report(report_str: str, run_dir: str):
+    """Saves the HartIndex correlation report to a text file."""
+    diag_dir = os.path.join(run_dir, "diagnostics")
+    os.makedirs(diag_dir, exist_ok=True)
+    path = os.path.join(diag_dir, "hart_index_correlation.txt")
+    with open(path, 'w') as f:
+        f.write(report_str)
+    print(f"HartIndex correlation report saved to: {path}")
 
 
 def write_regime_artifacts(regime_model: RegimeModel, run_dir: str):

@@ -960,15 +960,20 @@ def _sequence_flags(df_rel: pd.DataFrame) -> pd.DataFrame:
 # --------------------------------------------------------------------------------------
 
 def _add_decay_variants(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    out = df.copy()
+    new_cols = []
     for c in cols:
-        if c not in out.columns:
+        if c not in df.columns:
             continue
+        original_series = df[c]
         for h in DEFAULT_HALFLIFES:
-            out[f"{c}.ewm_hf{h}"] = _ewm_halflife(out[c], h)
+            s = _ewm_halflife(original_series, h)
+            s.name = f"{c}.ewm_hf{h}"
+            new_cols.append(s)
         for rw in DEFAULT_ROLL_WINDOWS:
-            out[f"{c}.roll{rw}"] = out[c].rolling(rw, min_periods=max(2, min(rw, 2))).mean()
-    return out
+            s = original_series.rolling(rw, min_periods=max(2, min(rw, 2))).mean()
+            s.name = f"{c}.roll{rw}"
+            new_cols.append(s)
+    return pd.concat([df] + new_cols, axis=1)
 
 def _shift_realized(df: pd.DataFrame, realized_cols: List[str]) -> pd.DataFrame:
     # Ensure no duplicate index before shifting

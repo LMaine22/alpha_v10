@@ -2,6 +2,10 @@ from __future__ import annotations
 import os
 import warnings
 from datetime import datetime
+
+# Suppress specific numpy warnings that occur during feature computation in pandas/numpy operations
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy.lib._function_base_impl')
+
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Tuple, Optional
@@ -14,6 +18,8 @@ from alpha_discovery.reporting.artifacts import save_results # Will be enhanced 
 from alpha_discovery.core.splits import create_hybrid_splits, HybridSplits
 from alpha_discovery.eval.validation import run_full_pipeline
 from alpha_discovery.eval.elv import calculate_elv_and_labels
+from alpha_discovery.eval.hart_index import calculate_hart_index, get_hart_index_summary
+from alpha_discovery.eval.post_simulation import run_post_simulation, run_correlation_analysis
 from alpha_discovery.eval.regime import RegimeModel
 from alpha_discovery.reporting.tradeable_setups import write_tradeable_setups
 
@@ -58,14 +64,31 @@ def _ensure_dir(d: str) -> None:
 
 
 def load_data() -> pd.DataFrame:
-    # If parquet missing but Excel exists and loader available, build it
+    # Always refresh the parquet from Excel to ensure we have the latest data
     pq = settings.data.parquet_file_path
-    if not os.path.exists(pq) and convert_excel_to_parquet is not None:
-        convert_excel_to_parquet()
-    if not os.path.exists(pq):
-        print(f"[warn] Parquet not found: {pq}")
+    excel = settings.data.excel_file_path
+    
+    # Check if Excel file exists
+    if not os.path.exists(excel):
+        print(f"[error] Excel file not found: {excel}")
         return pd.DataFrame()
+    
+    # Always convert Excel to Parquet to ensure fresh data
+    if convert_excel_to_parquet is not None:
+        print(f"[info] Refreshing parquet data from Excel source: {excel}")
+        convert_excel_to_parquet()
+    else:
+        print(f"[warn] Excel conversion function not available. Using existing parquet if available.")
+    
+    # Check if Parquet exists after potential conversion
+    if not os.path.exists(pq):
+        print(f"[error] Parquet not found: {pq}")
+        return pd.DataFrame()
+    
+    # Load the parquet data
+    print(f"[info] Loading data from parquet: {pq}")
     df = pd.read_parquet(pq)
+    
     # normalize index to DatetimeIndex
     if 'DATE' in df.columns:
         df['DATE'] = pd.to_datetime(df['DATE'])
@@ -73,9 +96,15 @@ def load_data() -> pd.DataFrame:
     if not isinstance(df.index, pd.DatetimeIndex):
         df.index = pd.to_datetime(df.index)
     df = df.sort_index()
-    # clip date range
-    df = df.loc[(df.index.date >= settings.data.start_date) & (df.index.date <= settings.data.end_date)]
-    return df
+    
+    # clip date range according to config
+    date_filtered_df = df.loc[(df.index.date >= settings.data.start_date) & (df.index.date <= settings.data.end_date)]
+    
+    # Print data range info
+    print(f"[info] Data loaded with date range: {date_filtered_df.index.min().date()} to {date_filtered_df.index.max().date()}")
+    print(f"[info] Config date range: {settings.data.start_date} to {settings.data.end_date}")
+    
+    return date_filtered_df
 
 
 def build_signals(master_df: pd.DataFrame):
@@ -192,19 +221,54 @@ def main():
     # --- ELV Scoring & Labeling Phase ---
     final_results_df = calculate_elv_and_labels(pre_elv_df)
     
+    # --- Hart Index Calculation Phase ---
+    print("\n--- Calculating Hart Index (0-100 trust scores) ---")
+    final_results_df = calculate_hart_index(final_results_df)
+    
+    # Print Hart Index summary
+    hart_summary = get_hart_index_summary(final_results_df)
+    print(f"\nHart Index Summary:")
+    print(f"  Mean: {hart_summary['mean']:.1f}")
+    print(f"  Median: {hart_summary['median']:.1f}")
+    print(f"  Max: {hart_summary['max']:.1f}")
+    print(f"  Distribution:")
+    print(f"    Exceptional (85-100): {hart_summary['n_exceptional']} setups")
+    print(f"    Strong (70-84): {hart_summary['n_strong']} setups")
+    print(f"    Moderate (55-69): {hart_summary['n_moderate']} setups")
+    print(f"    Marginal (40-54): {hart_summary['n_marginal']} setups")
+    print(f"    Weak (0-39): {hart_summary['n_weak']} setups")
+    print(f"  Top 10 Average: {hart_summary['top_10_avg']:.1f}")
+
+    # --- Post-Simulation Phase ---
+    sim_summary_df, sim_ledger_df = run_post_simulation(
+        final_results_df, signals_df, master_df
+    )
+    correlation_report = run_correlation_analysis(final_results_df, sim_summary_df)
+    
     # --- Reporting Phase ---
-    print("\n--- All folds complete. Saving final ELV-scored results. ---")
+    print("\n--- All folds complete. Saving final ELV-scored results with Hart Index. ---")
     run_dir = create_run_dir()
     
     # Save the main artifacts (pareto front, forecast slate, etc.)
     # The save_results function now returns the path to the forecast_slate.csv
-    forecast_slate_path = save_results(final_results_df, signals_meta, run_dir, splits, settings, anchor_regime_model)
+    forecast_slate_path = save_results(
+        final_results_df, signals_meta, run_dir, splits, settings, anchor_regime_model,
+        sim_summary_df, sim_ledger_df, correlation_report
+    )
     
     # --- Generate Actionable Trade Report ---
     if forecast_slate_path and os.path.exists(forecast_slate_path):
         print("\n--- Generating Actionable Trade Report ---")
         forecast_df = pd.read_csv(forecast_slate_path)
+        
+        # Get the actual end of data date from the master dataframe
         end_of_data_date = master_df.index.max()
+        
+        # Print data end date information for debugging
+        print(f"Data end date from master_df: {end_of_data_date}")
+        print(f"Config end date: {settings.data.end_date}")
+        
+        # Always use the actual data end date from master_df
         write_tradeable_setups(forecast_df, end_of_data_date, run_dir)
     else:
         print("\n--- Skipping Actionable Trade Report (forecast slate not found) ---")
