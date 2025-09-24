@@ -20,37 +20,36 @@ def audit_hart_index_data(csv_path: str):
     df = pd.read_csv(csv_path)
     print(f"Loaded data with {len(df)} setups and {len(df.columns)} columns")
     
-    # Convert percentage columns to numeric
-    percentage_cols = ['P_up', 'P_down', 'P(>5%)', 'P(<-5%)']
-    for col in percentage_cols:
-        if col in df.columns:
-            # Remove % and convert to numeric
-            df[col] = df[col].str.replace('%', '').astype(float) / 100.0
-    
-    # Show actual columns available
-    print(f"\nActual columns in CSV:")
-    for col in df.columns:
-        print(f"  - {col}")
-    
-    # Key metrics that SHOULD be used in Hart Index calculation
-    expected_metrics = [
+    # Key metrics used in Hart Index calculation
+    key_metrics = [
         'edge_crps_raw', 'edge_pin_q10_raw', 'edge_pin_q90_raw', 'edge_w1_raw', 
-        'edge_calib_mae_raw', 'edge_ig_raw', 'bootstrap_p_value_raw', 
-        'sensitivity_delta_edge_raw', 'redundancy_mi_raw', 'complexity_metric_raw', 
-        'dfa_alpha_raw', 'transfer_entropy_raw', 'live_tr_prior', 'coverage_factor',
-        'page_hinkley_alarm'
+        'edge_calib_mae_raw', 'edge_ig_raw', 'E_move', 'P_up', 'P_down',
+        'bootstrap_p_value_raw', 'n_trig_oos', 'sensitivity_delta_edge_raw',
+        'redundancy_mi_raw', 'complexity_metric_raw', 'dfa_alpha_raw', 
+        'transfer_entropy_raw', 'live_tr_prior', 'coverage_factor',
+        'page_hinkley_alarm', 'elv', 'hart_index'
     ]
     
-    # Metrics that are actually available
-    available_metrics = ['hart_index', 'elv', 'edge_oos', 'info_gain', 'w1_effect', 
-                        'n_trig_oos', 'fold_coverage', 'regime_breadth', 'E_move', 
-                        'P_up', 'P_down', 'P(>5%)', 'P(<-5%)', 'best_horizon', 'days_since_trigger']
+    print("\n=== COLUMN AVAILABILITY CHECK ===")
+    missing_metrics = []
+    available_metrics = []
     
-    print("\n=== CRITICAL FINDING ===")
-    print("🚨 MAJOR ISSUE: Most essential Hart Index metrics are MISSING from the output CSV!")
-    print(f"Expected {len(expected_metrics)} core metrics, but CSV only contains basic summary metrics")
+    for metric in key_metrics:
+        if metric in df.columns:
+            available_metrics.append(metric)
+            print(f"✅ {metric}")
+        else:
+            missing_metrics.append(metric)
+            print(f"❌ {metric} - MISSING")
     
-    print("\n=== AVAILABLE METRICS ANALYSIS ===")
+    print(f"\nAvailable: {len(available_metrics)}/{len(key_metrics)} metrics")
+    
+    if missing_metrics:
+        print(f"\nMISSING METRICS:")
+        for metric in missing_metrics:
+            print(f"  - {metric}")
+    
+    print("\n=== VALUE ANALYSIS FOR AVAILABLE METRICS ===")
     
     problematic_metrics = {}
     
@@ -58,15 +57,11 @@ def audit_hart_index_data(csv_path: str):
         if metric in df.columns:
             series = df[metric]
             
-            # Skip non-numeric columns
-            if series.dtype == 'object':
-                continue
-                
             n_total = len(series)
             n_nan = series.isna().sum()
             n_zero = (series == 0.0).sum()
-            n_inf = np.isinf(series.replace([np.inf, -np.inf], np.nan)).sum() if series.dtype in ['float64', 'int64'] else 0
-            n_negative = (series < 0).sum() if metric not in ['E_move', 'days_since_trigger'] else 0
+            n_inf = np.isinf(series).sum()
+            n_negative = (series < 0).sum() if metric not in ['E_move'] else 0  # E_move can be negative
             
             mean_val = series.mean()
             median_val = series.median()
@@ -79,17 +74,16 @@ def audit_hart_index_data(csv_path: str):
             print(f"  Mean: {mean_val:.4f}, Median: {median_val:.4f}, Std: {std_val:.4f}")
             print(f"  NaN values: {n_nan} ({n_nan/n_total*100:.1f}%)")
             print(f"  Zero values: {n_zero} ({n_zero/n_total*100:.1f}%)")
-            if n_inf > 0:
-                print(f"  Infinite values: {n_inf} ({n_inf/n_total*100:.1f}%)")
+            print(f"  Infinite values: {n_inf} ({n_inf/n_total*100:.1f}%)")
             
-            if metric not in ['E_move', 'days_since_trigger', 'w1_effect']:  # These can be zero/negative
+            if metric not in ['E_move', 'page_hinkley_alarm']:  # These can legitimately be negative/zero
                 print(f"  Negative values: {n_negative} ({n_negative/n_total*100:.1f}%)")
             
             # Flag problematic metrics
             if n_nan > n_total * 0.1:  # More than 10% NaN
                 problematic_metrics[metric] = problematic_metrics.get(metric, []) + ['High NaN rate']
             
-            if n_zero > n_total * 0.8 and metric not in ['days_since_trigger', 'w1_effect']:  # More than 80% zeros
+            if n_zero > n_total * 0.5 and metric not in ['page_hinkley_alarm']:  # More than 50% zeros
                 problematic_metrics[metric] = problematic_metrics.get(metric, []) + ['High zero rate']
                 
             if n_inf > 0:

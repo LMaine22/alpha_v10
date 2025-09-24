@@ -312,6 +312,31 @@ def save_results(
     df_for_csv.to_csv(pareto_path, index=False, float_format='%.4f')
     print(f"ELV-scored Pareto front saved to: {pareto_path}")
 
+    # Also write a slim CSV with essential columns for operator consumption
+    slim_cols = [
+        'individual', 'setup_desc', 'ticker', 'elv', 'hart_index', 'hart_label',
+        'edge_oos', 'n_trig_oos', 'best_horizon', 'first_trigger', 'last_trigger'
+    ]
+    slim_df = final_results_df.copy()
+    # Derive ticker column and clean individual representation
+    def _split_ind(ind):
+        if isinstance(ind, str):
+            try:
+                t, sigs = eval(ind)
+                return str(t), str((str(t), list(map(str, sigs))))
+            except Exception:
+                return "", ind
+        t, sigs = ind
+        return str(t), str((str(t), list(map(str, sigs))))
+    pairs = slim_df['individual'].apply(_split_ind)
+    slim_df['ticker'] = pairs.apply(lambda x: x[0])
+    slim_df['individual'] = pairs.apply(lambda x: x[1])
+    have = [c for c in slim_cols if c in slim_df.columns]
+    slim_df = slim_df[have]
+    slim_path = os.path.join(run_dir, "pareto_front_elv_slim.csv")
+    slim_df.to_csv(slim_path, index=False, float_format='%.4f')
+    print(f"ELV slim CSV saved to: {slim_path}")
+
     # Save the Forecast Slate
     # Convert DataFrame back to list of dicts for the writer function
     pf_list = []

@@ -37,62 +37,68 @@ class HartIndexComponents:
     regime_coverage: float = 0.07  # Works across different market conditions
 
 
-def _sigmoid_transform(x: float, center: float = 0.5, steepness: float = 10) -> float:
-    """Apply sigmoid transformation to map values to (0,1) range."""
+def _sigmoid_transform(x, center: float = 0.5, steepness: float = 10):
+    """Apply sigmoid transformation to map values to (0,1) range. NaN-safe for Series/arrays."""
     return 1 / (1 + np.exp(-steepness * (x - center)))
 
 
 def _percentile_normalize(series: pd.Series, invert: bool = False) -> pd.Series:
-    """Normalize series to 0-1 using percentile ranks."""
-    if series.empty or series.isna().all():
-        return pd.Series(0.5, index=series.index)
-    
-    # Use rank with method='average' to handle ties
+    """Normalize series to 0-1 using percentile ranks. Do not inject defaults; keep NaNs."""
+    if series.empty:
+        return pd.Series(np.nan, index=series.index)
     ranks = series.rank(pct=True, method='average', ascending=not invert)
-    return ranks.fillna(0.5)
+    return ranks
 
 
-def _get_metric_series(df: pd.DataFrame, key: str, default: float = 0.0) -> pd.Series:
-    """Safely get a metric series, filling NaNs with the median of the series."""
+def _get_metric_series(df: pd.DataFrame, key: str) -> pd.Series:
+    """Return series if present; otherwise a NaN series. No default numeric fills."""
     if key not in df.columns:
-        return pd.Series(default, index=df.index)
-    
-    series = df[key]
-    if series.isna().any():
-        median_val = series.median()
-        # If the entire series is NaN, median will be NaN. Use the provided default.
-        fill_value = median_val if pd.notna(median_val) else default
-        return series.fillna(fill_value)
-    return series
+        return pd.Series(np.nan, index=df.index)
+    return df[key]
+
+
+def _rowwise_weighted_mean(values: List[pd.Series], weights: List[float]) -> pd.Series:
+    """Compute row-wise weighted mean across component series with NaN-aware weight renormalization."""
+    if not values:
+        return pd.Series(dtype=float)
+    # Stack into DataFrame
+    mat = pd.concat(values, axis=1)
+    w = np.array(weights, dtype=float)
+    # Indicator of available components per row
+    present = ~mat.isna()
+    present_weights = present.dot(w)
+    weighted_sum = (mat.fillna(0).values * w).sum(axis=1)
+    out = pd.Series(np.nan, index=mat.index)
+    nonzero = present_weights > 0
+    out.loc[nonzero] = weighted_sum[nonzero] / present_weights[nonzero]
+    return out
 
 
 def _calculate_performance_score(df: pd.DataFrame) -> pd.Series:
     """Calculate performance component of Hart Index."""
     # Edge metrics (lower is better for CRPS)
-    crps_score = _percentile_normalize(_get_metric_series(df, 'edge_crps_raw', 0.1), invert=True)
-    pinball_score = _percentile_normalize(
-        (_get_metric_series(df, 'edge_pin_q10_raw', 0.1) + _get_metric_series(df, 'edge_pin_q90_raw', 0.1)) / 2, 
-        invert=True
-    )
+    crps_series = _get_metric_series(df, 'edge_crps_raw')
+    pin_q10 = _get_metric_series(df, 'edge_pin_q10_raw')
+    pin_q90 = _get_metric_series(df, 'edge_pin_q90_raw')
+    crps_score = _percentile_normalize(crps_series, invert=True)
+    pinball_score = _percentile_normalize((pin_q10 + pin_q90) / 2, invert=True)
     
     # Information metrics (higher is better)
-    ig_score = _percentile_normalize(_get_metric_series(df, 'edge_ig_raw', 0.0))
+    ig_score = _percentile_normalize(_get_metric_series(df, 'edge_ig_raw'))
     
     # Risk-reward metrics
-    e_move = _get_metric_series(df, 'E_move', 0.0)
-    p_up = _get_metric_series(df, 'P_up', 0.5)
-    p_down = _get_metric_series(df, 'P_down', 0.5)
+    e_move = _get_metric_series(df, 'E_move')
+    p_up = _get_metric_series(df, 'P_up')
+    p_down = _get_metric_series(df, 'P_down')
     
     # Calculate directional confidence
     directional_confidence = np.abs(p_up - p_down) / (p_up + p_down + 1e-9)
     risk_reward_score = _sigmoid_transform(directional_confidence, center=0.2, steepness=8)
     
     # Combine performance metrics (weights sum to 1.0)
-    performance_score = (
-        0.40 * crps_score +
-        0.30 * pinball_score +
-        0.20 * ig_score +
-        0.10 * risk_reward_score
+    performance_score = _rowwise_weighted_mean(
+        [crps_score, pinball_score, ig_score, risk_reward_score],
+        [0.40, 0.30, 0.20, 0.10]
     )
     
     return performance_score
@@ -101,22 +107,21 @@ def _calculate_performance_score(df: pd.DataFrame) -> pd.Series:
 def _calculate_robustness_score(df: pd.DataFrame) -> pd.Series:
     """Calculate robustness component of Hart Index."""
     # Statistical significance
-    bootstrap_p = _get_metric_series(df, 'bootstrap_p_value_raw', 0.5)
+    bootstrap_p = _get_metric_series(df, 'bootstrap_p_value_raw')
     significance_score = _sigmoid_transform(1 - bootstrap_p, center=0.9, steepness=20)
     
     # Support metrics
-    n_triggers = _get_metric_series(df, 'n_trig_oos', 10)
+    n_triggers = _get_metric_series(df, 'n_trig_oos')
     support_score = _sigmoid_transform(n_triggers / 50, center=0.5, steepness=3)
     
     # Sensitivity metrics (lower is better)
-    sensitivity_delta = _get_metric_series(df, 'sensitivity_delta_edge_raw', 0.1)
+    sensitivity_delta = _get_metric_series(df, 'sensitivity_delta_edge_raw')
     sensitivity_score = _sigmoid_transform(1 / (1 + sensitivity_delta), center=0.7, steepness=5)
     
     # Combine robustness metrics (weights sum to 1.0)
-    robustness_score = (
-        0.40 * significance_score +
-        0.35 * support_score +
-        0.25 * sensitivity_score
+    robustness_score = _rowwise_weighted_mean(
+        [significance_score, support_score, sensitivity_score],
+        [0.40, 0.35, 0.25]
     )
     
     return robustness_score
@@ -125,27 +130,26 @@ def _calculate_robustness_score(df: pd.DataFrame) -> pd.Series:
 def _calculate_complexity_score(df: pd.DataFrame) -> pd.Series:
     """Calculate complexity & causality component of Hart Index."""
     # 1. Signal Quality (Redundancy) - lower is better
-    redundancy_mi = _get_metric_series(df, 'redundancy_mi_raw', 0.5)
+    redundancy_mi = _get_metric_series(df, 'redundancy_mi_raw')
     redundancy_score = _sigmoid_transform(1 - redundancy_mi, center=0.7, steepness=5)
 
     # 2. Causality - higher TE is better, lower Granger p-value is better
-    te_score = _percentile_normalize(_get_metric_series(df, 'transfer_entropy', 0.0))
-    granger_p_value = _get_metric_series(df, 'granger_p_value', 1.0)
+    te_score = _percentile_normalize(_get_metric_series(df, 'transfer_entropy'))
+    granger_p_value = _get_metric_series(df, 'granger_p_value')
     granger_score = _sigmoid_transform(1 - granger_p_value, center=0.9, steepness=20) # Reward p < 0.1
-    causality_score = 0.6 * te_score + 0.4 * granger_score
+    causality_score = _rowwise_weighted_mean([te_score, granger_score], [0.6, 0.4])
 
     # 3. Complexity Balance - DFA near 0.65 is good, Sample Entropy is a direct measure
-    dfa_alpha = _get_metric_series(df, 'dfa_alpha_raw', 0.65)
-    dfa_score = (1 - np.abs(dfa_alpha - 0.65) / 0.35).clip(0, 1) # Penalize distance from 0.65
+    dfa_alpha = _get_metric_series(df, 'dfa_alpha_raw')
+    dfa_score = (1 - np.abs(dfa_alpha - 0.65) / 0.35).clip(0, 1)
     
-    sampen_score = _percentile_normalize(_get_metric_series(df, 'sample_entropy', 0.5))
-    complexity_balance_score = 0.5 * dfa_score + 0.5 * sampen_score
+    sampen_score = _percentile_normalize(_get_metric_series(df, 'sample_entropy'))
+    complexity_balance_score = _rowwise_weighted_mean([dfa_score, sampen_score], [0.5, 0.5])
 
     # Combine complexity & causality metrics (weights sum to 1.0)
-    final_score = (
-        0.25 * redundancy_score +
-        0.45 * causality_score +
-        0.30 * complexity_balance_score
+    final_score = _rowwise_weighted_mean(
+        [redundancy_score, causality_score, complexity_balance_score],
+        [0.25, 0.45, 0.30]
     )
     return final_score
 
@@ -153,35 +157,39 @@ def _calculate_complexity_score(df: pd.DataFrame) -> pd.Series:
 def _calculate_live_readiness_score(df: pd.DataFrame) -> pd.Series:
     """Calculate live trading readiness component of Hart Index."""
     # Trigger rate metrics
-    live_tr = _get_metric_series(df, 'live_tr_prior', 0.05)
+    live_tr = _get_metric_series(df, 'live_tr_prior')
     tr_saturation = settings.elv.trigger_rate_saturation
     
     # Ideal trigger rate is not too low, not too high
     tr_score = _sigmoid_transform(live_tr / tr_saturation, center=0.5, steepness=3)
     
     # Dormancy and specialist flags
-    dormant_qualified = _get_metric_series(df, 'dormant_qualified_flag', 0).astype(bool)
-    specialist = _get_metric_series(df, 'specialist_flag', 0).astype(bool)
+    dormant_qualified = _get_metric_series(df, 'dormant_qualified_flag').astype('boolean')
+    specialist = _get_metric_series(df, 'specialist_flag').astype('boolean')
     
     # Bonus for special qualifications
-    qualification_bonus = pd.Series(0.0, index=df.index)
-    qualification_bonus[dormant_qualified] = 0.1
-    qualification_bonus[specialist] = 0.15
+    qualification_bonus = pd.Series(np.nan, index=df.index)
+    if dormant_qualified.notna().any():
+        qualification_bonus = qualification_bonus.fillna(0.0)
+        qualification_bonus[dormant_qualified.fillna(False)] += 0.1
+    if specialist.notna().any():
+        qualification_bonus = qualification_bonus.fillna(0.0)
+        qualification_bonus[specialist.fillna(False)] += 0.15
     
     # Coverage factor from ELV
-    coverage = _get_metric_series(df, 'coverage_factor', 0.5)
+    coverage = _get_metric_series(df, 'coverage_factor')
     
     # Page-Hinkley alarm (no alarm is good)
-    ph_alarm = _get_metric_series(df, 'page_hinkley_alarm', 0)
-    alarm_penalty = pd.Series(1.0, index=df.index)
-    alarm_penalty[ph_alarm > 0] = 0.7
+    ph_alarm = _get_metric_series(df, 'page_hinkley_alarm')
+    alarm_penalty = pd.Series(np.nan, index=df.index)
+    if ph_alarm.notna().any():
+        alarm_penalty = pd.Series(1.0, index=df.index)
+        alarm_penalty[ph_alarm > 0] = 0.7
     
     # Combine readiness metrics
-    readiness_score = (
-        0.40 * tr_score +
-        0.30 * coverage +
-        0.20 * alarm_penalty +
-        0.10 * qualification_bonus
+    readiness_score = _rowwise_weighted_mean(
+        [tr_score, coverage, alarm_penalty, qualification_bonus],
+        [0.40, 0.30, 0.20, 0.10]
     )
     
     return readiness_score
@@ -199,14 +207,11 @@ def calculate_hart_index(df: pd.DataFrame) -> pd.DataFrame:
     """
     result_df = df.copy()
     
-    # Ensure we have minimum required columns
+    # Ensure we have minimum required columns (do not default-fill)
     required_cols = ['edge_crps_raw', 'edge_ig_raw', 'n_trig_oos']
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         print(f"Warning: Missing required columns for Hart Index: {missing_cols}")
-        # Add missing columns with default values
-        for col in missing_cols:
-            result_df[col] = 0.0
     
     # Calculate component scores
     perf_score = _calculate_performance_score(result_df)
@@ -236,20 +241,29 @@ def calculate_hart_index(df: pd.DataFrame) -> pd.DataFrame:
     result_df['hart_trigger_reliability'] = ready_score * components.trigger_reliability
     result_df['hart_regime_coverage'] = ready_score * components.regime_coverage
     
-    # Calculate raw Hart Index (0-1)
-    hart_index_raw = (
-        result_df['hart_edge_performance'] +
-        result_df['hart_information_quality'] +
-        result_df['hart_risk_reward'] +
-        result_df['hart_statistical_significance'] +
-        result_df['hart_support'] +
-        result_df['hart_sensitivity_resilience'] +
-        result_df['hart_causality'] +
-        result_df['hart_signal_quality'] +
-        result_df['hart_complexity_balance'] +
-        result_df['hart_trigger_reliability'] +
-        result_df['hart_regime_coverage']
-    )
+    # Calculate raw Hart Index (0-1) with renormalization over available subcomponent weights
+    component_cols = [
+        ('hart_edge_performance', components.edge_performance),
+        ('hart_information_quality', components.information_quality),
+        ('hart_risk_reward', components.risk_reward),
+        ('hart_statistical_significance', components.statistical_significance),
+        ('hart_support', components.support),
+        ('hart_sensitivity_resilience', components.sensitivity_resilience),
+        ('hart_causality', components.causality),
+        ('hart_signal_quality', components.signal_quality),
+        ('hart_complexity_balance', components.complexity_balance),
+        ('hart_trigger_reliability', components.trigger_reliability),
+        ('hart_regime_coverage', components.regime_coverage),
+    ]
+    comp_df = result_df[[c for c, _ in component_cols]]
+    weights = np.array([w for _, w in component_cols], dtype=float)
+    present = ~comp_df.isna()
+    present_weight_sum = present.dot(weights)
+    weighted_sum = (comp_df.fillna(0).values).sum(axis=1)
+    hart_index_raw = pd.Series(np.nan, index=result_df.index)
+    nonzero = present_weight_sum > 0
+    # weighted_sum already includes weights within each component column
+    hart_index_raw.loc[nonzero] = weighted_sum[nonzero] / present_weight_sum[nonzero]
     
     # Apply final adjustments
     # Penalty for setups that failed ELV gates
@@ -260,9 +274,9 @@ def calculate_hart_index(df: pd.DataFrame) -> pd.DataFrame:
     # Bonus for high ELV scores (if available)
     elv_bonus = pd.Series(1.0, index=result_df.index)
     if 'elv' in result_df.columns:
-        high_elv_threshold = _get_metric_series(df, 'elv').quantile(0.8)
+        high_elv_threshold = result_df['elv'].quantile(0.8)
         high_elv = result_df['elv'] > high_elv_threshold
-        elv_bonus[high_elv] = 1.1
+        elv_bonus.loc[high_elv.fillna(False)] = 1.1
     
     # Apply adjustments
     hart_index_adjusted = hart_index_raw * elv_gate_penalty * elv_bonus

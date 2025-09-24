@@ -78,36 +78,41 @@ def _trigger_mask(signals_df: pd.DataFrame, setup: List[str]) -> pd.Series:
 def _histogram_probs(sample: Iterable[float], edges: np.ndarray) -> np.ndarray:
     v = pd.Series(sample).dropna().astype(float).values
     if v.size == 0:
-        return np.zeros(edges.size - 1, dtype=float)
+        return np.full(edges.size - 1, np.nan, dtype=float)
     hist, _ = np.histogram(v, bins=edges)
     p = hist.astype(float)
     total = p.sum()
     if total == 0:
-        return np.zeros_like(p)
+        return np.full_like(p, np.nan, dtype=float)
     return p / total
 
 
 def _entropy(p: np.ndarray, eps: float = 1e-12) -> float:
     p = np.clip(p, eps, 1.0)
     p = p / p.sum()
-    return float(-(p * np.log(p)).sum())
+    s = (p * np.log(p))
+    if not np.isfinite(s).all():
+        return float('nan')
+    return float(-s.sum())
 
 
 def _info_gain(uncond: Iterable[float], cond: Iterable[float], edges: np.ndarray) -> float:
     pu = _histogram_probs(uncond, edges)
     pc = _histogram_probs(cond, edges)
-    return max(0.0, _entropy(pu) - _entropy(pc))
+    ig = _entropy(pu) - _entropy(pc)
+    return float(ig) if np.isfinite(ig) else float('nan')
 
 
 def _wasserstein_1d(a: Iterable[float], b: Iterable[float]) -> float:
     xa = np.sort(pd.Series(a).dropna().astype(float).values)
     xb = np.sort(pd.Series(b).dropna().astype(float).values)
     if xa.size == 0 or xb.size == 0:
-        return 0.0
+        return float('nan')
     q = np.linspace(0.0, 1.0, num=max(xa.size, xb.size), endpoint=True)
     fa = np.quantile(xa, q)
     fb = np.quantile(xb, q)
-    return float(np.mean(np.abs(fa - fb)))
+    d = np.mean(np.abs(fa - fb))
+    return float(d) if np.isfinite(d) else float('nan')
 
 
 def _mutual_information_bool(a: pd.Series, b: pd.Series) -> float:
@@ -126,26 +131,28 @@ def _mutual_information_bool(a: pd.Series, b: pd.Series) -> float:
     for pxy, px, py in [(p00, px0, py0), (p01, px0, py1), (p10, px1, py0), (p11, px1, py1)]:
         if pxy > 0:
             terms.append(pxy * np.log(pxy / max(px*py, eps)))
+    if not terms:
+        return float('nan')
     mi = float(np.sum(terms))
-    return max(mi, 0.0)
+    return mi
 
 
 def _avg_pairwise_mi(signals_df: pd.DataFrame, setup: List[str]) -> float:
     if not setup or len(setup) < 2:
-        return 0.0
+        return float('nan')
     cols = [c for c in setup if c in signals_df.columns]
     if len(cols) < 2:
-        return 0.0
+        return float('nan')
     mis = []
     for i in range(len(cols)):
         for j in range(i+1, len(cols)):
             mis.append(_mutual_information_bool(signals_df[cols[i]], signals_df[cols[j]]))
-    return float(np.mean(mis)) if mis else 0.0
+    return float(np.mean(mis)) if mis else float('nan')
 
 
 def _calculate_trade_fields(edges: np.ndarray, probs: np.ndarray) -> Dict[str, float]:
     """Computes E_move, P_up, P_down, etc., from a distribution."""
-    if edges.size < 2 or probs.size != edges.size - 1:
+    if edges.size < 2 or probs.size != edges.size - 1 or not np.isfinite(probs).any():
         return {}
     
     lo, hi = edges[:-1], edges[1:]
@@ -454,7 +461,7 @@ def _evaluate_one_setup(
         else:
              ga_objectives.append(settings.ga.complexity_objective)
 
-    objectives = [float(metrics.get(k, 0.0)) for k in ga_objectives]
+    objectives = [float(metrics.get(k, np.nan)) for k in ga_objectives]
     
     # Build final metrics dictionary for reporting
     final_metrics = {

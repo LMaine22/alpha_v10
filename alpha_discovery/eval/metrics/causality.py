@@ -68,6 +68,11 @@ def granger_causality(y_values, x_values, max_lag: int = 8, criterion: str = "bi
         Xu = np.column_stack([_lagmat(y, p), _lagmat(x, p)])
         n = y_t.size
         Xr = Xr[:n]; Xu = Xu[:n]
+        # Skip ill-conditioned designs: require full rank and finite values
+        if not np.isfinite(y_t).all() or not np.isfinite(Xu).all():
+            continue
+        if np.linalg.matrix_rank(Xu) < Xu.shape[1]:
+            continue
         ic = _ic(y_t, Xu, criterion)
         if ic < best_ic:
             best_ic = ic
@@ -80,6 +85,13 @@ def granger_causality(y_values, x_values, max_lag: int = 8, criterion: str = "bi
     Xu = np.column_stack([_lagmat(y, p), _lagmat(x, p)])
     n = y_t.size
     Xr = Xr[:n]; Xu = Xu[:n]
+    # Guard final models as well
+    if (not np.isfinite(y_t).all() or
+        not np.isfinite(Xr).all() or
+        not np.isfinite(Xu).all() or
+        np.linalg.matrix_rank(Xu) < Xu.shape[1]):
+        return {"best_lag": np.nan, "F": np.nan, "df_num": 0, "df_den": 0, "p_value": np.nan}
+
     rss_r, _, dof_r = _ols(y_t, Xr)
     rss_u, _, dof_u = _ols(y_t, Xu)
     df_num = p  # # of X lag params added

@@ -74,7 +74,7 @@ def _evaluate_setup_on_window(
         results['regime_metrics']['regime_days'] = regimes.value_counts().to_dict()
         results['regime_metrics']['regime_triggers'] = regimes.loc[trigger_dates].value_counts().to_dict()
 
-    if len(trigger_dates) < 5: return results
+    # Do not early-return on low triggers; compute-or-NaN downstream
 
     # Import locally to avoid circular import
     from ..search.ga_core import _calculate_objectives
@@ -99,7 +99,33 @@ def _evaluate_setup_on_window(
             "sensitivity_delta_edge_raw": metrics.get("sensitivity_delta_edge"),
             "bootstrap_p_value_raw": metrics.get("bootstrap_p_value"),
         }
-        
+        # Compute causality metrics (compute-or-NaN)
+        try:
+            r_series = unconditional_returns[h].copy().astype(float)
+            trig_series = pd.Series(0.0, index=r_series.index).astype(float)
+            trig_series.loc[trigger_dates.intersection(r_series.index)] = 1.0
+            # Preconditions to avoid LAPACK warnings: sufficient length and variance
+            r_valid = r_series.replace([np.inf, -np.inf], np.nan).dropna()
+            t_valid = trig_series.replace([np.inf, -np.inf], np.nan).dropna()
+            if len(r_valid) >= 20 and r_valid.var() > 0 and t_valid.var() > 0:
+                te_res = causality.transfer_entropy_causality(trig_series.values, r_series.values, lag=1, bins=10)
+                raw_metrics["transfer_entropy"] = te_res.get("te_x_to_y", np.nan)
+                raw_metrics["transfer_entropy_p_value"] = te_res.get("p_value", np.nan)
+            else:
+                raw_metrics["transfer_entropy"] = np.nan
+                raw_metrics["transfer_entropy_p_value"] = np.nan
+        except Exception:
+            raw_metrics["transfer_entropy"] = np.nan
+            raw_metrics["transfer_entropy_p_value"] = np.nan
+        try:
+            if len(r_valid) >= 20 and r_valid.var() > 0 and t_valid.var() > 0:
+                gr = causality.granger_causality(y_values=r_series.values, x_values=trig_series.values, max_lag=8, criterion="bic")
+                raw_metrics["granger_p_value"] = gr.get("p_value", np.nan)
+            else:
+                raw_metrics["granger_p_value"] = np.nan
+        except Exception:
+            raw_metrics["granger_p_value"] = np.nan
+
         # Ensure we keep the original metrics too
         results["horizon_metrics"][h] = {**metrics, **raw_metrics}
         
@@ -330,10 +356,10 @@ def _aggregate_and_normalize_results(
         
         temp_df_data.append({
             'individual': hashable_individual,
-            'n_trig_oos': n_trig,
-            'eligibility_rate_oos': n_elig / n_total if n_total > 0 else 0,
-            'page_hinkley_alarm': res['gauntlet_results'].get('page_hinkley_alarm', 0),
-            'tr_fg': res['gauntlet_results'].get('trigger_rate_eligible', 0)
+            'n_trig_oos': n_trig if n_total > 0 else np.nan,
+            'eligibility_rate_oos': (n_elig / n_total) if n_total > 0 else np.nan,
+            'page_hinkley_alarm': res['gauntlet_results'].get('page_hinkley_alarm', np.nan),
+            'tr_fg': res['gauntlet_results'].get('trigger_rate_eligible', np.nan)
         })
     temp_df = pd.DataFrame(temp_df_data)
     
@@ -371,12 +397,7 @@ def _aggregate_and_normalize_results(
         else:
             print(f"  {src} → {dest}: Source column missing")
     
-    # Add other derived metrics for ELV
-    df_agg['regime_breadth'] = 0.75
-    df_agg['fold_coverage'] = 1.0
-    df_agg['stab_crps_mad'] = 0.04
-    df_agg['mi_rz'] = 0.4
-    df_agg['peen_rz'] = 0.6
+    # Add other derived metrics for ELV (compute-or-NaN)
     df_agg['maturity_n_trig_oos'] = df_agg['n_trig_oos']
 
     print(f"\nMetrics for ELV calculation, cohort_size={len(df_agg)}")
@@ -418,11 +439,7 @@ def _aggregate_and_normalize_results(
         "n_trig_oos","eligibility_rate_oos","regime_breadth","fold_coverage","stab_crps_mad","tr_cv_reg","tr_fg"
     ]
     
-    # CRITICAL: Add redundancy_mi_raw with default values if it's missing
-    # This is critical for ELV calculation and option structure recommendations
-    if 'redundancy_mi_raw' not in df_agg.columns or df_agg['redundancy_mi_raw'].isna().all():
-        print("  Adding default values for missing 'redundancy_mi_raw' column (critical for ELV)")
-        df_agg['redundancy_mi_raw'] = 0.5  # Use middle value as default
+    # Do not inject defaults for redundancy_mi_raw; keep NaN if missing
     
     # Fallback: if tau_cv_reg exists but tr_cv_reg missing, copy it
     if 'tau_cv_reg' in df_agg.columns and 'tr_cv_reg' not in df_agg.columns:
@@ -440,8 +457,7 @@ def _aggregate_and_normalize_results(
             print(f"  {c}: {non_null}/{total} values" + 
                  (" (ALL NULL)" if non_null == 0 else ""))
     
-    # Convert individual back to original form (ticker, list of signals)
-    df_agg['individual'] = df_agg['individual'].apply(lambda x: (x[0], list(x[1])))
+    # Keep individual as hashable (ticker, tuple(signals)) for merging stability
     
     # Final validation of critical ELV metrics
     critical_metrics = [
@@ -469,6 +485,20 @@ def _aggregate_and_normalize_results(
     else:
         print("\nAll critical metrics are well-populated for ELV calculation.")
     
+    # 6.1 Compute stability across horizons: MAD of CRPS per individual
+    if 'crps' in df_agg_h.columns:
+        mad_rows = []
+        for ind, group in df_agg_h.groupby('individual'):
+            s = group['crps'].dropna()
+            if len(s) >= 2:
+                med = np.median(s.values)
+                mad = np.median(np.abs(s.values - med))
+            else:
+                mad = np.nan
+            mad_rows.append({'individual': ind, 'stab_crps_mad': mad})
+        mad_df = pd.DataFrame(mad_rows)
+        df_agg = df_agg.merge(mad_df, on='individual', how='left')
+
     return df_agg
 
 
@@ -494,9 +524,12 @@ def _process_single_candidate(
     if splits.gauntlet is not None and not splits.gauntlet.empty:
         gauntlet_results = _evaluate_setup_on_window(setup, splits.gauntlet, signals_df, master_df, feature_matrix, signals_meta)
         ph_series = [h.get('crps', np.nan) for h_res in gauntlet_results.get('horizon_metrics', {}).values() for h in [h_res]]
-        gauntlet_results['page_hinkley_alarm'] = page_hinkley(ph_series).get('alarm', 0) if ph_series else 0
+        try:
+            gauntlet_results['page_hinkley_alarm'] = page_hinkley(ph_series).get('alarm', np.nan) if ph_series else np.nan
+        except Exception:
+            gauntlet_results['page_hinkley_alarm'] = np.nan
     else:
-        gauntlet_results['page_hinkley_alarm'] = 0
+        gauntlet_results['page_hinkley_alarm'] = np.nan
 
     return {
         "individual": setup,

@@ -32,6 +32,17 @@ def _safe_get(d: Dict[str, Any], key: str, default: Any = None) -> Any:
         return default
 
 
+def _fmt_date(value: Any) -> str:
+    """Format a date-like value as YYYY-MM-DD or return empty string if NaT/invalid."""
+    try:
+        dt = pd.to_datetime(value, errors='coerce')
+        if pd.isna(dt):
+            return ""
+        return dt.strftime('%Y-%m-%d')
+    except Exception:
+        return ""
+
+
 def _trade_ready_fields(edges: np.ndarray, probs: List[float], tail_cap: float = 0.12) -> Dict[str, float]:
     """Compute E[move], P_up/down, and specific band masses from bands."""
     e = np.asarray(edges, dtype=float)
@@ -174,12 +185,12 @@ def write_forecast_slate(
             # Create a default uniform distribution based on the band edges
             if len(band_edges) > 1:
                 band_probs = [1.0 / (len(band_edges) - 1)] * (len(band_edges) - 1)
-                print(f"Warning: Using default uniform band_probs for {ticker} - {setup_desc}")
+                # Silenced per-user request; will capture counts in run audit instead
             else:
                 # Really bad case, but let's provide a minimal default
                 band_edges = np.array([-999.0, -0.10, -0.05, -0.03, -0.01, 0.01, 0.03, 0.05, 0.10, 999.0])
                 band_probs = [0.111] * 9  # Approximately uniform
-                print(f"Warning: Using fallback band_probs for {ticker} - {setup_desc}")
+                # Silenced per-user request; will capture counts in run audit instead
         else:
             band_probs = list(band_probs_raw)
         
@@ -197,8 +208,8 @@ def write_forecast_slate(
             "ticker": ticker or "",
             "signals": "|".join(signal_ids),
             "setup_desc": setup_desc,
-            "first_trigger": pd.to_datetime(_safe_get(metrics, "first_trigger")).strftime('%Y-%m-%d') if _safe_get(metrics, "first_trigger") else "",
-            "last_trigger": pd.to_datetime(_safe_get(metrics, "last_trigger")).strftime('%Y-%m-%d') if _safe_get(metrics, "last_trigger") else "",
+            "first_trigger": _fmt_date(_safe_get(metrics, "first_trigger")),
+            "last_trigger": _fmt_date(_safe_get(metrics, "last_trigger")),
             "rank_score": rank_score,
             "suggested_structure": suggested_structure,
         }

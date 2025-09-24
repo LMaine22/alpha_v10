@@ -15,8 +15,15 @@ def write_tradeable_setups(
     run_dir: str = "runs"
 ) -> str:
     """
-    Filters the main forecast slate to produce a list of the single best, most actionable
-    trade for each ticker for the current day.
+    Filters the main forecast slate to produce a list of currently actionable trades.
+
+    Args:
+        forecast_df: The full DataFrame from the forecast_slate.csv.
+        end_of_data_date: The last date available in the master dataset.
+        run_dir: The directory to write the output CSV.
+
+    Returns:
+        Path to the written CSV file.
     """
     if forecast_df.empty:
         print("Tradeable Setups: Input forecast slate is empty. Skipping.")
@@ -58,28 +65,28 @@ def write_tradeable_setups(
         print(f"Wrote empty tradeable setups report to: {tradeable_path}")
         return tradeable_path
 
-    # --- 2. Best-of-Breed Per-Ticker Filter ---
-    # For each ticker, select only the single best setup based on a hierarchy:
-    # 1. Most recent `last_trigger` date.
-    # 2. Highest `hart_index` as a tie-breaker.
-    best_setups_indices = []
-    
+    # --- 2. Single best per ticker (recency -> HartIndex -> ELV) ---
+    # For each ticker, keep only the most recent last_trigger; tie-break by hart_index, then elv
+    best_rows = []
     for ticker, group in live_setups_df.groupby('ticker'):
-        # Find the most recent trigger date in the group
-        most_recent_date = group['last_trigger'].max()
-        
-        # Filter for all setups that triggered on that most recent date
-        recent_setups = group[group['last_trigger'] == most_recent_date]
-        
-        # From that group, find the one with the highest HartIndex as the tie-breaker
-        # .name attribute of the series returned by idxmax() is the index label
-        best_setup_index = recent_setups['hart_index'].idxmax()
-        best_setups_indices.append(best_setup_index)
-    
-    final_setups_df = live_setups_df.loc[best_setups_indices]
+        # Build sort keys present in the data
+        sort_cols = ['last_trigger']
+        if 'hart_index' in group.columns:
+            sort_cols.append('hart_index')
+        if 'elv' in group.columns:
+            sort_cols.append('elv')
 
-    # Sort the final, unique-per-ticker list by HartIndex for a clean, prioritized list
-    final_setups_df = final_setups_df.sort_values("hart_index", ascending=False)
+        ascending = [False] * len(sort_cols)
+        chosen = group.sort_values(by=sort_cols, ascending=ascending).head(1)
+        best_rows.append(chosen)
+
+    final_setups_df = pd.concat(best_rows, ignore_index=False)
+
+    # Global sort for readability: prioritize HartIndex, then recency
+    if 'hart_index' in final_setups_df.columns:
+        final_setups_df = final_setups_df.sort_values(by=['hart_index', 'last_trigger'], ascending=[False, False])
+    elif 'elv' in final_setups_df.columns:
+        final_setups_df = final_setups_df.sort_values(by=['elv', 'last_trigger'], ascending=[False, False])
 
     # --- 3. Write the Report ---
     # Include timestamp in the filename to track when the setup was generated
@@ -88,23 +95,10 @@ def write_tradeable_setups(
     
     # Select and reorder columns for clarity with extended information
     output_cols = [
-        "ticker", "setup_desc", "hart_index", "hart_index_label", "suggested_structure", 
-        "elv", "edge_oos", "info_gain", 
+        "ticker", "setup_desc", "suggested_structure", "elv", "edge_oos", "info_gain", 
         "w1_effect", "transfer_entropy", "n_trig_oos", "fold_coverage", "regime_breadth",
         "first_trigger", "last_trigger", "best_horizon", "days_since_trigger",
-        "E_move", "P_up", "P_down", "P(>5%)", "P(<-5%)",
-        # Hart Index raw components for diagnostics
-        "edge_crps_raw", "edge_pin_q10_raw", "edge_pin_q90_raw", "edge_ig_raw", 
-        "edge_w1_raw", "edge_calib_mae_raw", "bootstrap_p_value_raw", 
-        "sensitivity_delta_edge_raw", "redundancy_mi_raw", "complexity_metric_raw",
-        "dfa_alpha_raw", "transfer_entropy_raw", "live_tr_prior", "coverage_factor",
-        "page_hinkley_alarm",
-        # Hart Index component scores for transparency
-        "hart_edge_performance", "hart_information_quality", "hart_prediction_accuracy", 
-        "hart_risk_reward", "hart_statistical_significance", "hart_stability_consistency", 
-        "hart_sensitivity_resilience", "hart_signal_quality", "hart_complexity_balance", 
-        "hart_trigger_reliability", "hart_regime_coverage",
-        "hart_performance_total", "hart_robustness_total", "hart_complexity_total", "hart_readiness_total"
+        "E_move", "P_up", "P_down", "P(>5%)", "P(<-5%)"
     ]
     # Ensure all selected columns exist, and if not, they are ignored
     final_cols = [col for col in output_cols if col in final_setups_df.columns]
@@ -175,23 +169,10 @@ def write_extended_forecasts(
     
     # Select and reorder columns for clarity
     output_cols = [
-        "ticker", "setup_desc", "hart_index", "hart_index_label", "suggested_structure", 
-        "elv", "edge_oos", "info_gain",
+        "ticker", "setup_desc", "suggested_structure", "elv", "edge_oos", "info_gain",
         "w1_effect", "transfer_entropy", "n_trig_oos", "fold_coverage", "regime_breadth",
         "first_trigger", "last_trigger", "best_horizon", "days_since_trigger",
-        "E_move", "P_up", "P_down", "P(>5%)", "P(<-5%)",
-        # Hart Index raw components for diagnostics  
-        "edge_crps_raw", "edge_pin_q10_raw", "edge_pin_q90_raw", "edge_ig_raw", 
-        "edge_w1_raw", "edge_calib_mae_raw", "bootstrap_p_value_raw", 
-        "sensitivity_delta_edge_raw", "redundancy_mi_raw", "complexity_metric_raw",
-        "dfa_alpha_raw", "transfer_entropy_raw", "live_tr_prior", "coverage_factor",
-        "page_hinkley_alarm",
-        # Hart Index component scores for transparency
-        "hart_edge_performance", "hart_information_quality", "hart_prediction_accuracy", 
-        "hart_risk_reward", "hart_statistical_significance", "hart_stability_consistency", 
-        "hart_sensitivity_resilience", "hart_signal_quality", "hart_complexity_balance", 
-        "hart_trigger_reliability", "hart_regime_coverage", 
-        "hart_performance_total", "hart_robustness_total", "hart_complexity_total", "hart_readiness_total"
+        "E_move", "P_up", "P_down", "P(>5%)", "P(<-5%)"
     ]
     # Ensure all selected columns exist
     final_cols = [col for col in output_cols if col in final_extended_df.columns]

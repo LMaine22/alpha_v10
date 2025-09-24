@@ -311,7 +311,24 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                 combined_seen.add(k)
                 combined.append(ind)
 
-            fronts = _non_dominated_sort(combined)
+            # Skip individuals with NaN objectives to avoid injecting defaults
+            filtered = []
+            skipped = 0
+            for ind in combined:
+                objs = ind.get("objectives", [])
+                try:
+                    vec = np.array(objs, dtype=float)
+                    if np.isnan(vec).any():
+                        skipped += 1
+                        continue
+                except Exception:
+                    skipped += 1
+                    continue
+                filtered.append(ind)
+            if skipped:
+                tqdm.write(f"Skipped {skipped} individuals this generation due to NaN objectives.")
+
+            fronts = _non_dominated_sort(filtered)
             next_gen_parents: List[Dict] = []
             for front in fronts:
                 _calculate_crowding_distance(front)

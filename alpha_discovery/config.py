@@ -6,12 +6,12 @@ from datetime import date
 
 class GaConfig(BaseModel):
     """Genetic Algorithm parameters (model-agnostic, NSGA-compatible)."""
-    population_size: int = 300
+    population_size: int = 400
     generations: int = 15
     elitism_rate: float = 0.1
     mutation_rate: float = 0.3
     crossover_rate: float = 0.7
-    seed: int = 190 # keep visible in run_dir names
+    seed: int = 193 # keep visible in run_dir names
 
     # Setup grammar — PAIRS ONLY
     setup_lengths_to_explore: List[int] = [2]
@@ -215,7 +215,7 @@ class DataConfig(BaseModel):
     single_ticker_mode: Optional[str] = None  # Example: 'AAPL US Equity' to focus on AAPL only
 
     # Sector mode: pick one or more named groups; union forms tradables for this run
-    sector_modes: Optional[List[str]] = ["Semiconductors"]
+    sector_modes: Optional[List[str]] = ["Tech & AI Platforms"]
     include_macro_etfs_in_tradables: bool = False  # If False, SPY/QQQ/TLT remain macro-only
     sector_groups: dict = {
         "Tech & AI Platforms": [

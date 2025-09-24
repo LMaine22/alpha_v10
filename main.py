@@ -239,6 +239,32 @@ def main():
     print(f"    Weak (0-39): {hart_summary['n_weak']} setups")
     print(f"  Top 10 Average: {hart_summary['top_10_avg']:.1f}")
 
+    # Hart Index usage audit: show which component metrics were actually used
+    print("\nHart Index Usage Audit (non-null counts):")
+    hart_inputs = [
+        # Performance/Edge
+        'edge_crps_raw','edge_pin_q10_raw','edge_pin_q90_raw','edge_ig_raw','edge_w1_raw','edge_calib_mae_raw',
+        # Robustness
+        'bootstrap_p_value_raw','sensitivity_delta_edge_raw','n_trig_oos',
+        # Causality/Complexity/Signal Quality
+        'transfer_entropy','transfer_entropy_p_value','granger_p_value','redundancy_mi_raw','complexity_metric_raw','dfa_alpha_raw',
+        # Readiness/Coverage
+        'live_tr_prior','coverage_factor','tr_cv_reg','tr_fg','page_hinkley_alarm'
+    ]
+    non_null_report_lines = []
+    for col in hart_inputs:
+        if col in final_results_df.columns:
+            non_null = int(final_results_df[col].notna().sum())
+            total = len(final_results_df)
+            line = f"  {col}: {non_null}/{total} ({(non_null/total*100 if total else 0):.1f}%)"
+            print(line)
+            non_null_report_lines.append(line)
+        else:
+            print(f"  {col}: MISSING")
+            non_null_report_lines.append(f"  {col}: MISSING")
+
+    # Note: writing audit to file occurs after run_dir is created
+
     # --- Post-Simulation Phase ---
     sim_summary_df, sim_ledger_df = run_post_simulation(
         final_results_df, signals_df, master_df
@@ -255,6 +281,30 @@ def main():
         final_results_df, signals_meta, run_dir, splits, settings, anchor_regime_model,
         sim_summary_df, sim_ledger_df, correlation_report
     )
+
+    # Persist Hart Index usage audit to diagnostics file now that run_dir exists
+    try:
+        diag_dir = os.path.join(run_dir, "diagnostics")
+        os.makedirs(diag_dir, exist_ok=True)
+        usage_path = os.path.join(diag_dir, "hart_index_usage.txt")
+        with open(usage_path, "w") as f:
+            f.write("Hart Index Usage Audit (non-null counts)\n")
+            hart_inputs = [
+                'edge_crps_raw','edge_pin_q10_raw','edge_pin_q90_raw','edge_ig_raw','edge_w1_raw','edge_calib_mae_raw',
+                'bootstrap_p_value_raw','sensitivity_delta_edge_raw','n_trig_oos',
+                'transfer_entropy','transfer_entropy_p_value','granger_p_value','redundancy_mi_raw','complexity_metric_raw','dfa_alpha_raw',
+                'live_tr_prior','coverage_factor','tr_cv_reg','tr_fg','page_hinkley_alarm'
+            ]
+            total = len(final_results_df)
+            for col in hart_inputs:
+                if col in final_results_df.columns:
+                    non_null = int(final_results_df[col].notna().sum())
+                    f.write(f"{col}: {non_null}/{total} ({(non_null/total*100 if total else 0):.1f}%)\n")
+                else:
+                    f.write(f"{col}: MISSING\n")
+        print(f"HartIndex usage audit saved to: {usage_path}")
+    except Exception as e:
+        print(f"[warn] Failed to write HartIndex usage audit: {e}")
     
     # --- Generate Actionable Trade Report ---
     if forecast_slate_path and os.path.exists(forecast_slate_path):
