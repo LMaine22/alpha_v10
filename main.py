@@ -1,25 +1,50 @@
 from __future__ import annotations
 import os
+import sys
+import argparse
 import warnings
 from datetime import datetime
+from pathlib import Path
+
+# Suppress warnings but keep errors visible
+warnings.simplefilter('ignore')
 
 # Suppress specific numpy warnings that occur during feature computation in pandas/numpy operations
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy.lib._function_base_impl')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy._core._methods')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy.lib._nanfunctions_impl')
+# Suppress joblib memory warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='joblib')
+warnings.filterwarnings('ignore', message='.*Persisting input arguments.*')
+# Suppress numpy warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='All-NaN slice encountered')
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='Mean of empty slice')
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='Degrees of freedom <= 0 for slice')
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='invalid value encountered in divide')
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='invalid value encountered in scalar divide')
+# Suppress specific warnings from our modules
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='alpha_discovery.search.ga_core')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='alpha_discovery.eval.metrics.robustness')
 
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
+
+# Set numpy error handling to ignore warnings
+np.seterr(all='ignore')
 
 from alpha_discovery.config import settings
 from alpha_discovery.search import nsga as nsga_mod
+from alpha_discovery.search.island_model import IslandManager, ExitPolicy
 from alpha_discovery.features.registry import build_feature_matrix
 from alpha_discovery.signals.compiler import compile_signals
 from alpha_discovery.reporting.artifacts import save_results # Will be enhanced in Step 7
-from alpha_discovery.core.splits import create_hybrid_splits, HybridSplits
+from alpha_discovery.core.splits import HybridSplits
 from alpha_discovery.eval.validation import run_full_pipeline
 from alpha_discovery.eval.elv import calculate_elv_and_labels
 from alpha_discovery.eval.hart_index import calculate_hart_index, get_hart_index_summary
-from alpha_discovery.eval.post_simulation import run_post_simulation, run_correlation_analysis
+from alpha_discovery.eval.diagnostics.repro import write_repro_json
+from alpha_discovery.eval.post_simulation import run_post_simulation, run_correlation_analysis, _calculate_enhanced_causality_for_finalists
 from alpha_discovery.eval.regime import RegimeModel
 from alpha_discovery.reporting.tradeable_setups import write_tradeable_setups
 
@@ -49,13 +74,17 @@ warnings.filterwarnings(
     category=RuntimeWarning,
 )
 
-# Thread caps for reproducibility
+# Thread caps for reproducibility + performance tuning
 os.environ.update(
-    VECLIB_MAXIMUM_THREADS='1',
-    OMP_NUM_THREADS='1',
-    OPENBLAS_NUM_THREADS='1',
-    MKL_NUM_THREADS='1',
-    NUMEXPR_NUM_THREADS='1',
+    VECLIB_MAXIMUM_THREADS='4',  # Allow more threads for numpy
+    OMP_NUM_THREADS='4',
+    OPENBLAS_NUM_THREADS='4',
+    MKL_NUM_THREADS='4',
+    NUMEXPR_NUM_THREADS='4',
+    # Feature performance tuning
+    FEATURES_PAIRWISE_MAX_TICKERS='32',  # Limit pairwise to 32 tickers
+    FEATURES_PAIRWISE_JOBS='8',  # Use 8 parallel jobs
+    PAIRWISE_MIN_PERIODS='10',   # Reduce min periods for speed
 )
 
 
@@ -148,37 +177,70 @@ def create_run_dir() -> str:
     return run_dir
 
 
-def discovery_phase(splits: HybridSplits, signals_df: pd.DataFrame, signals_meta: List[Dict], master_df: pd.DataFrame) -> Tuple[List[Dict], List[Dict], Optional[RegimeModel]]:
-    """Runs the GA over each discovery fold and returns unique candidates and all fold results."""
-    if settings.run_mode not in ['discover', 'full']:
-        return [], [], None
+def discovery_phase(splits: HybridSplits, signals_df: pd.DataFrame, signals_meta: List[Dict], master_df: pd.DataFrame) -> Tuple[List[Dict], List[Dict], Optional[Any]]:
+    """Main GA discovery phase using Combinatorial Purged Cross-Validation."""
+    all_discovery_results = []
+    unique_candidates = {}
+    anchor_regime_model = None  # Placeholder for now
 
-    all_fold_results = []
-    for fold_num, (train_idx, _) in enumerate(splits.discovery_cv, 1):
-        print(f"\n==================== RUNNING DISCOVERY FOLD {fold_num}/{len(splits.discovery_cv)} ====================")
-        train_signals_df = signals_df.loc[train_idx]
-        train_master_df = master_df.loc[train_idx]
-        pareto_front = nsga_mod.evolve(train_signals_df, signals_meta, train_master_df)
-        for sol in pareto_front:
-            sol['fold'] = fold_num
-        all_fold_results.extend(pareto_front)
+    print(f"\n==================== RUNNING DISCOVERY WITH {len(splits.discovery_cv)} CPCV SPLITS ====================")
     
-    # Convert signal lists to tuples for hashing
-    unique_dict = {}
-    for sol in all_fold_results:
-        ticker, signals = sol['individual']
-        hashable_key = (ticker, tuple(signals))  # Convert list to tuple for hashing
-        unique_dict[hashable_key] = sol
-    unique_candidates = list(unique_dict.values())
-    print(f"\n--- Discovery complete. Found {len(unique_candidates)} unique candidates across {len(splits.discovery_cv)} folds. ---")
+    # With CPCV, we run the GA once. The evaluation of each individual happens across all splits internally.
+    # The `train_indices` for the policy can encompass the entire discovery period.
+    exit_policy = ExitPolicy(train_indices=splits.discovery_indices, splits=splits.discovery_cv)
+    
+    island_manager = IslandManager(
+        n_islands=settings.ga.n_islands,
+        n_individuals=settings.ga.population_size,
+        n_generations=settings.ga.generations,
+        signals_df=signals_df,
+        signals_metadata=signals_meta,
+        master_df=master_df,
+        exit_policy=exit_policy,
+        migration_interval=settings.ga.migration_interval,
+        seed=settings.ga.seed
+    )
+    
+    pareto_front = island_manager.evolve()
+    
+    # Process results from the single GA run
+    for ind_data in pareto_front:
+        individual = ind_data.get('individual')
+        if not individual:
+            continue
+        # Create a hashable version for uniqueness check
+        if hasattr(individual, 'ticker'):
+            horizon = getattr(individual, 'horizon', settings.forecast.default_horizon)
+            hashable_ind = (individual.ticker, tuple(individual.signals), horizon)
+        else:
+            # Handle tuple format if it occurs, allowing 2- or 3-tuples
+            ticker = individual[0]
+            signals = tuple(individual[1]) if len(individual) > 1 else tuple()
+            horizon = individual[2] if len(individual) > 2 else settings.forecast.default_horizon
+            hashable_ind = (ticker, signals, horizon)
 
-    # (Inside discovery_phase, after CV folds have run and models are trained/aligned)
-    # anchor_regime_model = # ... (logic to get the anchor model)
-    # return unique_candidates, all_fold_results, anchor_regime_model
-    return unique_candidates, all_fold_results, None # Placeholder for now
+        if hashable_ind not in unique_candidates:
+            unique_candidates[hashable_ind] = ind_data
+            all_discovery_results.append(ind_data)
 
-def main():
-    print("--- Alpha Discovery v3.0: ELV Forecast Framework ---")
+    return list(unique_candidates.values()), all_discovery_results, anchor_regime_model
+
+
+def print_header(mode: str = "legacy"):
+    """Prints a stylized header to the console."""
+    print("=" * 80)
+    print("              ALPHA DISCOVERY ENGINE v10 (Codename: 'Helios')")
+    print("=" * 80)
+    print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Configuration Seed: {settings.ga.seed}")
+    print(f"Mode: {mode.upper()}")
+    print("-" * 80)
+
+
+def main_legacy():
+    """Legacy main workflow (original P&L-based discovery)."""
+    print_header(mode="legacy")
+    
     master_df = load_data()
     if master_df.empty:
         print("No data; exiting.")
@@ -188,20 +250,44 @@ def main():
     feature_matrix = build_feature_matrix(master_df) # Need features for eligibility
     signals_df, signals_meta = compile_signals(feature_matrix)
 
+    # --- 3. Create Splits ---
     print("\n--- Creating hybrid validation splits ---")
-    splits = create_hybrid_splits(data_index=signals_df.index)
-
-    # --- Discovery Phase ---
+    splits = HybridSplits(data_index=signals_df.index)
+    
+    # --- 4. Genetic Algorithm Discovery Phase ---
     unique_candidates, all_discovery_results, anchor_regime_model = discovery_phase(splits, signals_df, signals_meta, master_df)
 
+    if not unique_candidates:
+        print("\n--- No unique candidates found. Exiting. ---")
+        return
+
+    # Prepare run directory early so downstream validation can emit diagnostics
+    run_dir = create_run_dir()
+
+    # Emit reproducibility metadata immediately
+    try:
+        repro_path = os.path.join(run_dir, 'diagnostics', 'reproducibility.json')
+        write_repro_json(repro_path, extra={
+            'seed': settings.ga.seed,
+            'objectives': settings.ga.objectives,
+            'horizons': settings.forecast.horizons,
+            'run_mode': settings.run_mode,
+        })
+        print(f"[repro] Wrote reproducibility header to {repro_path}")
+    except Exception as e:
+        print(f"[warn] Failed to write reproducibility header: {e}")
+
     # --- OOS & Gauntlet Evaluation Phase ---
-    pre_elv_df = run_full_pipeline(unique_candidates, all_discovery_results, splits, signals_df, master_df, feature_matrix, signals_meta)
+    pre_elv_df = run_full_pipeline(unique_candidates, all_discovery_results, splits, signals_df, master_df, feature_matrix, signals_meta, run_dir=run_dir)
 
     # Debug: Check pre_elv_df before ELV calculation
     print("\n--- Debug: pre_elv_df info ---")
     print(f"Shape: {pre_elv_df.shape}")
     print(f"Columns: {pre_elv_df.columns.tolist()}")
-    print(f"Sample individual values: {pre_elv_df['individual'].head()}")
+    if not pre_elv_df.empty and 'individual' in pre_elv_df.columns:
+        print(f"Sample individual values: {pre_elv_df['individual'].head()}")
+    else:
+        print("No individuals in pre_elv_df - all OOS folds dropped due to low support")
     print(f"\nNon-null counts by column:")
     null_info = pre_elv_df.notna().sum().sort_values()
     for col, count in null_info.items():
@@ -265,6 +351,38 @@ def main():
 
     # Note: writing audit to file occurs after run_dir is created
 
+    # --- Gauntlet Evaluation Phase ---
+    if settings.gauntlet.run_gauntlet:
+        print("\n--- Running Gauntlet 2.0 (5-stage evaluation pipeline) ---")
+        try:
+            from alpha_discovery.gauntlet import run_gauntlet
+            
+            # Run gauntlet on the top candidates from ELV results
+            gauntlet_output_paths = run_gauntlet(
+                run_dir=run_dir,
+                settings=settings,
+                master_df=master_df,
+                signals_df=signals_df,
+                signals_metadata=signals_meta,
+                diagnostics=True
+            )
+            
+            # Report gauntlet results
+            print(f"[Gauntlet 2.0] Evaluation complete!")
+            print(f"[Gauntlet 2.0] Output files:")
+            for name, path in gauntlet_output_paths.items():
+                if path and os.path.exists(path):
+                    print(f"  - {name}: {os.path.basename(path)}")
+            
+        except ImportError as e:
+            print(f"[Gauntlet 2.0] Import error: {e}")
+            print("[Gauntlet 2.0] Skipping gauntlet evaluation")
+        except Exception as e:
+            print(f"[Gauntlet 2.0] Error during evaluation: {e}")
+            print("[Gauntlet 2.0] Continuing without gauntlet results")
+    else:
+        print("\n--- Gauntlet evaluation disabled (settings.gauntlet.run_gauntlet = False) ---")
+
     # --- Post-Simulation Phase ---
     sim_summary_df, sim_ledger_df = run_post_simulation(
         final_results_df, signals_df, master_df
@@ -273,8 +391,6 @@ def main():
     
     # --- Reporting Phase ---
     print("\n--- All folds complete. Saving final ELV-scored results with Hart Index. ---")
-    run_dir = create_run_dir()
-    
     # Save the main artifacts (pareto front, forecast slate, etc.)
     # The save_results function now returns the path to the forecast_slate.csv
     forecast_slate_path = save_results(
@@ -324,6 +440,277 @@ def main():
         print("\n--- Skipping Actionable Trade Report (forecast slate not found) ---")
 
     print(f"\nSaved final aggregated results to: {run_dir}")
+
+
+def main_discover():
+    """
+    Forecast-first discovery mode.
+    
+    Runs:
+    1. Load data and build features
+    2. Create PAWF splits for outer validation
+    3. Run GA with NPWF inner folds
+    4. Validate all candidates on outer PAWF folds
+    5. Generate EligibilityMatrix with skill/calibration/drift metrics
+    6. Save eligibility matrix for selection phase
+    """
+    print_header(mode="discover")
+    
+    # Load data
+    master_df = load_data()
+    if master_df.empty:
+        print("No data; exiting.")
+        return
+    
+    print("--- Building features and signals ---")
+    feature_matrix = build_feature_matrix(master_df)
+    signals_df, signals_meta = compile_signals(feature_matrix)
+    
+    # Create run directory
+    run_dir = create_run_dir()
+    print(f"\n--- Run directory: {run_dir} ---")
+    
+    # Import forecast-first orchestrator
+    from alpha_discovery.eval.orchestrator import ForecastOrchestrator
+    from alpha_discovery.adapters.features import FeatureAdapter, calculate_max_lookback
+    
+    print("\n--- Initializing Forecast-First Orchestrator ---")
+    
+    # Setup feature adapter
+    adapter = FeatureAdapter()
+    lookback_tail = calculate_max_lookback(adapter.features, adapter.pairwise)
+    print(f"Feature lookback tail: {lookback_tail} days")
+    
+    # Create orchestrator
+    orchestrator = ForecastOrchestrator(
+        master_df=master_df,
+        signals_df=signals_df,
+        signals_meta=signals_meta,
+        output_dir=Path(run_dir),
+        feature_lookback_tail=lookback_tail,
+        seed=settings.ga.seed
+    )
+    
+    # Run validation with PAWF + NPWF
+    print("\n--- Running PAWF validation with NPWF inner folds ---")
+    eligibility_matrix = orchestrator.run_validation(
+        n_outer_splits=4,           # PAWF outer splits
+        test_size_months=6,          # 6-month test windows
+        purge_days=5,                # 5-day purge
+        n_inner_folds=3,             # NPWF inner folds for GA
+        n_regimes=5,                 # GMM regimes
+        run_ga=True,                 # Run GA for discovery
+        n_ga_generations=settings.ga.generations,
+        ga_population=settings.ga.population_size
+    )
+    
+    # Generate reports
+    print("\n--- Generating Eligibility Reports ---")
+    from alpha_discovery.reporting.eligibility_report import (
+        generate_eligibility_report,
+        print_eligibility_summary
+    )
+    
+    reports_dir = Path(run_dir) / "reports"
+    eligibility_path = Path(run_dir) / "eligibility_matrix.json"
+    
+    report_outputs = generate_eligibility_report(
+        eligibility_matrix_path=eligibility_path,
+        output_dir=reports_dir,
+        min_skill_vs_marginal=0.01,
+        max_calibration_mae=0.15,
+        drift_gate=True,
+        top_n=50
+    )
+    
+    # Print summary
+    print_eligibility_summary(report_outputs['summary'])
+    
+    print(f"\n--- Discovery Complete ---")
+    print(f"Eligibility matrix: {eligibility_path}")
+    print(f"Reports directory: {reports_dir}")
+    print(f"\nNext step: Run with --mode select --eligibility {eligibility_path}")
+
+
+def main_select(eligibility_path: Optional[Path] = None):
+    """
+    Selection mode: Load eligibility matrix and generate forecast slate.
+    
+    Runs:
+    1. Load eligibility matrix
+    2. Filter by skill/calibration/drift thresholds
+    3. Rank by skill_vs_marginal
+    4. Apply portfolio constraints (max per ticker, diversification)
+    5. Generate actionable forecast slate
+    """
+    print_header(mode="select")
+    
+    # Find eligibility matrix
+    if eligibility_path is None:
+        # Look for most recent run
+        runs_dir = Path(settings.reporting.runs_dir)
+        if not runs_dir.exists():
+            print(f"No runs directory found: {runs_dir}")
+            return
+        
+        # Find most recent eligibility matrix
+        eligible_runs = list(runs_dir.glob("*/eligibility_matrix.json"))
+        if not eligible_runs:
+            print(f"No eligibility matrices found in {runs_dir}")
+            print("Run with --mode discover first!")
+            return
+        
+        eligibility_path = max(eligible_runs, key=lambda p: p.stat().st_mtime)
+        print(f"Using most recent eligibility matrix: {eligibility_path}")
+    
+    if not eligibility_path.exists():
+        print(f"Eligibility matrix not found: {eligibility_path}")
+        return
+    
+    # Load eligibility matrix
+    import json
+    import pandas as pd
+    
+    with open(eligibility_path, 'r') as f:
+        data = json.load(f)
+    
+    results_df = pd.DataFrame(data['results'])
+    metadata = data['metadata']
+    
+    print(f"\n--- Loaded {len(results_df)} validated setups ---")
+    print(f"Validation date: {metadata.get('timestamp', 'unknown')}")
+    
+    # Apply selection criteria
+    print("\n--- Applying Selection Criteria ---")
+    
+    MIN_SKILL = 0.01  # Must beat marginal by 1% CRPS
+    MAX_CALIB_MAE = 0.15  # Max 15% calibration error
+    DRIFT_GATE = True
+    MAX_PER_TICKER = 2  # Max 2 setups per ticker
+    TOP_N = 20  # Final portfolio size
+    
+    eligible = results_df[
+        (results_df['skill_vs_marginal'] >= MIN_SKILL) &
+        (results_df['calibration_mae'] <= MAX_CALIB_MAE)
+    ]
+    
+    if DRIFT_GATE:
+        eligible = eligible[eligible['drift_passed'] == True]
+    
+    print(f"  Eligible setups: {len(eligible)}/{len(results_df)}")
+    
+    # Rank by skill
+    eligible = eligible.sort_values('skill_vs_marginal', ascending=False)
+    
+    # Apply max-per-ticker constraint
+    selected = []
+    ticker_counts = {}
+    
+    for idx, row in eligible.iterrows():
+        ticker = row['ticker']
+        if ticker_counts.get(ticker, 0) < MAX_PER_TICKER:
+            selected.append(row)
+            ticker_counts[ticker] = ticker_counts.get(ticker, 0) + 1
+        
+        if len(selected) >= TOP_N:
+            break
+    
+    final_df = pd.DataFrame(selected)
+    
+    print(f"  Final portfolio: {len(final_df)} setups across {len(ticker_counts)} tickers")
+    
+    # Generate forecast slate
+    output_dir = eligibility_path.parent / "selection"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    forecast_slate_path = output_dir / "forecast_slate.csv"
+    final_df.to_csv(forecast_slate_path, index=False)
+    
+    print(f"\n--- Forecast Slate Generated ---")
+    print(f"Output: {forecast_slate_path}")
+    
+    # Print top 10
+    print(f"\n🏆 Top 10 Setups:")
+    for i, row in final_df.head(10).iterrows():
+        print(f"  {i+1}. {row['ticker']} H{row['horizon']}: "
+              f"skill={row['skill_vs_marginal']:.4f}, "
+              f"CRPS={row['crps']:.4f}, "
+              f"calib_mae={row['calibration_mae']:.4f}")
+    
+    print(f"\n--- Selection Complete ---")
+
+
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Alpha Discovery Engine v10 - Forecast-First Pipeline",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Modes:
+  legacy   - Original P&L-based discovery (default for backward compatibility)
+  discover - Forecast-first discovery with PAWF validation
+  select   - Load eligibility matrix and generate forecast slate
+
+Examples:
+  # Run forecast-first discovery
+  python main.py --mode discover
+  
+  # Select from most recent eligibility matrix
+  python main.py --mode select
+  
+  # Select from specific eligibility matrix
+  python main.py --mode select --eligibility runs/validation_001/eligibility_matrix.json
+  
+  # Run legacy mode (backward compatible)
+  python main.py
+  python main.py --mode legacy
+        """
+    )
+    
+    parser.add_argument(
+        '--mode',
+        type=str,
+        choices=['legacy', 'discover', 'select'],
+        default='legacy',
+        help='Execution mode (default: legacy)'
+    )
+    
+    parser.add_argument(
+        '--eligibility',
+        type=str,
+        default=None,
+        help='Path to eligibility_matrix.json (for select mode)'
+    )
+    
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=None,
+        help='Override GA seed from config'
+    )
+    
+    return parser.parse_args()
+
+
+def main():
+    """Main entry point with mode selection."""
+    args = parse_args()
+    
+    # Override seed if provided
+    if args.seed is not None:
+        settings.ga.seed = args.seed
+    
+    # Route to appropriate workflow
+    if args.mode == 'legacy':
+        main_legacy()
+    elif args.mode == 'discover':
+        main_discover()
+    elif args.mode == 'select':
+        eligibility_path = Path(args.eligibility) if args.eligibility else None
+        main_select(eligibility_path)
+    else:
+        print(f"Unknown mode: {args.mode}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
