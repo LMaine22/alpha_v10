@@ -1,148 +1,388 @@
-# Alpha Discovery System
+# Alpha Discovery Engine v10 - Forecast-First
 
-A comprehensive options-based backtesting and genetic algorithm system for discovering profitable trading strategies.
+> A rigorous, leakage-resistant quantitative alpha discovery framework built on proper scoring rules, nested cross-validation, and comprehensive calibration.
 
-## System Architecture
+---
 
-### Core Entry Point
-- **`main.py`** - Main pipeline orchestrator that coordinates the entire alpha discovery process
+## 🎯 Quick Start
 
-### Data Layer (`alpha_discovery/data/`)
-- **`loader.py`** - Data ingestion from Excel/Parquet sources
-- **`events.py`** - Economic event calendar integration and feature generation
+```bash
+# Run forecast-first discovery
+python main.py
 
-### Feature Engineering (`alpha_discovery/features/`)
-- **`core.py`** - Mathematical feature computation functions (z-scores, correlations, volatility, etc.)
-- **`registry.py`** - Feature matrix builder that applies core functions to market data
-
-### Signal Generation (`alpha_discovery/signals/`)
-- **`compiler.py`** - Converts continuous features into binary trading signals using rule-based grammar
-
-### Search & Optimization (`alpha_discovery/search/`)
-- **`nsga.py`** - NSGA-II multi-objective genetic algorithm implementation
-- **`population.py`** - Population initialization and genetic operations
-- **`island_model.py`** - Parallel island model for genetic algorithm diversity
-- **`ga_core.py`** - Core genetic algorithm evaluation and fitness functions
-
-### Backtesting Engine (`alpha_discovery/engine/`)
-- **`backtester.py`** - Main backtesting facade
-- **`bt_core.py`** - Core backtesting logic and trade execution
-- **`bt_common.py`** - Common backtesting utilities and trade horizons
-- **`bt_runtime.py`** - Runtime backtesting execution
-
-### Options Pricing (`alpha_discovery/options/`)
-- **`pricing.py`** - Black-Scholes pricing and IV term structure mapping
-- **`models.py`** - Options pricing models and mathematical functions
-- **`market.py`** - Market data access for underlying prices and IV
-
-### Evaluation (`alpha_discovery/eval/`)
-- **`validation.py`** - Walk-forward validation and time series splits
-- **`metrics.py`** - Portfolio performance metrics calculation
-- **`selection.py`** - Portfolio selection and ranking algorithms
-- **`nav.py`** - Net Asset Value calculations
-
-### Reporting (`alpha_discovery/reporting/`)
-- **`artifacts.py`** - Results persistence and CSV generation
-- **`manifests.py`** - Run metadata and configuration tracking
-
-### Configuration (`alpha_discovery/config.py`)
-- Centralized configuration management using Pydantic models
-- Settings for GA parameters, data sources, validation, options pricing, and reporting
-
-## System Flow
-
-### 1. Data Pipeline
+# Output: runs/forecast_first_seed{SEED}_{TIMESTAMP}/
+#   ├── eligibility_matrix.json       # Full validation results
+#   └── reports/                       # Comprehensive metrics
+#       ├── eligible_setups.csv
+#       ├── skill_breakdown.csv
+#       ├── calibration_summary.csv
+#       └── drift_analysis.csv
 ```
-main.py → data/loader.py → data/events.py
+
+## 📊 What This Does
+
+The Alpha Discovery Engine discovers **forecast-based trading signals** using:
+
+1. **Zero-Leakage Validation** (PAWF + NPWF with purge and embargo)
+2. **Proper Scoring Rules** (CRPS, Brier, Log Loss, Pinball)
+3. **Skill vs. Baselines** (Uniform/Marginal/Persistence)
+4. **Calibration Checks** (ECE/MCE + Isotonic/Platt scaling)
+5. **Drift Detection** (Adversarial AUC)
+6. **Robustness Tests** (Bootstrap, regime stratification)
+
+**Output**: EligibilityMatrix with comprehensive forecast quality metrics.
+
+---
+
+## 🏗️ System Architecture
+
 ```
-- Loads market data from Excel/Parquet files
-- Integrates economic event calendar
-- Creates unified master dataframe
-
-### 2. Feature Engineering
+Data Loading → Feature Registry → Signal Compilation
+                                         ↓
+                              ForecastOrchestrator
+                                         ↓
+                    ┌────────────────────┴────────────────────┐
+                    ↓                                         ↓
+            PAWF Outer Splits (4 folds)              GMM Regime Detection
+                    ↓                                         ↓
+    ┌───────────────┴───────────────┐               Regime Assignment
+    ↓                               ↓                         ↓
+NPWF Inner Folds (3)          Outer Test Fold         Similarity Calc
+    ↓                               ↓                         ↓
+GA with Proper                 Evaluate Setup          Drift Detection
+Scoring Rules                  + Calibrators           + Bootstrap
+    ↓                               ↓                         ↓
+Select Best                    Skill vs Baselines      Robustness
+Candidates                     + ECE/MCE               Metrics
+    └───────────────┬───────────────┘                         ↓
+                    ↓                                  ┌───────┴────────┐
+            Eligibility Matrix                        │                │
+                    ↓                            Regime Stats    Drift Stats
+            Report Generation
+                    ↓
+        6 Comprehensive CSVs + JSON Summary
 ```
-main.py → features/registry.py → features/core.py
+
+---
+
+## 📁 Project Structure
+
 ```
-- Applies mathematical transformations to market data
-- Generates technical indicators, volatility measures, sentiment features
-- Creates cross-asset correlation and regime features
-- Builds comprehensive feature matrix
+alpha_discovery/
+├── splits/                  # PAWF/NPWF validation splits
+│   ├── pawf.py             # Purged Anchored Walk-Forward
+│   ├── npwf.py             # Nested Purged Walk-Forward
+│   ├── regime.py           # GMM regime detection
+│   ├── bootstrap.py        # Robustness tests
+│   └── adversarial.py      # Drift detection
+│
+├── adapters/               # Read-only feature access
+│   ├── features.py         # FeatureAdapter
+│   └── subspace.py         # Feature subsampling
+│
+├── eval/                   # Forecast evaluation
+│   ├── orchestrator.py     # ForecastOrchestrator (main)
+│   ├── objectives.py       # Proper scoring rules
+│   └── calibration.py      # ECE/MCE/Isotonic/Platt
+│
+├── reporting/              # Output generation
+│   └── eligibility_report.py  # Generate 6 report files
+│
+├── search/                 # Genetic algorithm
+│   ├── ga_core.py          # Setup evaluation
+│   ├── nsga.py             # NSGA-II multi-objective
+│   └── island_model.py     # Island-based evolution
+│
+├── features/               # Feature registry
+├── signals/                # Signal compiler
+└── config.py              # Configuration
 
-### 3. Signal Compilation
+main.py                     # Entry point
+tests/                      # Comprehensive test suite
+docs/                       # Documentation
 ```
-main.py → signals/compiler.py
+
+---
+
+## 🔬 Validation Methodology
+
+### PAWF (Purged Anchored Walk-Forward)
+
+**Outer validation** with 4 time-anchored folds:
+
 ```
-- Converts continuous features to binary signals
-- Applies rule-based grammar (percentiles, z-scores, thresholds)
-- Generates large pool of primitive trading signals
-
-### 4. Genetic Algorithm Search
+Split 1: Train[2020-2021] → Purge → Embargo → Test[2022-H1]
+Split 2: Train[2020-2022] → Purge → Embargo → Test[2022-H2]
+Split 3: Train[2020-2023Q1] → Purge → Embargo → Test[2023-Q2]
+Split 4: Train[2020-2023-H1] → Purge → Embargo → Test[2023-H2]
 ```
-main.py → search/nsga.py → search/ga_core.py → search/population.py
+
+- **Purge**: 5-day gap between train and test
+- **Embargo**: 10-day buffer (feature lookback tail)
+- **Anchored**: Train always starts from same date
+
+### NPWF (Nested Purged Walk-Forward)
+
+**Inner folds for GA hyperparameter selection:**
+
 ```
-- Initializes population of (ticker, signal_set) combinations
-- Evolves solutions using NSGA-II multi-objective optimization
-- Evaluates fitness using options backtesting engine
-- Supports island model for parallel evolution
-
-### 5. Options Backtesting
+For each PAWF outer fold:
+  Split outer_train into 3 NPWF inner folds
+  GA optimizes on these inner folds
+  Final evaluation on outer_test (unseen)
 ```
-search/ga_core.py → engine/backtester.py → engine/bt_core.py → options/pricing.py
+
+- **Zero leakage**: Inner folds never see outer test data
+- **Proper scoring only**: CRPS, Brier, Log Loss, Pinball
+- **Deterministic**: Same seed = same folds
+
+---
+
+## 📈 Metrics & Objectives
+
+### Proper Scoring Rules (GA Optimization)
+
+- **CRPS** (Continuous Ranked Probability Score) - distributional accuracy
+- **Brier Score** - probabilistic calibration
+- **Log Loss** - probabilistic sharpness
+- **Pinball Loss** (q10, q25, q50, q75, q90) - quantile forecasts
+
+### Skill Metrics (vs Baselines)
+
+- **Uniform** - naive 50/50 forecast
+- **Marginal** - historical frequency
+- **Persistence** - last observed value
+
+### Calibration
+
+- **ECE** (Expected Calibration Error)
+- **MCE** (Maximum Calibration Error)
+- **Isotonic Regression** - monotonic calibration
+- **Platt Scaling** - logistic calibration
+
+### Robustness
+
+- **Bootstrap Stability** - skill delta confidence intervals
+- **Drift Detection** - adversarial AUC (train vs test)
+- **Regime Consistency** - GMM-based stratification
+
+---
+
+## 🚀 Usage Examples
+
+### Basic Discovery
+
+```bash
+python main.py
 ```
-- Simulates options trades using Black-Scholes pricing
-- Implements realistic strike selection and IV term structure mapping
-- Tracks trade performance and portfolio metrics
-- Supports multiple exit strategies and regime-aware exits
 
-### 6. Validation & Evaluation
+### With Custom Seed
+
+```python
+# In config.py
+settings.ga.seed = 999
 ```
-main.py → eval/validation.py → eval/metrics.py
+
+Or programmatically:
+
+```python
+from alpha_discovery.eval.orchestrator import ForecastOrchestrator
+
+orchestrator = ForecastOrchestrator(...)
+eligibility = orchestrator.run_validation(
+    n_outer_splits=4,
+    test_size_months=6,
+    purge_days=5,
+    n_inner_folds=3,
+    n_regimes=5
+)
 ```
-- Creates walk-forward time series splits
-- Validates strategies on out-of-sample data
-- Calculates comprehensive performance metrics (Sharpe, Sortino, expectancy, etc.)
 
-### 7. Results & Reporting
+### Generate Reports
+
+```python
+from alpha_discovery.reporting.eligibility_report import (
+    generate_eligibility_report,
+    print_eligibility_summary
+)
+
+outputs = generate_eligibility_report(
+    eligibility_matrix_path="runs/.../eligibility_matrix.json",
+    output_dir="runs/.../reports",
+    min_skill_vs_marginal=0.01,
+    max_calibration_mae=0.15,
+    drift_gate=True,
+    top_n=50
+)
+
+print_eligibility_summary(outputs['summary'])
 ```
-main.py → reporting/artifacts.py
+
+---
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+pytest
+
+# Run specific test categories
+pytest tests/test_splits_leakage.py -v          # Leakage prevention
+pytest tests/test_calibration.py -v             # Calibration quality
+pytest tests/test_adapters.py -v                # Feature adapters
+pytest tests/test_regime.py -v                  # GMM regime detection
+pytest tests/test_bootstrap.py -v               # Bootstrap robustness
+
+# Run with coverage
+pytest --cov=alpha_discovery --cov-report=html
 ```
-- Persists training and OOS results
-- Generates CSV reports with trade ledgers and performance summaries
-- Creates per-fold artifacts for detailed analysis
 
-## Key Design Patterns
+**Test Coverage**: 96+ tests, 90%+ coverage across core modules.
 
-### Specialized DNA Structure
-- Each individual is a tuple: `(ticker, [signal_list])`
-- Enables ticker-specific strategy optimization
-- Supports cross-ticker signal combinations
+---
 
-### Multi-Objective Optimization
-- Configurable fitness objectives (Sortino, expectancy, support)
-- Pareto front ranking for trade-off analysis
-- Crowding distance for diversity maintenance
+## 📚 Documentation
 
-### Options-First Architecture
-- All strategies evaluated through options backtesting
-- Realistic pricing with IV term structure mapping
-- Support for multiple option types and strike selection methods
+- **[CLI Usage](docs/CLI_USAGE.md)** - Command-line reference
+- **[Test README](tests/README.md)** - Comprehensive test guide
+- **[Migration Guide](docs/MIGRATION_GUIDE.md)** - Transitioning from legacy system
+- **[Metrics Reference](docs/METRICS_REFERENCE.md)** - All available metrics
+- **[GA README](docs/GA_README.md)** - Genetic algorithm details
 
-### Walk-Forward Validation
-- Time series splits prevent look-ahead bias
-- Embargo periods between train/test windows
-- Out-of-sample testing on evolved strategies
+---
 
-### Event-Driven Features
-- Economic calendar integration
-- Event-based feature generation
-- Regime-aware trading strategies
+## 🔧 Configuration
 
-## Configuration-Driven
-The system is highly configurable through `config.py`:
-- GA parameters (population size, generations, mutation rates)
-- Data sources and ticker universes
-- Validation settings and walk-forward parameters
-- Options pricing regimes and IV mapping
-- Reporting and artifact generation
+Key settings in `alpha_discovery/config.py`:
 
-This architecture enables systematic discovery of profitable options trading strategies while maintaining rigorous validation standards and realistic market simulation.
+```python
+class GaConfig:
+    population_size: int = 50
+    generations: int = 5
+    objectives: List[str] = [
+        "crps_neg",
+        "pinball_loss_neg_q10",
+        "pinball_loss_neg_q90",
+        "info_gain",
+        "w1_effect",
+        ...
+    ]
+
+class ForecastConfig:
+    horizons: List[int] = [1, 3, 5, 21]
+
+class ValidationConfig:
+    n_outer_splits: int = 4
+    test_size_months: int = 6
+    purge_days: int = 5
+    n_inner_folds: int = 3
+```
+
+---
+
+## 🎯 Output Files
+
+After running `python main.py`:
+
+```
+runs/forecast_first_seed194_20250930_120000/
+├── eligibility_matrix.json                    # Complete validation results
+│
+└── reports/
+    ├── report_summary.json                    # High-level statistics
+    ├── eligible_setups.csv                    # Top eligible setups ranked by skill
+    ├── skill_breakdown.csv                    # Skill by ticker/horizon
+    ├── calibration_summary.csv                # Calibration diagnostics
+    ├── drift_analysis.csv                     # Drift detection results
+    └── regime_stratification.csv              # Performance by regime
+```
+
+### EligibilityMatrix Schema
+
+```json
+{
+  "metadata": {
+    "timestamp": "2025-09-30T12:00:00",
+    "n_outer_splits": 4,
+    "n_inner_folds": 3,
+    "seed": 194
+  },
+  "results": [
+    {
+      "split_id": "PAWF_v1|OUTER:202401|H:5|E:normal|P:5|EMB:10|REG:R1",
+      "ticker": "AAPL",
+      "setup": ["sig_momentum_20", "sig_vol_surge"],
+      "horizon": 5,
+      "crps": 0.234,
+      "brier_score": 0.189,
+      "log_loss": 0.567,
+      "skill_vs_marginal": 0.023,
+      "calibration_mae": 0.087,
+      "calibration_ece": 0.045,
+      "drift_auc": 0.512,
+      "drift_passed": true,
+      "regime_similarity": 0.78,
+      ...
+    }
+  ]
+}
+```
+
+---
+
+## 🏆 Key Features
+
+✅ **Zero Leakage**: PAWF + NPWF with purge and embargo  
+✅ **Proper Scoring**: CRPS, Brier, Log Loss only for optimization  
+✅ **Skill Baselines**: Beat uniform/marginal/persistence  
+✅ **Calibration**: ECE/MCE + Isotonic/Platt  
+✅ **Drift Detection**: Adversarial AUC  
+✅ **Regime-Aware**: GMM clustering  
+✅ **Bootstrap Tests**: Stationary & heavy-tailed  
+✅ **Comprehensive Reports**: 6 CSV/JSON outputs  
+✅ **Deterministic**: Same seed = same results  
+✅ **Well-Tested**: 96+ tests, 90%+ coverage  
+
+---
+
+## 📦 Requirements
+
+```bash
+pip install -r requirements.txt
+```
+
+Main dependencies:
+- pandas, numpy, scipy
+- scikit-learn (GaussianMixture, calibration)
+- joblib (caching)
+- tqdm (progress bars)
+
+---
+
+## 🤝 Contributing
+
+1. Run tests: `pytest`
+2. Check coverage: `pytest --cov`
+3. Lint: `flake8 alpha_discovery/`
+4. Format: `black alpha_discovery/`
+
+---
+
+## 📄 License
+
+[Your License Here]
+
+---
+
+## 🙏 Acknowledgments
+
+Built with rigorous validation methodology inspired by:
+- Advances in Financial Machine Learning (López de Prado)
+- Probabilistic Forecasting (Gneiting & Katzfuss)
+- Multi-Objective Optimization (Deb, NSGA-II)
+
+---
+
+**Version**: 10.0 (Forecast-First)  
+**Status**: Production Ready  
+**Last Updated**: September 30, 2025

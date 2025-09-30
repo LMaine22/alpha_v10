@@ -1,7 +1,5 @@
 from __future__ import annotations
 import os
-import sys
-import argparse
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -34,19 +32,8 @@ from typing import List, Dict, Tuple, Optional, Any
 np.seterr(all='ignore')
 
 from alpha_discovery.config import settings
-from alpha_discovery.search import nsga as nsga_mod
-from alpha_discovery.search.island_model import IslandManager, ExitPolicy
 from alpha_discovery.features.registry import build_feature_matrix
 from alpha_discovery.signals.compiler import compile_signals
-from alpha_discovery.reporting.artifacts import save_results # Will be enhanced in Step 7
-from alpha_discovery.core.splits import HybridSplits
-from alpha_discovery.eval.validation import run_full_pipeline
-from alpha_discovery.eval.elv import calculate_elv_and_labels
-from alpha_discovery.eval.hart_index import calculate_hart_index, get_hart_index_summary
-from alpha_discovery.eval.diagnostics.repro import write_repro_json
-from alpha_discovery.eval.post_simulation import run_post_simulation, run_correlation_analysis, _calculate_enhanced_causality_for_finalists
-from alpha_discovery.eval.regime import RegimeModel
-from alpha_discovery.reporting.tradeable_setups import write_tradeable_setups
 
 
 # Try to import the loader to build parquet if missing
@@ -172,277 +159,30 @@ def create_run_dir() -> str:
     rd_base = settings.reporting.runs_dir
     _ensure_dir(rd_base)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(rd_base, f"pivot_forecast_seed{settings.ga.seed}_{ts}")
+    run_dir = os.path.join(rd_base, f"forecast_first_seed{settings.ga.seed}_{ts}")
     _ensure_dir(run_dir)
     return run_dir
 
 
-def discovery_phase(splits: HybridSplits, signals_df: pd.DataFrame, signals_meta: List[Dict], master_df: pd.DataFrame) -> Tuple[List[Dict], List[Dict], Optional[Any]]:
-    """Main GA discovery phase using Combinatorial Purged Cross-Validation."""
-    all_discovery_results = []
-    unique_candidates = {}
-    anchor_regime_model = None  # Placeholder for now
-
-    print(f"\n==================== RUNNING DISCOVERY WITH {len(splits.discovery_cv)} CPCV SPLITS ====================")
-    
-    # With CPCV, we run the GA once. The evaluation of each individual happens across all splits internally.
-    # The `train_indices` for the policy can encompass the entire discovery period.
-    exit_policy = ExitPolicy(train_indices=splits.discovery_indices, splits=splits.discovery_cv)
-    
-    island_manager = IslandManager(
-        n_islands=settings.ga.n_islands,
-        n_individuals=settings.ga.population_size,
-        n_generations=settings.ga.generations,
-        signals_df=signals_df,
-        signals_metadata=signals_meta,
-        master_df=master_df,
-        exit_policy=exit_policy,
-        migration_interval=settings.ga.migration_interval,
-        seed=settings.ga.seed
-    )
-    
-    pareto_front = island_manager.evolve()
-    
-    # Process results from the single GA run
-    for ind_data in pareto_front:
-        individual = ind_data.get('individual')
-        if not individual:
-            continue
-        # Create a hashable version for uniqueness check
-        if hasattr(individual, 'ticker'):
-            horizon = getattr(individual, 'horizon', settings.forecast.default_horizon)
-            hashable_ind = (individual.ticker, tuple(individual.signals), horizon)
-        else:
-            # Handle tuple format if it occurs, allowing 2- or 3-tuples
-            ticker = individual[0]
-            signals = tuple(individual[1]) if len(individual) > 1 else tuple()
-            horizon = individual[2] if len(individual) > 2 else settings.forecast.default_horizon
-            hashable_ind = (ticker, signals, horizon)
-
-        if hashable_ind not in unique_candidates:
-            unique_candidates[hashable_ind] = ind_data
-            all_discovery_results.append(ind_data)
-
-    return list(unique_candidates.values()), all_discovery_results, anchor_regime_model
-
-
-def print_header(mode: str = "legacy"):
+def print_header():
     """Prints a stylized header to the console."""
     print("=" * 80)
-    print("              ALPHA DISCOVERY ENGINE v10 (Codename: 'Helios')")
+    print("         ALPHA DISCOVERY ENGINE v10 - Forecast-First")
     print("=" * 80)
     print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Configuration Seed: {settings.ga.seed}")
-    print(f"Mode: {mode.upper()}")
     print("-" * 80)
 
 
-def main_legacy():
-    """Legacy main workflow (original P&L-based discovery)."""
-    print_header(mode="legacy")
+def main():
+    """Forecast-first discovery and validation workflow."""
+    print_header()
     
-    master_df = load_data()
-    if master_df.empty:
-        print("No data; exiting.")
-        return
-        
-    print("--- Building all signals & features ---")
-    feature_matrix = build_feature_matrix(master_df) # Need features for eligibility
-    signals_df, signals_meta = compile_signals(feature_matrix)
-
-    # --- 3. Create Splits ---
-    print("\n--- Creating hybrid validation splits ---")
-    splits = HybridSplits(data_index=signals_df.index)
-    
-    # --- 4. Genetic Algorithm Discovery Phase ---
-    unique_candidates, all_discovery_results, anchor_regime_model = discovery_phase(splits, signals_df, signals_meta, master_df)
-
-    if not unique_candidates:
-        print("\n--- No unique candidates found. Exiting. ---")
-        return
-
-    # Prepare run directory early so downstream validation can emit diagnostics
-    run_dir = create_run_dir()
-
-    # Emit reproducibility metadata immediately
-    try:
-        repro_path = os.path.join(run_dir, 'diagnostics', 'reproducibility.json')
-        write_repro_json(repro_path, extra={
-            'seed': settings.ga.seed,
-            'objectives': settings.ga.objectives,
-            'horizons': settings.forecast.horizons,
-            'run_mode': settings.run_mode,
-        })
-        print(f"[repro] Wrote reproducibility header to {repro_path}")
-    except Exception as e:
-        print(f"[warn] Failed to write reproducibility header: {e}")
-
-    # --- OOS & Gauntlet Evaluation Phase ---
-    pre_elv_df = run_full_pipeline(unique_candidates, all_discovery_results, splits, signals_df, master_df, feature_matrix, signals_meta, run_dir=run_dir)
-
-    # Debug: Check pre_elv_df before ELV calculation
-    print("\n--- Debug: pre_elv_df info ---")
-    print(f"Shape: {pre_elv_df.shape}")
-    print(f"Columns: {pre_elv_df.columns.tolist()}")
-    if not pre_elv_df.empty and 'individual' in pre_elv_df.columns:
-        print(f"Sample individual values: {pre_elv_df['individual'].head()}")
-    else:
-        print("No individuals in pre_elv_df - all OOS folds dropped due to low support")
-    print(f"\nNon-null counts by column:")
-    null_info = pre_elv_df.notna().sum().sort_values()
-    for col, count in null_info.items():
-        if count == 0:
-            print(f"  {col}: {count} (ALL NULL)")
-        elif count < len(pre_elv_df):
-            print(f"  {col}: {count} ({len(pre_elv_df) - count} null)")
-    
-    # Check specifically for edge metrics
-    edge_cols = [col for col in pre_elv_df.columns if 'edge_' in col and '_raw' in col]
-    if edge_cols:
-        print(f"\nEdge metrics check ({len(edge_cols)} columns):")
-        for col in edge_cols:
-            non_null = pre_elv_df[col].notna().sum()
-            print(f"  {col}: {non_null} non-null values")
-
-    # --- ELV Scoring & Labeling Phase ---
-    final_results_df = calculate_elv_and_labels(pre_elv_df)
-    
-    # --- Hart Index Calculation Phase ---
-    print("\n--- Calculating Hart Index (0-100 trust scores) ---")
-    final_results_df = calculate_hart_index(final_results_df)
-    
-    # Print Hart Index summary
-    hart_summary = get_hart_index_summary(final_results_df)
-    print(f"\nHart Index Summary:")
-    print(f"  Mean: {hart_summary['mean']:.1f}")
-    print(f"  Median: {hart_summary['median']:.1f}")
-    print(f"  Max: {hart_summary['max']:.1f}")
-    print(f"  Distribution:")
-    print(f"    Exceptional (85-100): {hart_summary['n_exceptional']} setups")
-    print(f"    Strong (70-84): {hart_summary['n_strong']} setups")
-    print(f"    Moderate (55-69): {hart_summary['n_moderate']} setups")
-    print(f"    Marginal (40-54): {hart_summary['n_marginal']} setups")
-    print(f"    Weak (0-39): {hart_summary['n_weak']} setups")
-    print(f"  Top 10 Average: {hart_summary['top_10_avg']:.1f}")
-
-    # Hart Index usage audit: show which component metrics were actually used
-    print("\nHart Index Usage Audit (non-null counts):")
-    hart_inputs = [
-        # Performance/Edge
-        'edge_crps_raw','edge_pin_q10_raw','edge_pin_q90_raw','edge_ig_raw','edge_w1_raw','edge_calib_mae_raw',
-        # Robustness
-        'bootstrap_p_value_raw','sensitivity_delta_edge_raw','n_trig_oos',
-        # Causality/Complexity/Signal Quality
-        'transfer_entropy','transfer_entropy_p_value','granger_p_value','redundancy_mi_raw','complexity_metric_raw','dfa_alpha_raw',
-        # Readiness/Coverage
-        'live_tr_prior','coverage_factor','tr_cv_reg','tr_fg','page_hinkley_alarm'
-    ]
-    non_null_report_lines = []
-    for col in hart_inputs:
-        if col in final_results_df.columns:
-            non_null = int(final_results_df[col].notna().sum())
-            total = len(final_results_df)
-            line = f"  {col}: {non_null}/{total} ({(non_null/total*100 if total else 0):.1f}%)"
-            print(line)
-            non_null_report_lines.append(line)
-        else:
-            print(f"  {col}: MISSING")
-            non_null_report_lines.append(f"  {col}: MISSING")
-
-    # Note: writing audit to file occurs after run_dir is created
-
-    # --- Gauntlet Evaluation Phase ---
-    if settings.gauntlet.run_gauntlet:
-        print("\n--- Running Gauntlet 2.0 (5-stage evaluation pipeline) ---")
-        try:
-            from alpha_discovery.gauntlet import run_gauntlet
-            
-            # Run gauntlet on the top candidates from ELV results
-            gauntlet_output_paths = run_gauntlet(
-                run_dir=run_dir,
-                settings=settings,
-                master_df=master_df,
-                signals_df=signals_df,
-                signals_metadata=signals_meta,
-                diagnostics=True
-            )
-            
-            # Report gauntlet results
-            print(f"[Gauntlet 2.0] Evaluation complete!")
-            print(f"[Gauntlet 2.0] Output files:")
-            for name, path in gauntlet_output_paths.items():
-                if path and os.path.exists(path):
-                    print(f"  - {name}: {os.path.basename(path)}")
-            
-        except ImportError as e:
-            print(f"[Gauntlet 2.0] Import error: {e}")
-            print("[Gauntlet 2.0] Skipping gauntlet evaluation")
-        except Exception as e:
-            print(f"[Gauntlet 2.0] Error during evaluation: {e}")
-            print("[Gauntlet 2.0] Continuing without gauntlet results")
-    else:
-        print("\n--- Gauntlet evaluation disabled (settings.gauntlet.run_gauntlet = False) ---")
-
-    # --- Post-Simulation Phase ---
-    sim_summary_df, sim_ledger_df = run_post_simulation(
-        final_results_df, signals_df, master_df
-    )
-    correlation_report = run_correlation_analysis(final_results_df, sim_summary_df)
-    
-    # --- Reporting Phase ---
-    print("\n--- All folds complete. Saving final ELV-scored results with Hart Index. ---")
-    # Save the main artifacts (pareto front, forecast slate, etc.)
-    # The save_results function now returns the path to the forecast_slate.csv
-    forecast_slate_path = save_results(
-        final_results_df, signals_meta, run_dir, splits, settings, anchor_regime_model,
-        sim_summary_df, sim_ledger_df, correlation_report
-    )
-
-    # Persist Hart Index usage audit to diagnostics file now that run_dir exists
-    try:
-        diag_dir = os.path.join(run_dir, "diagnostics")
-        os.makedirs(diag_dir, exist_ok=True)
-        usage_path = os.path.join(diag_dir, "hart_index_usage.txt")
-        with open(usage_path, "w") as f:
-            f.write("Hart Index Usage Audit (non-null counts)\n")
-            hart_inputs = [
-                'edge_crps_raw','edge_pin_q10_raw','edge_pin_q90_raw','edge_ig_raw','edge_w1_raw','edge_calib_mae_raw',
-                'bootstrap_p_value_raw','sensitivity_delta_edge_raw','n_trig_oos',
-                'transfer_entropy','transfer_entropy_p_value','granger_p_value','redundancy_mi_raw','complexity_metric_raw','dfa_alpha_raw',
-                'live_tr_prior','coverage_factor','tr_cv_reg','tr_fg','page_hinkley_alarm'
-            ]
-            total = len(final_results_df)
-            for col in hart_inputs:
-                if col in final_results_df.columns:
-                    non_null = int(final_results_df[col].notna().sum())
-                    f.write(f"{col}: {non_null}/{total} ({(non_null/total*100 if total else 0):.1f}%)\n")
-                else:
-                    f.write(f"{col}: MISSING\n")
-        print(f"HartIndex usage audit saved to: {usage_path}")
-    except Exception as e:
-        print(f"[warn] Failed to write HartIndex usage audit: {e}")
-    
-    # --- Generate Actionable Trade Report ---
-    if forecast_slate_path and os.path.exists(forecast_slate_path):
-        print("\n--- Generating Actionable Trade Report ---")
-        forecast_df = pd.read_csv(forecast_slate_path)
-        
-        # Get the actual end of data date from the master dataframe
-        end_of_data_date = master_df.index.max()
-        
-        # Print data end date information for debugging
-        print(f"Data end date from master_df: {end_of_data_date}")
-        print(f"Config end date: {settings.data.end_date}")
-        
-        # Always use the actual data end date from master_df
-        write_tradeable_setups(forecast_df, end_of_data_date, run_dir)
-    else:
-        print("\n--- Skipping Actionable Trade Report (forecast slate not found) ---")
-
-    print(f"\nSaved final aggregated results to: {run_dir}")
+    # Run the forecast-first workflow
+    main_discover_workflow()
 
 
-def main_discover():
+def main_discover_workflow():
     """
     Forecast-first discovery mode.
     
@@ -454,7 +194,7 @@ def main_discover():
     5. Generate EligibilityMatrix with skill/calibration/drift metrics
     6. Save eligibility matrix for selection phase
     """
-    print_header(mode="discover")
+    # Header already printed by main()
     
     # Load data
     master_df = load_data()
@@ -640,77 +380,9 @@ def main_select(eligibility_path: Optional[Path] = None):
     print(f"\n--- Selection Complete ---")
 
 
-def parse_args():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Alpha Discovery Engine v10 - Forecast-First Pipeline",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Modes:
-  legacy   - Original P&L-based discovery (default for backward compatibility)
-  discover - Forecast-first discovery with PAWF validation
-  select   - Load eligibility matrix and generate forecast slate
-
-Examples:
-  # Run forecast-first discovery
-  python main.py --mode discover
-  
-  # Select from most recent eligibility matrix
-  python main.py --mode select
-  
-  # Select from specific eligibility matrix
-  python main.py --mode select --eligibility runs/validation_001/eligibility_matrix.json
-  
-  # Run legacy mode (backward compatible)
-  python main.py
-  python main.py --mode legacy
-        """
-    )
-    
-    parser.add_argument(
-        '--mode',
-        type=str,
-        choices=['legacy', 'discover', 'select'],
-        default='legacy',
-        help='Execution mode (default: legacy)'
-    )
-    
-    parser.add_argument(
-        '--eligibility',
-        type=str,
-        default=None,
-        help='Path to eligibility_matrix.json (for select mode)'
-    )
-    
-    parser.add_argument(
-        '--seed',
-        type=int,
-        default=None,
-        help='Override GA seed from config'
-    )
-    
-    return parser.parse_args()
-
-
-def main():
-    """Main entry point with mode selection."""
-    args = parse_args()
-    
-    # Override seed if provided
-    if args.seed is not None:
-        settings.ga.seed = args.seed
-    
-    # Route to appropriate workflow
-    if args.mode == 'legacy':
-        main_legacy()
-    elif args.mode == 'discover':
-        main_discover()
-    elif args.mode == 'select':
-        eligibility_path = Path(args.eligibility) if args.eligibility else None
-        main_select(eligibility_path)
-    else:
-        print(f"Unknown mode: {args.mode}")
-        sys.exit(1)
+# Simple CLI: Run forecast-first discovery
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
