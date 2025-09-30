@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 
 from ..config import settings
-from ..core.splits import make_walkforward_splits
 from ..eval.selection import get_valid_trigger_dates
 from ..eval.metrics import (
     distribution,
@@ -23,6 +22,55 @@ from ..reporting import display_utils as du
 from ..eval.objectives import audit_objectives, apply_objective_transforms
 
 from deap import base, creator, tools
+
+
+# --- Walk-forward splits (legacy fallback) ---
+def make_walkforward_splits(index: pd.DatetimeIndex, n_folds: int, embargo_days: int = 0):
+    """
+    Simple walk-forward split for internal use (legacy fallback).
+    
+    Creates n_folds by dividing index into sequential train/test windows.
+    This is a simplified replacement for the deleted core.splits.make_walkforward_splits.
+    
+    Args:
+        index: DatetimeIndex to split
+        n_folds: Number of folds
+        embargo_days: Days to skip between train and test
+        
+    Returns:
+        List of (train_idx, test_idx) tuples
+    """
+    if len(index) < n_folds * 2:
+        # Fallback: single fold
+        split_point = len(index) // 2
+        return [(index[:split_point], index[split_point:])]
+    
+    folds = []
+    fold_size = len(index) // n_folds
+    
+    for i in range(n_folds):
+        # Train on all data up to this fold
+        train_end = min((i + 1) * fold_size, len(index) - fold_size)
+        train_idx = index[:train_end]
+        
+        # Apply embargo
+        test_start_idx = train_end
+        if embargo_days > 0 and test_start_idx < len(index):
+            # Find date that is embargo_days after last train date
+            last_train_date = train_idx[-1]
+            embargo_date = last_train_date + pd.Timedelta(days=embargo_days)
+            # Find first index after embargo
+            test_start_idx = index.searchsorted(embargo_date)
+        
+        # Test on next fold
+        test_end = min(test_start_idx + fold_size, len(index))
+        if test_start_idx < len(index):
+            test_idx = index[test_start_idx:test_end]
+            if len(test_idx) > 0:
+                folds.append((train_idx, test_idx))
+    
+    return folds if folds else [(index[:len(index)//2], index[len(index)//2:])]
+
 
 # --- Strict evaluation exceptions (Fix: remove penalty defaults) ---
 class InsufficientDataError(Exception):
