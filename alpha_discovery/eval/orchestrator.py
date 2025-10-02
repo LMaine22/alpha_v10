@@ -39,7 +39,7 @@ from ..splits import (
 )
 from ..adapters import FeatureAdapter, calculate_max_lookback
 from ..search import ga_core
-from ..eval.metrics import distribution, info_theory
+from ..eval.info_metrics import distribution, info_theory
 
 
 @dataclass
@@ -214,6 +214,170 @@ class ForecastOrchestrator:
         self.horizons = list(getattr(settings.forecast, 'horizons', [5, 21]))
         self.band_edges = np.asarray(settings.forecast.band_edges, dtype=float)
         self.price_field = settings.forecast.price_field
+        
+        # Signals metadata for GA
+        self.signals_metadata = [
+            {'signal_id': col, 'feature_name': col, 'description': col}
+            for col in signals_df.columns
+        ]
+    
+    def run_discovery_and_validation(
+        self,
+        tickers: List[str],
+        output_dir: Path,
+        n_outer_splits: int = 4,
+        test_size_months: int = 6,
+        purge_days: int = 5,
+        n_inner_folds: int = 3,
+        n_regimes: int = 5,
+        n_ga_generations: int = 20,
+        ga_population_size: int = 50,
+        n_islands: int = 2,
+        migration_interval: int = 5,
+        n_jobs: int = -1
+    ) -> EligibilityMatrix:
+        """
+        Full PAWF + NPWF discovery and validation workflow.
+        
+        For each PAWF outer fold:
+        1. Build NPWF inner folds from outer train data
+        2. Run GA using NPWF for selection
+        3. Validate discovered setups on outer test fold
+        4. Collect validation results
+        
+        Args:
+            tickers: List of tickers to discover setups for
+            output_dir: Output directory for artifacts
+            n_outer_splits: Number of PAWF outer splits
+            test_size_months: Test window size in months for PAWF
+            purge_days: Purge period between train/test
+            n_inner_folds: Number of NPWF inner folds for GA
+            n_regimes: Number of GMM regimes
+            n_ga_generations: GA generations per fold
+            ga_population_size: GA population size
+            n_islands: Number of GA islands
+            migration_interval: Migration interval for island model
+            n_jobs: Parallelism
+            
+        Returns:
+            EligibilityMatrix with all validation results
+        """
+        from ..search.island_model import IslandManager, ExitPolicy
+        
+        print(f"\n{'='*80}")
+        print(f"FORECAST-FIRST DISCOVERY & VALIDATION (PAWF + NPWF)")
+        print(f"{'='*80}")
+        print(f"Tickers: {len(tickers)}")
+        print(f"Outer splits (PAWF): {n_outer_splits}")
+        print(f"Inner folds (NPWF): {n_inner_folds}")
+        print(f"GA: {n_ga_generations} gen, {ga_population_size} pop, {n_islands} islands")
+        print(f"{'='*80}\n")
+        
+        # Step 1: Build PAWF outer splits
+        print("[Step 1/5] Building PAWF outer splits...")
+        
+        # Calculate parameters for PAWF
+        max_horizon = max(self.horizons)
+        feature_lookback = self.feature_adapter.get_max_lookback(
+            self.feature_adapter.list_features()
+        )
+        
+        pawf_splits = build_pawf_splits(
+            df=self.df,
+            label_horizon_days=max_horizon,
+            feature_lookback_tail=feature_lookback,
+            min_train_months=36,
+            test_window_days=test_size_months * 30,  # Convert months to days
+            step_months=1,
+            regime_version="R1"
+        )
+        print(f"  Created {len(pawf_splits)} outer folds (horizon={max_horizon}d, lookback={feature_lookback}d)")
+        
+        # Step 2: Fit regime model on full data
+        print("[Step 2/5] Fitting GMM regime model...")
+        regime_model = fit_regimes(self.df, n_regimes=n_regimes)
+        print(f"  Fitted {n_regimes}-regime GMM model")
+        
+        # Step 3: Run GA discovery for each ticker on each outer fold
+        print(f"[Step 3/5] Running GA discovery with NPWF ({len(tickers)} tickers × {len(pawf_splits)} folds)...")
+        
+        all_discovered_setups = []
+        
+        for ticker_idx, ticker in enumerate(tickers):
+            print(f"\n  Ticker {ticker_idx+1}/{len(tickers)}: {ticker}")
+            
+            for fold_idx, (split_spec, outer_train_idx, outer_test_idx) in enumerate(pawf_splits):
+                print(f"    Fold {fold_idx+1}/{len(pawf_splits)}: {split_spec.split_id}")
+                print(f"      Train: {outer_train_idx[0]} to {outer_train_idx[-1]} ({len(outer_train_idx)} days)")
+                print(f"      Test:  {outer_test_idx[0]} to {outer_test_idx[-1]} ({len(outer_test_idx)} days)")
+                
+                # Build NPWF inner folds from outer train data
+                inner_folds = make_inner_folds(
+                    index=outer_train_idx,
+                    k_folds=n_inner_folds,
+                    purge_days=purge_days,
+                    embargo_days=purge_days
+                )
+                print(f"      Built {len(inner_folds)} NPWF inner folds")
+                
+                # Create ExitPolicy for GA (train on outer_train, use inner_folds for CV)
+                exit_policy = ExitPolicy(
+                    train_indices=outer_train_idx,
+                    splits=inner_folds
+                )
+                
+                # Run Island Model GA with NPWF
+                print(f"      Running Island GA ({n_ga_generations} gen)...")
+                island_pop_size = ga_population_size // n_islands
+                island_manager = IslandManager(
+                    n_islands=n_islands,
+                    n_individuals=island_pop_size,
+                    n_generations=n_ga_generations,
+                    signals_df=self.signals_df,
+                    signals_metadata=self.signals_metadata,
+                    master_df=self.df,
+                    exit_policy=exit_policy,
+                    migration_interval=migration_interval,
+                    seed=settings.ga.seed + fold_idx  # Different seed per fold
+                )
+                
+                final_population = island_manager.evolve()
+                
+                # Extract top setups from Pareto front
+                top_setups = final_population[:10]  # Top 10 per fold
+                for setup_dict in top_setups:
+                    if 'signals' in setup_dict and len(setup_dict['signals']) > 0:
+                        all_discovered_setups.append((ticker, setup_dict['signals']))
+                
+                print(f"      Discovered {len([s for s in top_setups if 'signals' in s])} setups")
+        
+        print(f"\n  Total discovered setups: {len(all_discovered_setups)}")
+        
+        # Step 4: Deduplicate setups (same ticker + same signal set)
+        print("[Step 4/5] Deduplicating discovered setups...")
+        unique_setups = []
+        seen = set()
+        for ticker, signals in all_discovered_setups:
+            key = (ticker, tuple(sorted(signals)))
+            if key not in seen:
+                seen.add(key)
+                unique_setups.append((ticker, signals))
+        
+        print(f"  Unique setups after deduplication: {len(unique_setups)}")
+        
+        # Step 5: Validate all unique setups on PAWF outer folds
+        print(f"[Step 5/5] Validating {len(unique_setups)} setups on PAWF outer folds...")
+        eligibility_matrix = self.run_validation(
+            discovered_setups=unique_setups,
+            output_dir=output_dir,
+            n_jobs=n_jobs
+        )
+        
+        print(f"\n{'='*80}")
+        print(f"DISCOVERY & VALIDATION COMPLETE")
+        print(f"{'='*80}\n")
+        
+        return eligibility_matrix
         
     def run_validation(
         self,
@@ -612,6 +776,17 @@ class ForecastOrchestrator:
     ):
         """Save summary statistics."""
         df = eligibility.to_dataframe()
+        
+        # Handle empty results
+        if df.empty:
+            summary = {
+                "total_validations": 0,
+                "unique_setups": 0,
+                "message": "No validation results - check if setups were discovered"
+            }
+            with open(output_dir / "validation_summary.json", 'w') as f:
+                json.dump(summary, f, indent=2)
+            return
         
         summary = {
             "total_validations": len(df),

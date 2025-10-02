@@ -166,7 +166,10 @@ def write_forecast_slate(
     
     for individual in pareto_front:
         metrics = individual.get("metrics", {}) or {}
-        ticker, signal_ids = individual.get("individual", (None, []))
+        # Unpack individual, ignoring horizon if present
+        individual_tuple = individual.get("individual", (None, [], None))
+        ticker, signal_ids, *_ = individual_tuple
+        signal_ids = signal_ids or []
         
         # Create human-readable setup description, using pre-computed one if available
         setup_desc = metrics.get("setup_desc")
@@ -180,17 +183,9 @@ def write_forecast_slate(
         band_edges = np.array(metrics.get("band_edges") or settings.forecast.band_edges, dtype=float)
         band_probs_raw = metrics.get("band_probs")
         
-        # Handle missing or NaN band_probs by using a default uniform distribution
+        # Handle missing or NaN band_probs: honor "no fallbacks" rule.
         if band_probs_raw is None or (isinstance(band_probs_raw, float) and np.isnan(band_probs_raw)):
-            # Create a default uniform distribution based on the band edges
-            if len(band_edges) > 1:
-                band_probs = [1.0 / (len(band_edges) - 1)] * (len(band_edges) - 1)
-                # Silenced per-user request; will capture counts in run audit instead
-            else:
-                # Really bad case, but let's provide a minimal default
-                band_edges = np.array([-999.0, -0.10, -0.05, -0.03, -0.01, 0.01, 0.03, 0.05, 0.10, 999.0])
-                band_probs = [0.111] * 9  # Approximately uniform
-                # Silenced per-user request; will capture counts in run audit instead
+            band_probs = []  # Empty list will result in NaNs from _trade_ready_fields
         else:
             band_probs = list(band_probs_raw)
         
@@ -278,18 +273,53 @@ def _write_ticker_coverage(df: pd.DataFrame, run_dir: str) -> None:
     if df.empty:
         return
     
-    coverage = (
-        df.groupby("ticker")
-        .agg(
-            rows=("ticker", "count"),
-            med_support=("n_trig_oos", "median"),
-            med_ig=("info_gain", "median"),
-            med_w1=("w1_effect", "median"),
-            med_rank=("rank_score", "median")
-        )
-        .reset_index()
-        .sort_values("rows", ascending=False)
-    )
+    # Build aggregation dictionary dynamically based on available columns
+    agg_dict = {}
+    
+    # Always include row count
+    agg_dict["ticker"] = "count"
+    
+    # Add support median if available
+    if "n_trig_oos" in df.columns:
+        agg_dict["n_trig_oos"] = "median"
+    
+    # Add rank median if available
+    if "rank_score" in df.columns:
+        agg_dict["rank_score"] = "median"
+    
+    # Add info gain column if available
+    if "edge_ig_raw" in df.columns:
+        agg_dict["edge_ig_raw"] = "median"
+    elif "info_gain" in df.columns:
+        agg_dict["info_gain"] = "median"
+    
+    # Add w1 effect column if available  
+    if "edge_w1_raw" in df.columns:
+        agg_dict["edge_w1_raw"] = "median"
+    elif "w1_effect" in df.columns:
+        agg_dict["w1_effect"] = "median"
+    
+    coverage = df.groupby("ticker").agg(agg_dict)
+    
+    # Rename columns to match expected output
+    rename_dict = {}
+    if "n_trig_oos" in coverage.columns:
+        rename_dict["n_trig_oos"] = "med_support"
+    if "rank_score" in coverage.columns:
+        rename_dict["rank_score"] = "med_rank"
+    if "edge_ig_raw" in coverage.columns:
+        rename_dict["edge_ig_raw"] = "med_ig"
+    elif "info_gain" in coverage.columns:
+        rename_dict["info_gain"] = "med_ig"
+    if "edge_w1_raw" in coverage.columns:
+        rename_dict["edge_w1_raw"] = "med_w1"
+    elif "w1_effect" in coverage.columns:
+        rename_dict["w1_effect"] = "med_w1"
+    
+    coverage = coverage.rename(columns=rename_dict)
+    coverage.rename(columns={"ticker": "rows"}, inplace=True)
+    coverage = coverage.reset_index()
+    coverage = coverage.sort_values("rows", ascending=False)
     
     coverage_path = os.path.join(run_dir, "ticker_coverage.csv")
     coverage.to_csv(coverage_path, index=False)
@@ -316,7 +346,9 @@ def write_forecast_slate_v2(
     
     for individual in pareto_front:
         metrics = individual.get("metrics", {}) or {}
-        ticker, signal_ids = individual.get("individual", (None, []))
+        # Unpack individual, ignoring horizon if present
+        individual_tuple = individual.get("individual", (None, [], None))
+        ticker, signal_ids, *_ = individual_tuple
         signal_ids = signal_ids or []
         
         # Create human-readable setup description, using pre-computed one if available

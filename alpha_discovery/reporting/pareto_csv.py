@@ -11,6 +11,7 @@ import numpy as np
 from typing import List, Dict, Any, Optional
 
 from ..config import settings
+from ..eval.diagnostics.repro import write_repro_json  # reproducibility hook
 from ..reporting import display_utils as du
 
 
@@ -77,6 +78,15 @@ def write_pareto_csv(results_df: pd.DataFrame, signals_metadata: List[Dict], run
     # This function can be simplified as most data is already in results_df
     # We just need to add the human-readable description.
     
+    # Repro header (optional) if run_dir is provided and exists
+    try:
+        if run_dir and os.path.isdir(run_dir):
+            diag_dir = os.path.join(run_dir, "diagnostics")
+            os.makedirs(diag_dir, exist_ok=True)
+            write_repro_json(os.path.join(diag_dir, "repro_pareto.csv.json"), extra={"module": "pareto_csv"})
+    except Exception:
+        pass
+
     meta_map = du.build_signal_meta_map(signals_metadata)
     
     def get_desc(row):

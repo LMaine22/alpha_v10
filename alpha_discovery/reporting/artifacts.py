@@ -11,8 +11,8 @@ from datetime import datetime
 
 from ..config import Settings  # do not import global settings here
 from . import display_utils as du
-from ..core.splits import HybridSplits
-from .diagnostics import write_split_audit
+# Removed unused imports: from ..core.splits import HybridSplits (core.splits deleted in Phase 10)
+# from .diagnostics import write_split_audit  # Depends on HybridSplits
 from .pareto_csv import write_pareto_csv
 from .forecast_slate import write_forecast_slate
 from ..eval.regime import RegimeModel
@@ -255,7 +255,7 @@ def save_results(
     final_results_df: pd.DataFrame,
     signals_metadata: List[Dict[str, Any]],
     run_dir: str,
-    splits: HybridSplits,
+    splits: Any,  # Was HybridSplits, now generic for walk-forward splits
     settings: Settings,
     regime_model: Optional[RegimeModel] = None,
     simulation_summary: Optional[pd.DataFrame] = None,
@@ -278,7 +278,7 @@ def save_results(
         f.write(_settings_to_json(settings))
     print(f"Configuration saved to: {config_path}")
     
-    write_split_audit(splits, run_dir)
+    # write_split_audit(splits, run_dir)  # Disabled - HybridSplits deleted in Phase 10
     
     # Add human-readable description
     meta_map = du.build_signal_meta_map(signals_metadata)
@@ -286,9 +286,12 @@ def save_results(
         try:
             # Handle both tuple and string representations
             if isinstance(row['individual'], str):
-                _, signals = eval(row['individual'])
+                individual_tuple = eval(row['individual'])
             else:
-                _, signals = row['individual']
+                individual_tuple = row['individual']
+            
+            # Unpack, ignoring the horizon if it's present
+            _, signals, *_ = individual_tuple
             return du.desc_from_meta(signals, meta_map)
         except Exception as e:
             print(f"Error getting description: {e}")
@@ -302,10 +305,19 @@ def save_results(
     def clean_individual_str(ind):
         if isinstance(ind, str):
             return ind
-        ticker, signals = ind
-        ticker_str = str(ticker) if hasattr(ticker, '__str__') else ticker
-        signals_list = [str(s) if hasattr(s, '__str__') else s for s in signals]
-        return str((ticker_str, signals_list))
+        
+        if len(ind) == 3:
+            ticker, signals, horizon = ind
+            ticker_str = str(ticker)
+            signals_list = [str(s) for s in signals]
+            return str((ticker_str, signals_list, horizon))
+        elif len(ind) == 2:
+            ticker, signals = ind
+            ticker_str = str(ticker)
+            signals_list = [str(s) for s in signals]
+            return str((ticker_str, signals_list))
+        else:
+            return str(ind)
     
     df_for_csv['individual'] = df_for_csv['individual'].apply(clean_individual_str)
     pareto_path = os.path.join(run_dir, "pareto_front_elv.csv")
@@ -320,14 +332,23 @@ def save_results(
     slim_df = final_results_df.copy()
     # Derive ticker column and clean individual representation
     def _split_ind(ind):
-        if isinstance(ind, str):
-            try:
-                t, sigs = eval(ind)
+        try:
+            # Handle string representation
+            if isinstance(ind, str):
+                ind = eval(ind)
+
+            # Unpack, handling both 2 and 3 element tuples
+            if len(ind) == 3:
+                t, sigs, h = ind
+                return str(t), str((str(t), list(map(str, sigs)), h))
+            elif len(ind) == 2:
+                t, sigs = ind
                 return str(t), str((str(t), list(map(str, sigs))))
-            except Exception:
-                return "", ind
-        t, sigs = ind
-        return str(t), str((str(t), list(map(str, sigs))))
+            else:
+                return "", str(ind)
+        except Exception:
+            return "", str(ind)
+
     pairs = slim_df['individual'].apply(_split_ind)
     slim_df['ticker'] = pairs.apply(lambda x: x[0])
     slim_df['individual'] = pairs.apply(lambda x: x[1])

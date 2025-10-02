@@ -128,7 +128,7 @@ class FeatureAdapter:
         Returns:
             Maximum lookback window in days (minimum 20)
         """
-        return calculate_max_lookback(feature_names)
+        return calculate_max_lookback_from_list(feature_names)
     
     def validate_features(self, feature_names: List[str]) -> Dict[str, bool]:
         """

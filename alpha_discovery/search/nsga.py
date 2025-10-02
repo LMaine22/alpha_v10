@@ -24,7 +24,9 @@ def _seed_for_individual(individual: Tuple[str, List[str]], base_seed: int) -> i
     """Deterministic 32-bit seed derived from the (ticker, setup) DNA."""
     try:
         dna = _dna(individual)
-        payload = (f"{dna[0]}|" + "|".join(map(str, dna[1]))).encode("utf-8", "ignore")
+        # Include horizon in hash for proper horizon discovery uniqueness
+        horizon_str = f"|h{dna[2]}" if len(dna) > 2 and dna[2] != -1 else ""
+        payload = (f"{dna[0]}|" + "|".join(map(str, dna[1])) + horizon_str).encode("utf-8", "ignore")
         s = zlib.adler32(payload)
         return int((s ^ (int(base_seed) & 0xFFFFFFFF)) & 0xFFFFFFFF)
     except Exception:
@@ -125,8 +127,8 @@ def _dedup_individuals(seq: List[Tuple[str, List[str]]]) -> List[Tuple[str, List
 def evolve(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd.DataFrame) -> List[Dict]:
     """NSGA-II evolution for specialized (ticker, setup) individuals."""
     
-    # Check if island model is enabled
-    if settings.ga.islands and settings.ga.islands.enabled:
+    # Check if island model is enabled (n_islands > 1 means use island model)
+    if settings.ga.n_islands > 1:
         return _evolve_with_islands(signals_df, signals_metadata, master_df)
     else:
         return _evolve_single_population(signals_df, signals_metadata, master_df)
@@ -134,12 +136,28 @@ def evolve(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd
 
 def _evolve_with_islands(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd.DataFrame) -> List[Dict]:
     """Evolve using island model."""
-    from .island_model import IslandManager
+    from .island_model import IslandManager, ExitPolicy
     
     tqdm.write("\n--- Starting Island Model Evolution ---")
     
-    # Create island manager
-    island_manager = IslandManager(signals_df, signals_metadata, master_df)
+    # Create exit policy (simple - no inner folds for Phase A)
+    exit_policy = ExitPolicy(
+        train_indices=master_df.index,
+        splits=[]  # Empty for simple backtesting
+    )
+    
+    # Create island manager with all required arguments
+    island_manager = IslandManager(
+        n_islands=settings.ga.n_islands,
+        n_individuals=settings.ga.population_size,
+        n_generations=settings.ga.generations,
+        signals_df=signals_df,
+        signals_metadata=signals_metadata,
+        master_df=master_df,
+        exit_policy=exit_policy,
+        migration_interval=settings.ga.migration_interval,
+        seed=settings.ga.seed
+    )
     
     # Run evolution
     final_population = island_manager.evolve()

@@ -117,7 +117,7 @@ def transfer_entropy(x: Union[pd.Series, np.ndarray], y: Union[pd.Series, np.nda
 
     N = min(x.size, y.size)
     if N <= L + 5:
-        return 0.0
+        return np.nan
 
     x = x[:N]
     y = y[:N]
@@ -130,7 +130,7 @@ def transfer_entropy(x: Union[pd.Series, np.ndarray], y: Union[pd.Series, np.nda
     # Drop any NaNs
     mask = np.isfinite(y_t) & np.isfinite(y_p) & np.isfinite(x_p)
     if mask.sum() <= 5:
-        return 0.0
+        return np.nan
     y_t = y_t[mask]
     y_p = y_p[mask]
     x_p = x_p[mask]
@@ -145,7 +145,7 @@ def transfer_entropy(x: Union[pd.Series, np.ndarray], y: Union[pd.Series, np.nda
         y_p_bins = np.clip(np.digitize(y_p, y_p_edges) - 1, 0, B - 1)
         x_p_bins = np.clip(np.digitize(x_p, x_p_edges) - 1, 0, B - 1)
     except Exception:
-        return 0.0
+        return np.nan
 
     # Joint counts with Laplace smoothing
     counts = np.ones((B, B, B), dtype=float)  # +1 Laplace
@@ -165,7 +165,7 @@ def transfer_entropy(x: Union[pd.Series, np.ndarray], y: Union[pd.Series, np.nda
         te = np.sum(Pypx * log_ratio)
 
     if not np.isfinite(te):
-        return 0.0
+        return np.nan
     return float(te)
 
 

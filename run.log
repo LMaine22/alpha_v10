@@ -1,0 +1,1121 @@
+================================================================================
+         ALPHA DISCOVERY - PAWF + NPWF + Options Backtesting
+================================================================================
+Start Time: 2025-10-01 18:53:17
+Configuration Seed: 194
+--------------------------------------------------------------------------------
+
+--- Loading Data ---
+Loading data from 'data_store/processed/bb_data.parquet' (refreshed from Excel)...
+ Loading Excel file from 'data_store/raw/bb_data.xlsx'...
+Combining data from all sheets...
+ Saving combined data to Parquet file at 'data_store/processed/bb_data.parquet'...
+ Conversion successful! Shape of saved data: (2022, 2037)
+Data loaded successfully. Shape: (2022, 2037)
+Date range: 2018-01-01 to 2025-09-30
+
+--- Building Features & Signals ---
+Checking signal cache...
+  Quick hash: 3387e4a316b7d02c
+  🔍 Searching for compatible caches (cols_hash=5229fc63...)...
+    Checking signals_25f7e9d127a80970.pkl: OLD CACHE FORMAT (no feature metadata)
+  ❌ No compatible caches found
+  No cache found - will build features and compile signals
+  Cache miss - building features...
+Building feature matrix with parallelization...
+  Computing macro features...
+  Computing single-asset features for 44 tickers in chunks...
+    Processing chunk 1/5: ['MSTR US Equity', 'SNOW US Equity', 'LLY US Equity', 'COIN US Equity', 'NVDA US Equity', 'AVGO US Equity', 'SMCI US Equity', 'QCOM US Equity', 'CRM US Equity', 'AAPL US Equity']
+    Processing chunk 2/5: ['AMZN US Equity', 'MSFT US Equity', 'QQQ US Equity', 'SPY US Equity', 'TSM US Equity', 'META US Equity', 'TSLA US Equity', 'CRWV US Equity', 'GOOGL US Equity', 'AMD US Equity']
+    Processing chunk 3/5: ['ARM US Equity', 'PLTR US Equity', 'IBM US Equity', 'MU US Equity', 'ORCL US Equity', 'ACN US Equity', 'NVO US Equity', 'TXN US Equity', 'JPM US Equity', 'C US Equity']
+    Processing chunk 4/5: ['BMY US Equity', 'NKE US Equity', 'TLT US Equity', 'RTY Index', 'MXWO Index', 'USGG10YR Index', 'USGG2YR Index', 'DXY Curncy', 'JPY Curncy', 'EUR Curncy']
+    Processing chunk 5/5: ['CL1 Comdty', 'HG1 Comdty', 'XAU Curncy', 'VIX Index']
+  Computing pairwise features for 33 tickers...
+  Computing pairwise features for 32 tickers...
+    [pairwise] completed 10/32
+    [pairwise] completed 20/32
+    [pairwise] completed 30/32
+    Pairwise stage: backend=threading, jobs=8, df_footprint=33.0 MB, elapsed=0.2s
+  Computing event features...
+  Computing event interactions...
+  Assembling feature matrix...
+  Computing quality gates...
+  Computing cross-sectional ranks...
+Feature matrix complete: 4414 features, 2022 observations
+Compiling primitive signals from feature matrix...
+  Feature matrix hash: 25f7e9d127a80970
+  ✅ Loaded cached signals from: signals_25f7e9d127a80970.pkl
+     Cache key: 25f7e9d127a80970
+     Signals: 58751, Observations: 2022
+
+--- Run Directory: runs/pawf_npwf_seed194_20251001_185521 ---
+
+--- Building PAWF Outer Splits ---
+Created 52 PAWF outer folds
+  Label horizon: 5 days
+  Feature lookback: 252 days
+
+--- Tradable Tickers: 10 ---
+  NVDA US Equity, AMD US Equity, AVGO US Equity, QCOM US Equity, TXN US Equity, TSM US Equity, ARM US Equity, MU US Equity, SMCI US Equity, CRWV US Equity
+
+================================================================================
+RUNNING PAWF + NPWF DISCOVERY
+================================================================================
+
+================================================================================
+OUTER FOLD 1/52: PAWF_v1|OUTER:202101|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2020-12-25 00:00:00 (780 days)
+Testing  Period: 2021-01-01 00:00:00 to 2021-06-29 00:00:00 (128 days)
+
+[Fold 1] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 1] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:05<?] , Best_DSR=1.00, Med_Calmar_LB=500000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:21] , Best_DSR=1.00, Med_Calmar_LB=500000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:10<00:21] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  40%|████      | Gen 2/5 [00:10<00:15] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  40%|████      | Gen 2/5 [00:12<00:15] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  60%|██████    | Gen 3/5 [00:15<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:15<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:18<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:18<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:18<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2
+
+[Fold 1] Discovered 32 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 2/52: PAWF_v1|OUTER:202102|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-01-26 00:00:00 (802 days)
+Testing  Period: 2021-02-01 00:00:00 to 2021-07-30 00:00:00 (130 days)
+
+[Fold 2] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 2] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=0.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:04] , Best_DSR=1.00, Med_Calmar_LB=0.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  40%|████      | Gen 2/5 [00:02<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  40%|████      | Gen 2/5 [00:03<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:03<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:03<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:03<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:04<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:04<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:04<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 2] Discovered 34 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 3/52: PAWF_v1|OUTER:202103|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-02-23 00:00:00 (822 days)
+Testing  Period: 2021-03-01 00:00:00 to 2021-08-27 00:00:00 (130 days)
+
+[Fold 3] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 3] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  40%|████      | Gen 2/5 [00:05<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  40%|████      | Gen 2/5 [00:06<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:17<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:17<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:17<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 3] Discovered 36 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 4/52: PAWF_v1|OUTER:202104|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-03-26 00:00:00 (845 days)
+Testing  Period: 2021-04-01 00:00:00 to 2021-09-27 00:00:00 (128 days)
+
+[Fold 4] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 4] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:04<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:04<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:07<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:09<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:09<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:10<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 4] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 5/52: PAWF_v1|OUTER:202105|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-04-23 00:00:00 (865 days)
+Testing  Period: 2021-05-03 00:00:00 to 2021-10-27 00:00:00 (128 days)
+
+[Fold 5] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 5] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  40%|████      | Gen 2/5 [00:03<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  40%|████      | Gen 2/5 [00:06<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:10<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 5] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 6/52: PAWF_v1|OUTER:202106|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-05-26 00:00:00 (888 days)
+Testing  Period: 2021-06-01 00:00:00 to 2021-11-26 00:00:00 (129 days)
+
+[Fold 6] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 6] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:02<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:03<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  60%|██████    | Gen 3/5 [00:03<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  60%|██████    | Gen 3/5 [00:05<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:05<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:07<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:07<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:07<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2
+
+[Fold 6] Discovered 36 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 7/52: PAWF_v1|OUTER:202107|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-06-25 00:00:00 (910 days)
+Testing  Period: 2021-07-01 00:00:00 to 2021-12-27 00:00:00 (128 days)
+
+[Fold 7] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 7] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:11] , Best_DSR=1.00, Med_Calmar_LB=0.00, Med_PF_LB=1000000000.00, Support=1         Island Evolution:  40%|████      | Gen 2/5 [00:05<00:08] , Best_DSR=1.00, Med_Calmar_LB=0.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  40%|████      | Gen 2/5 [00:07<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:11<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:11<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 7] Discovered 35 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 8/52: PAWF_v1|OUTER:202108|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-07-26 00:00:00 (931 days)
+Testing  Period: 2021-08-02 00:00:00 to 2022-01-27 00:00:00 (129 days)
+
+[Fold 8] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 8] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:15] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:07<00:15] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:07<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:10<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:16<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:16<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:17<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:17<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:17<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 8] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 9/52: PAWF_v1|OUTER:202109|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-08-26 00:00:00 (954 days)
+Testing  Period: 2021-09-01 00:00:00 to 2022-02-25 00:00:00 (128 days)
+
+[Fold 9] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 9] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:07<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  40%|████      | Gen 2/5 [00:07<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  40%|████      | Gen 2/5 [00:12<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:17<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:17<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:19<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:19<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:19<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 9] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 10/52: PAWF_v1|OUTER:202110|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-09-24 00:00:00 (975 days)
+Testing  Period: 2021-10-01 00:00:00 to 2022-03-29 00:00:00 (128 days)
+
+[Fold 10] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 10] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:03<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:14<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:14<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:17<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:17<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:23<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:23<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:23<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 10] Discovered 39 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 11/52: PAWF_v1|OUTER:202111|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-10-26 00:00:00 (997 days)
+Testing  Period: 2021-11-01 00:00:00 to 2022-04-29 00:00:00 (130 days)
+
+[Fold 11] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 11] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:05<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:21] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:12<00:21] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:12<00:19] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:26<00:19] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:26<00:19] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:32<00:19] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:32<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:36<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:36<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:36<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 11] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 12/52: PAWF_v1|OUTER:202112|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-11-25 00:00:00 (1019 days)
+Testing  Period: 2021-12-01 00:00:00 to 2022-05-27 00:00:00 (128 days)
+
+[Fold 12] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 12] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000019.55, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000019.55, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=35.54, Support=3       Island Evolution:  40%|████      | Gen 2/5 [00:03<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=35.54, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:07<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=37.32, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=37.32, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:09<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:09<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:10<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 12] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 13/52: PAWF_v1|OUTER:202201|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2021-12-24 00:00:00 (1040 days)
+Testing  Period: 2022-01-03 00:00:00 to 2022-06-29 00:00:00 (128 days)
+
+[Fold 13] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 13] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=4.68, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=4.68, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=4.68, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:05<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=4.68, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:06<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=6.91, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=6.91, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:09<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=9.14, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:09<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=9.14, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:11<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=22.34, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:11<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=22.34, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:11<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=22.34, Support=3
+
+[Fold 13] Discovered 36 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 14/52: PAWF_v1|OUTER:202202|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-01-26 00:00:00 (1063 days)
+Testing  Period: 2022-02-01 00:00:00 to 2022-07-29 00:00:00 (129 days)
+
+[Fold 14] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 14] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=6.37, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=6.37, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:06<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:06<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:10<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:15<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:15<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:20<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=152.28, Support=3       Island Evolution: 100%|██████████| Gen 5/5 [00:20<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=152.28, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:20<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=152.28, Support=3
+
+[Fold 14] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 15/52: PAWF_v1|OUTER:202203|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-02-23 00:00:00 (1083 days)
+Testing  Period: 2022-03-01 00:00:00 to 2022-08-26 00:00:00 (129 days)
+
+[Fold 15] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 15] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:08<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:08<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:10<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:13<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:13<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:16<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:16<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:16<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 15] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 16/52: PAWF_v1|OUTER:202204|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-03-25 00:00:00 (1105 days)
+Testing  Period: 2022-04-01 00:00:00 to 2022-09-27 00:00:00 (128 days)
+
+[Fold 16] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 16] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:05<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:10<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000070.03, Support=3 Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000070.03, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000070.03, Support=3
+
+[Fold 16] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 17/52: PAWF_v1|OUTER:202205|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-04-25 00:00:00 (1126 days)
+Testing  Period: 2022-05-02 00:00:00 to 2022-10-27 00:00:00 (129 days)
+
+[Fold 17] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 17] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:05<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:06<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:08<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:11<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000070.03, Support=3 Island Evolution: 100%|██████████| Gen 5/5 [00:11<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000070.03, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:11<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000070.03, Support=3
+
+[Fold 17] Discovered 36 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 18/52: PAWF_v1|OUTER:202206|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-05-26 00:00:00 (1149 days)
+Testing  Period: 2022-06-01 00:00:00 to 2022-11-25 00:00:00 (128 days)
+
+[Fold 18] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 18] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:03<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:04<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:04<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:06<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:08<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:08<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:08<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 18] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 19/52: PAWF_v1|OUTER:202207|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-06-24 00:00:00 (1170 days)
+Testing  Period: 2022-07-01 00:00:00 to 2022-12-27 00:00:00 (128 days)
+
+[Fold 19] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 19] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:03<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:05<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000230.00, Support=3 Island Evolution:  60%|██████    | Gen 3/5 [00:05<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000230.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:07<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:09<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000203.64, Support=3 Island Evolution: 100%|██████████| Gen 5/5 [00:09<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000203.64, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:09<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000203.64, Support=3
+
+[Fold 19] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 20/52: PAWF_v1|OUTER:202208|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-07-26 00:00:00 (1192 days)
+Testing  Period: 2022-08-01 00:00:00 to 2023-01-27 00:00:00 (130 days)
+
+[Fold 20] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 20] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:02<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:03<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:03<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:06<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:07<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000317.11, Support=3 Island Evolution: 100%|██████████| Gen 5/5 [00:07<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000317.11, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:07<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=500000317.11, Support=3
+
+[Fold 20] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 21/52: PAWF_v1|OUTER:202209|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-08-26 00:00:00 (1215 days)
+Testing  Period: 2022-09-01 00:00:00 to 2023-02-27 00:00:00 (128 days)
+
+[Fold 21] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 21] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:15] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:15] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:05<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:08<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:16<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:16<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:16<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 21] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 22/52: PAWF_v1|OUTER:202210|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-09-23 00:00:00 (1235 days)
+Testing  Period: 2022-10-03 00:00:00 to 2023-03-29 00:00:00 (128 days)
+
+[Fold 22] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 22] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:02<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:04<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:04<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:05<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:05<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:06<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:06<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:06<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 22] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 23/52: PAWF_v1|OUTER:202211|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-10-26 00:00:00 (1258 days)
+Testing  Period: 2022-11-01 00:00:00 to 2023-04-28 00:00:00 (129 days)
+
+[Fold 23] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 23] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:05<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:07<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:10<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:12<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:12<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 23] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 24/52: PAWF_v1|OUTER:202212|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-11-25 00:00:00 (1280 days)
+Testing  Period: 2022-12-01 00:00:00 to 2023-05-29 00:00:00 (128 days)
+
+[Fold 24] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 24] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:06<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:06<00:26] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:07<00:26] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:07<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:11<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:11<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:16<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:16<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:16<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 24] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 25/52: PAWF_v1|OUTER:202301|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2022-12-26 00:00:00 (1301 days)
+Testing  Period: 2023-01-02 00:00:00 to 2023-06-29 00:00:00 (129 days)
+
+[Fold 25] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 25] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:04<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:04<00:19] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:19] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:05<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:07<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:08<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:13<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:13<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:13<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 25] Discovered 36 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 26/52: PAWF_v1|OUTER:202302|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-01-26 00:00:00 (1324 days)
+Testing  Period: 2023-02-01 00:00:00 to 2023-07-28 00:00:00 (128 days)
+
+[Fold 26] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 26] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:05<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:21] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:08<00:21] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:08<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:19<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:19<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:20<00:14] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:20<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:25<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:25<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:25<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 26] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 27/52: PAWF_v1|OUTER:202303|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-02-23 00:00:00 (1344 days)
+Testing  Period: 2023-03-01 00:00:00 to 2023-08-25 00:00:00 (128 days)
+
+[Fold 27] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 27] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:12<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:12<00:20] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:17<00:20] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:17<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:19<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  80%|████████  | Gen 4/5 [00:19<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  80%|████████  | Gen 4/5 [00:21<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:21<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:21<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 27] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 28/52: PAWF_v1|OUTER:202304|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-03-24 00:00:00 (1365 days)
+Testing  Period: 2023-04-03 00:00:00 to 2023-09-27 00:00:00 (128 days)
+
+[Fold 28] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 28] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:02<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:06<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  80%|████████  | Gen 4/5 [00:07<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  80%|████████  | Gen 4/5 [00:10<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 28] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 29/52: PAWF_v1|OUTER:202305|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-04-25 00:00:00 (1387 days)
+Testing  Period: 2023-05-01 00:00:00 to 2023-10-27 00:00:00 (130 days)
+
+[Fold 29] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 29] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  40%|████      | Gen 2/5 [00:02<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  40%|████      | Gen 2/5 [00:04<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:04<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:14<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  80%|████████  | Gen 4/5 [00:18<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:18<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:18<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 29] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 30/52: PAWF_v1|OUTER:202306|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-05-26 00:00:00 (1410 days)
+Testing  Period: 2023-06-01 00:00:00 to 2023-11-27 00:00:00 (128 days)
+
+[Fold 30] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 30] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  40%|████      | Gen 2/5 [00:02<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  40%|████      | Gen 2/5 [00:03<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:03<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:04<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  80%|████████  | Gen 4/5 [00:04<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  80%|████████  | Gen 4/5 [00:05<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:05<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:05<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 30] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 31/52: PAWF_v1|OUTER:202307|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-06-23 00:00:00 (1430 days)
+Testing  Period: 2023-07-03 00:00:00 to 2023-12-27 00:00:00 (128 days)
+
+[Fold 31] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 31] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:04<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:04<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:07<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:09<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:09<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:13<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:13<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:13<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 31] Discovered 34 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 32/52: PAWF_v1|OUTER:202308|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-07-26 00:00:00 (1453 days)
+Testing  Period: 2023-08-01 00:00:00 to 2024-01-26 00:00:00 (129 days)
+
+[Fold 32] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 32] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:03<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:04<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:04<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:04<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:04<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:06<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:06<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:06<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 32] Discovered 36 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 33/52: PAWF_v1|OUTER:202309|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-08-25 00:00:00 (1475 days)
+Testing  Period: 2023-09-01 00:00:00 to 2024-02-27 00:00:00 (128 days)
+
+[Fold 33] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 33] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:03<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:05<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:05<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:06<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:09<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:09<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:09<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 33] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 34/52: PAWF_v1|OUTER:202310|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-09-25 00:00:00 (1496 days)
+Testing  Period: 2023-10-02 00:00:00 to 2024-03-28 00:00:00 (129 days)
+
+[Fold 34] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 34] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:04<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:04<00:16] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:06<00:16] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:06<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:08<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:09<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:09<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:11<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:11<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:11<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 34] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 35/52: PAWF_v1|OUTER:202311|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-10-26 00:00:00 (1519 days)
+Testing  Period: 2023-11-01 00:00:00 to 2024-04-26 00:00:00 (128 days)
+
+[Fold 35] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 35] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:04<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:04<00:18] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:06<00:18] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:06<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:08<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 35] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 36/52: PAWF_v1|OUTER:202312|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-11-24 00:00:00 (1540 days)
+Testing  Period: 2023-12-01 00:00:00 to 2024-05-28 00:00:00 (128 days)
+
+[Fold 36] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 36] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:01<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:03<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:04<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:04<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:05<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:05<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:06<00:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:06<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:06<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 36] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 37/52: PAWF_v1|OUTER:202401|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2023-12-26 00:00:00 (1562 days)
+Testing  Period: 2024-01-01 00:00:00 to 2024-06-28 00:00:00 (130 days)
+
+[Fold 37] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 37] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:01<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  20%|██        | Gen 1/5 [00:01<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=1Island Evolution:  20%|██        | Gen 1/5 [00:03<00:07] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:03<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:06<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:08<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:10<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 37] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 38/52: PAWF_v1|OUTER:202402|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-01-26 00:00:00 (1585 days)
+Testing  Period: 2024-02-01 00:00:00 to 2024-07-29 00:00:00 (128 days)
+
+[Fold 38] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 38] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:07<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:07<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:09<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:09<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:13<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:13<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:19<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:19<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:19<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 38] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 39/52: PAWF_v1|OUTER:202403|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-02-23 00:00:00 (1605 days)
+Testing  Period: 2024-03-01 00:00:00 to 2024-08-27 00:00:00 (128 days)
+
+[Fold 39] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 39] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:04<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:04<00:18] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:07<00:18] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:07<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:12<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  60%|██████    | Gen 3/5 [00:21<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:21<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:25<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:25<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:25<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2
+
+[Fold 39] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 40/52: PAWF_v1|OUTER:202404|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-03-26 00:00:00 (1627 days)
+Testing  Period: 2024-04-01 00:00:00 to 2024-09-27 00:00:00 (130 days)
+
+[Fold 40] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 40] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:04<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:04<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:07<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:08<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:09<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:09<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:09<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2
+
+[Fold 40] Discovered 35 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 41/52: PAWF_v1|OUTER:202405|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-04-25 00:00:00 (1649 days)
+Testing  Period: 2024-05-01 00:00:00 to 2024-10-25 00:00:00 (128 days)
+
+[Fold 41] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 41] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:03<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:05<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:05<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:09<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:09<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:11<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:11<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:11<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 41] Discovered 36 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 42/52: PAWF_v1|OUTER:202406|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-05-24 00:00:00 (1670 days)
+Testing  Period: 2024-06-03 00:00:00 to 2024-11-27 00:00:00 (128 days)
+
+[Fold 42] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 42] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:07<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:07<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:10<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:14<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:15<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:15<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:15<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 42] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 43/52: PAWF_v1|OUTER:202407|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-06-25 00:00:00 (1692 days)
+Testing  Period: 2024-07-01 00:00:00 to 2024-12-27 00:00:00 (130 days)
+
+[Fold 43] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 43] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:15<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:15<01:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:16<01:01] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:16<00:20] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:23<00:20] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:23<00:13] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:27<00:13] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:27<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:35<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:35<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:35<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 43] Discovered 36 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 44/52: PAWF_v1|OUTER:202408|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-07-26 00:00:00 (1715 days)
+Testing  Period: 2024-08-01 00:00:00 to 2025-01-27 00:00:00 (128 days)
+
+[Fold 44] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 44] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:13] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:06<00:13] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:06<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:08<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=5Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=5Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=5
+
+[Fold 44] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 45/52: PAWF_v1|OUTER:202409|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-08-26 00:00:00 (1736 days)
+Testing  Period: 2024-09-02 00:00:00 to 2025-02-27 00:00:00 (129 days)
+
+[Fold 45] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 45] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:04<00:12] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:04<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:06<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:10<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 45] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 46/52: PAWF_v1|OUTER:202410|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-09-25 00:00:00 (1758 days)
+Testing  Period: 2024-10-01 00:00:00 to 2025-03-28 00:00:00 (129 days)
+
+[Fold 46] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 46] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:13<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:13<00:54] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:17<00:54] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:17<00:23] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:23<00:23] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:23<00:13] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:28<00:13] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:28<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:32<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:32<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution: 100%|██████████| Gen 5/5 [00:32<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2
+
+[Fold 46] Discovered 38 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 47/52: PAWF_v1|OUTER:202411|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-10-25 00:00:00 (1780 days)
+Testing  Period: 2024-11-01 00:00:00 to 2025-04-29 00:00:00 (128 days)
+
+[Fold 47] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 47] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:04<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:04<00:17] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:07<00:17] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:07<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:10<00:11] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:14<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 47] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 48/52: PAWF_v1|OUTER:202412|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-11-25 00:00:00 (1801 days)
+Testing  Period: 2024-12-02 00:00:00 to 2025-05-29 00:00:00 (129 days)
+
+[Fold 48] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 48] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:03<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:13] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:07<00:13] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:07<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  40%|████      | Gen 2/5 [00:11<00:10] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:11<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:14<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:14<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  80%|████████  | Gen 4/5 [00:17<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:17<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:17<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 48] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 49/52: PAWF_v1|OUTER:202501|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2024-12-26 00:00:00 (1824 days)
+Testing  Period: 2025-01-01 00:00:00 to 2025-06-27 00:00:00 (128 days)
+
+[Fold 49] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 49] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:02<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:08<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:12<00:06] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:15<00:03] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:15<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:15<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 49] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 50/52: PAWF_v1|OUTER:202502|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2025-01-24 00:00:00 (1845 days)
+Testing  Period: 2025-02-03 00:00:00 to 2025-07-30 00:00:00 (128 days)
+
+[Fold 50] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 50] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:05<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:05<00:20] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:06<00:20] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:06<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:08<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:10<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:10<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:13<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:13<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:13<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 50] Discovered 37 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 51/52: PAWF_v1|OUTER:202503|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2025-02-21 00:00:00 (1865 days)
+Testing  Period: 2025-03-03 00:00:00 to 2025-08-27 00:00:00 (128 days)
+
+[Fold 51] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 51] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:02<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=0Island Evolution:  20%|██        | Gen 1/5 [00:03<00:08] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:03<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:07<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:07<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:08<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:12<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:12<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution: 100%|██████████| Gen 5/5 [00:12<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3
+
+[Fold 51] Discovered 36 Pareto-optimal setups
+
+================================================================================
+OUTER FOLD 52/52: PAWF_v1|OUTER:202504|H:5|E:normal|P:5|EMB:252|REG:R1
+================================================================================
+Training Period: 2018-01-01 00:00:00 to 2025-03-26 00:00:00 (1888 days)
+Testing  Period: 2025-04-01 00:00:00 to 2025-09-26 00:00:00 (129 days)
+
+[Fold 52] Building NPWF inner folds...
+  Created 3 NPWF inner folds for GA evaluation
+
+[Fold 52] Running Island Model GA with NPWF-based backtesting fitness...
+  Population: 50, Generations: 5
+  Islands: 4, Migration Interval: 2
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Initializing specialized population of size 12...
+Island Evolution:   0%|          | Gen 0/5 [00:00<?] Island Evolution:   0%|          | Gen 0/5 [00:02<?] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  20%|██        | Gen 1/5 [00:02<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=2Island Evolution:  20%|██        | Gen 1/5 [00:03<00:09] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:03<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  40%|████      | Gen 2/5 [00:06<00:05] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:06<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  60%|██████    | Gen 3/5 [00:08<00:04] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:08<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=3Island Evolution:  80%|████████  | Gen 4/5 [00:10<00:02] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4Island Evolution: 100%|██████████| Gen 5/5 [00:10<00:00] , Best_DSR=1.00, Med_Calmar_LB=1000000000.00, Med_PF_LB=1000000000.00, Support=4
+
+[Fold 52] Discovered 36 Pareto-optimal setups
+
+================================================================================
+PAWF + NPWF DISCOVERY COMPLETE
+================================================================================
+Total setups discovered: 1917
+
+--- Saving Results ---
+Traceback (most recent call last):
+  File "/Users/lutherhart/PycharmProjects/alpha_v10/main.py", line 304, in <module>
+    main()
+    ~~~~^^
+  File "/Users/lutherhart/PycharmProjects/alpha_v10/main.py", line 118, in main
+    main_discover_workflow()
+    ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/lutherhart/PycharmProjects/alpha_v10/main.py", line 286, in main_discover_workflow
+    for split_spec, train_idx, test_idx in pawf_splits
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: cannot unpack non-iterable SplitSpec object

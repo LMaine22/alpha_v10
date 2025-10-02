@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 import warnings
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List
+import pandas as pd
+import numpy as np
+import warnings
 from scipy import stats
 from scipy.stats import entropy
 from collections import Counter
@@ -843,6 +846,153 @@ def safe_dollar_volume(df: pd.DataFrame) -> pd.Series:
 
 
 # =========================
+# Advanced Options Utilities
+# =========================
+def skew_dynamics(call_iv: pd.Series, put_iv: pd.Series, window: int = 21) -> pd.Series:
+    """Risk reversal dynamics"""
+    c = to_numeric_safe(call_iv)
+    p = to_numeric_safe(put_iv)
+    return (c - p).rolling(window).mean()
+
+def flow_pressure(call_oi: pd.Series, put_oi: pd.Series, window: int = 5) -> pd.Series:
+    """OI skew change pressure"""
+    c = to_numeric_safe(call_oi)
+    p = to_numeric_safe(put_oi)
+    skew = c / (p + EPSILON)
+    return skew.pct_change(window, fill_method=None)
+
+def congestion_distance(price: pd.Series, oi_peak: pd.Series, window: int = 21) -> pd.Series:
+    """Distance to OI congestion peaks"""
+    px = to_numeric_safe(price)
+    oi = to_numeric_safe(oi_peak)
+    oi_rank = oi.rolling(window).rank(pct=True)
+    return (px - px.rolling(window).mean()) / (px.rolling(window).std() + EPSILON) * (1 - oi_rank)
+
+def iv_term_structure_slope(short_iv: pd.Series, long_iv: pd.Series) -> pd.Series:
+    """IV term structure slope"""
+    s = to_numeric_safe(short_iv)
+    l = to_numeric_safe(long_iv)
+    return (l - s) / (s + EPSILON)
+
+# =========================
+# Advanced Sentiment Utilities  
+# =========================
+def sentiment_consensus(sentiment_sources: List[pd.Series], weights: Optional[List[float]] = None) -> pd.Series:
+    """Cross-source sentiment consensus"""
+    if weights is None:
+        weights = [1.0] * len(sentiment_sources)
+    
+    consensus = pd.Series(index=sentiment_sources[0].index, dtype=float)
+    total_weight = 0
+    
+    for i, (sent, w) in enumerate(zip(sentiment_sources, weights)):
+        s = to_numeric_safe(sent)
+        consensus += s * w
+        total_weight += w
+    
+    return consensus / (total_weight + EPSILON)
+
+def sentiment_burst_detection(sentiment: pd.Series, window: int = 21, threshold: float = 2.0) -> pd.Series:
+    """Detect sentiment bursts using z-score"""
+    s = to_numeric_safe(sentiment)
+    rolling_mean = s.rolling(window).mean()
+    rolling_std = s.rolling(window).std()
+    z_score = (s - rolling_mean) / (rolling_std + EPSILON)
+    return (z_score.abs() > threshold).astype(float)
+
+def sentiment_roc(sentiment: pd.Series, window: int = 5) -> pd.Series:
+    """Rate of change in sentiment"""
+    s = to_numeric_safe(sentiment)
+    return s.pct_change(window, fill_method=None)
+
+# =========================
+# Advanced Macro Regime Utilities
+# =========================
+def trend_filter(series: pd.Series, short_window: int = 20, long_window: int = 50) -> pd.Series:
+    """Trend filter using moving averages"""
+    s = to_numeric_safe(series)
+    short_ma = s.rolling(short_window).mean()
+    long_ma = s.rolling(long_window).mean()
+    return (short_ma > long_ma).astype(float)
+
+def momentum_regime(returns: pd.Series, window: int = 21) -> pd.Series:
+    """Momentum regime detection"""
+    r = to_numeric_safe(returns)
+    rolling_mean = r.rolling(window).mean()
+    rolling_std = r.rolling(window).std()
+    return (rolling_mean / (rolling_std + EPSILON)).rolling(window).mean()
+
+def beta_conditioned_return(asset_ret: pd.Series, market_ret: pd.Series, window: int = 63) -> pd.Series:
+    """Beta-conditioned orthogonalized returns"""
+    a, m = align_series(asset_ret, market_ret)
+    beta = rolling_beta(a, m, window)
+    return a - beta * m
+
+def dollar_momentum(dxy: pd.Series, window: int = 21) -> pd.Series:
+    """DXY momentum for macro regime"""
+    s = to_numeric_safe(dxy)
+    return s.pct_change(window, fill_method=None)
+
+def rates_trend(yield_series: pd.Series, window: int = 21) -> pd.Series:
+    """Interest rates trend"""
+    s = to_numeric_safe(yield_series)
+    return s.diff(window)
+
+# =========================
+# Advanced Sentiment Analysis
+# =========================
+def sentiment_regime_classifier(sentiment: pd.Series, volume: pd.Series, window: int = 21) -> pd.Series:
+    """Classify sentiment regimes based on intensity and volume."""
+    s = to_numeric_safe(sentiment)
+    v = to_numeric_safe(volume)
+    
+    # Sentiment z-score
+    s_z = (s - s.rolling(window).mean()) / (s.rolling(window).std() + EPSILON)
+    
+    # Volume z-score  
+    v_z = (v - v.rolling(window).mean()) / (v.rolling(window).std() + EPSILON)
+    
+    # Regime classification
+    regime = pd.Series(0, index=s.index, dtype=float)  # neutral
+    regime[(s_z > 1) & (v_z > 1)] = 2  # euphoria
+    regime[(s_z < -1) & (v_z > 1)] = -2  # panic
+    regime[(s_z > 1) & (v_z <= 1)] = 1  # optimism
+    regime[(s_z < -1) & (v_z <= 1)] = -1  # pessimism
+    
+    return regime
+
+def news_flow_momentum(news_count: pd.Series, sentiment: pd.Series, window: int = 5) -> pd.Series:
+    """Measure news flow momentum combining count and sentiment."""
+    count = to_numeric_safe(news_count)
+    sent = to_numeric_safe(sentiment)
+    
+    # Weighted momentum (count-weighted sentiment change)
+    sent_change = sent.diff(window)
+    count_weight = count / (count.rolling(window * 2).mean() + EPSILON)
+    
+    return sent_change * count_weight
+
+def social_consensus_divergence(sources: List[pd.Series], window: int = 10) -> pd.Series:
+    """Measure divergence across social sentiment sources."""
+    if len(sources) < 2:
+        return pd.Series(dtype=float)
+    
+    # Align all sources
+    df = pd.DataFrame({f'source_{i}': s for i, s in enumerate(sources)}).dropna()
+    if df.empty:
+        return pd.Series(dtype=float)
+    
+    # Rolling correlation matrix
+    def _divergence(window_data):
+        corr_mat = window_data.corr()
+        # Average pairwise correlation as consensus measure
+        mask = np.triu(np.ones_like(corr_mat, dtype=bool), k=1)
+        avg_corr = corr_mat.values[mask].mean()
+        return 1 - avg_corr  # Higher divergence = lower correlation
+    
+    return df.rolling(window).apply(_divergence, raw=False).mean(axis=1)
+
+# =========================
 # Missing functions for registry compatibility
 # =========================
 def semivariance(returns: pd.Series, window: int = 21, downside: bool = True) -> pd.Series:
@@ -866,6 +1016,108 @@ def corr_abs_to_abs(s1: pd.Series, s2: pd.Series, window: int = 21) -> pd.Series
     a1 = to_numeric_safe(s1).abs()
     a2 = to_numeric_safe(s2).abs()
     return a1.rolling(window).corr(a2)
+
+
+# =========================
+# Portfolio Risk Management
+# =========================
+def portfolio_var(returns_matrix: pd.DataFrame, weights: pd.Series, window: int = 252, alpha: float = 0.05) -> pd.Series:
+    """Rolling portfolio VaR calculation."""
+    def _calc_var(ret_window):
+        if len(ret_window) < 20:
+            return np.nan
+        port_ret = (ret_window * weights.reindex(ret_window.columns, fill_value=0)).sum(axis=1)
+        return port_ret.quantile(alpha)
+    
+    return returns_matrix.rolling(window).apply(_calc_var, raw=False)
+
+def regime_stability_score(feature_matrix: pd.DataFrame, window: int = 63) -> pd.Series:
+    """Measure how stable current regime is based on feature correlations."""
+    def _stability(feat_window):
+        corr_mat = feat_window.corr()
+        # Eigenvalue concentration as stability proxy
+        eigenvals = np.linalg.eigvals(corr_mat.fillna(0))
+        eigenvals = eigenvals[eigenvals > 0]
+        if len(eigenvals) == 0:
+            return np.nan
+        return eigenvals.max() / eigenvals.sum()
+    
+    # Sample subset of features to avoid computational explosion
+    numeric_cols = feature_matrix.select_dtypes(include=[np.number]).columns[:50]
+    sample_features = feature_matrix[numeric_cols]
+    
+    return sample_features.rolling(window).apply(_stability, raw=False).mean(axis=1)
+
+def cross_asset_stress_indicator(returns_dict: Dict[str, pd.Series], window: int = 21) -> pd.Series:
+    """Detect cross-asset stress periods."""
+    if len(returns_dict) < 2:
+        return pd.Series(dtype=float)
+    
+    # Get aligned returns
+    ret_df = pd.DataFrame(returns_dict).dropna()
+    if ret_df.empty:
+        return pd.Series(dtype=float)
+    
+    # Tail correlation during stress
+    def _stress_corr(window_data):
+        # Focus on 5% tail events
+        tail_threshold = window_data.quantile(0.05, axis=0)
+        stress_periods = (window_data <= tail_threshold).any(axis=1)
+        if stress_periods.sum() < 3:
+            return np.nan
+        stress_data = window_data[stress_periods]
+        return stress_data.corr().values[np.triu_indices_from(stress_data.corr().values, k=1)].mean()
+    
+    return ret_df.rolling(window).apply(_stress_corr, raw=False).mean(axis=1)
+
+
+# =========================
+# Advanced Microstructure
+# =========================
+def order_flow_imbalance(buy_volume: pd.Series, sell_volume: pd.Series, window: int = 20) -> pd.Series:
+    """Calculate order flow imbalance with smoothing."""
+    buy = to_numeric_safe(buy_volume)
+    sell = to_numeric_safe(sell_volume)
+    
+    # Raw imbalance
+    imbalance = (buy - sell) / (buy + sell + EPSILON)
+    
+    # Smooth with EWMA
+    return imbalance.ewm(span=window).mean()
+
+def market_impact_estimate(returns: pd.Series, volume: pd.Series, window: int = 21) -> pd.Series:
+    """Estimate market impact per unit volume."""
+    ret = to_numeric_safe(returns).abs()
+    vol = to_numeric_safe(volume)
+    
+    # Impact = |return| / sqrt(volume) (Almgren style)
+    impact = ret / (vol.clip(lower=1).pow(0.5))
+    
+    return impact.rolling(window).mean()
+
+def liquidity_risk_premium(bid_ask_spread: pd.Series, volatility: pd.Series, window: int = 63) -> pd.Series:
+    """Calculate liquidity risk premium."""
+    spread = to_numeric_safe(bid_ask_spread)
+    vol = to_numeric_safe(volatility)
+    
+    # Risk-adjusted spread
+    risk_adj_spread = spread / (vol + EPSILON)
+    
+    # Z-score relative to history
+    return zscore_rolling(risk_adj_spread, window)
+
+def price_pressure_indicator(price: pd.Series, volume: pd.Series, window: int = 10) -> pd.Series:
+    """Detect price pressure from volume patterns."""
+    px = to_numeric_safe(price)
+    vol = to_numeric_safe(volume)
+    
+    ret = px.pct_change()
+    vol_z = zscore_rolling(vol, window * 2)
+    
+    # High volume + directional price = pressure
+    pressure = ret.rolling(window).mean() * vol_z.rolling(window).mean()
+    
+    return pressure
 
 
 # Convenience alias

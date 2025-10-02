@@ -6,72 +6,48 @@ from pathlib import Path
 
 # Suppress warnings but keep errors visible
 warnings.simplefilter('ignore')
-
-# Suppress specific numpy warnings that occur during feature computation in pandas/numpy operations
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy.lib._function_base_impl')
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy._core._methods')
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='numpy.lib._nanfunctions_impl')
-# Suppress joblib memory warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='joblib')
 warnings.filterwarnings('ignore', message='.*Persisting input arguments.*')
-# Suppress numpy warnings
 warnings.filterwarnings('ignore', category=RuntimeWarning, message='All-NaN slice encountered')
 warnings.filterwarnings('ignore', category=RuntimeWarning, message='Mean of empty slice')
 warnings.filterwarnings('ignore', category=RuntimeWarning, message='Degrees of freedom <= 0 for slice')
 warnings.filterwarnings('ignore', category=RuntimeWarning, message='invalid value encountered in divide')
 warnings.filterwarnings('ignore', category=RuntimeWarning, message='invalid value encountered in scalar divide')
-# Suppress specific warnings from our modules
 warnings.filterwarnings('ignore', category=RuntimeWarning, module='alpha_discovery.search.ga_core')
-warnings.filterwarnings('ignore', category=RuntimeWarning, module='alpha_discovery.eval.metrics.robustness')
+warnings.filterwarnings('ignore', category=RuntimeWarning, module='alpha_discovery.eval.info_metrics.robustness')
+warnings.filterwarnings('ignore', message='Field name "validate" in "Settings" shadows an attribute', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning, module=r".*alpha_.*\.data\.events")
 
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
 
-# Set numpy error handling to ignore warnings
+# Set numpy error handling
 np.seterr(all='ignore')
 
 from alpha_discovery.config import settings
 from alpha_discovery.features.registry import build_feature_matrix
-from alpha_discovery.signals.compiler import compile_signals
+from alpha_discovery.signals.compiler import compile_signals, check_signals_cache
 
-
-# Try to import the loader to build parquet if missing
+# Import loader
 try:
     from alpha_discovery.data.loader import convert_excel_to_parquet
 except Exception:
     convert_excel_to_parquet = None
 
-# ------------------------------------------------------------------
-# Optional: de-noise console. Comment out any of these if you prefer.
-# ------------------------------------------------------------------
-warnings.filterwarnings(
-    "ignore",
-    message='Field name "validate" in "Settings" shadows an attribute',
-    category=UserWarning,
-)
-warnings.filterwarnings(
-    "ignore",
-    category=FutureWarning,
-    module=r".*alpha_.*\.data\.events",
-)
-warnings.filterwarnings(
-    "ignore",
-    message="All-NaN slice encountered",
-    category=RuntimeWarning,
-)
-
-# Thread caps for reproducibility + performance tuning
+# Thread caps
 os.environ.update(
-    VECLIB_MAXIMUM_THREADS='4',  # Allow more threads for numpy
+    VECLIB_MAXIMUM_THREADS='4',
     OMP_NUM_THREADS='4',
     OPENBLAS_NUM_THREADS='4',
     MKL_NUM_THREADS='4',
     NUMEXPR_NUM_THREADS='4',
-    # Feature performance tuning
-    FEATURES_PAIRWISE_MAX_TICKERS='32',  # Limit pairwise to 32 tickers
-    FEATURES_PAIRWISE_JOBS='8',  # Use 8 parallel jobs
-    PAIRWISE_MIN_PERIODS='10',   # Reduce min periods for speed
+    FEATURES_PAIRWISE_MAX_TICKERS='32',
+    FEATURES_PAIRWISE_JOBS='8',
+    PAIRWISE_MIN_PERIODS='10',
 )
 
 
@@ -80,32 +56,26 @@ def _ensure_dir(d: str) -> None:
 
 
 def load_data() -> pd.DataFrame:
-    # Always refresh the parquet from Excel to ensure we have the latest data
+    """Load and prepare data from parquet."""
     pq = settings.data.parquet_file_path
     excel = settings.data.excel_file_path
     
-    # Check if Excel file exists
     if not os.path.exists(excel):
-        print(f"[error] Excel file not found: {excel}")
+        print(f"ERROR: Excel file not found: {excel}")
         return pd.DataFrame()
     
-    # Always convert Excel to Parquet to ensure fresh data
+    # Refresh parquet from Excel
     if convert_excel_to_parquet is not None:
-        print(f"[info] Refreshing parquet data from Excel source: {excel}")
+        print(f"Loading data from '{pq}' (refreshed from Excel)...")
         convert_excel_to_parquet()
-    else:
-        print(f"[warn] Excel conversion function not available. Using existing parquet if available.")
     
-    # Check if Parquet exists after potential conversion
     if not os.path.exists(pq):
-        print(f"[error] Parquet not found: {pq}")
+        print(f"ERROR: Parquet not found: {pq}")
         return pd.DataFrame()
     
-    # Load the parquet data
-    print(f"[info] Loading data from parquet: {pq}")
     df = pd.read_parquet(pq)
     
-    # normalize index to DatetimeIndex
+    # Normalize index
     if 'DATE' in df.columns:
         df['DATE'] = pd.to_datetime(df['DATE'])
         df = df.set_index('DATE')
@@ -113,61 +83,29 @@ def load_data() -> pd.DataFrame:
         df.index = pd.to_datetime(df.index)
     df = df.sort_index()
     
-    # clip date range according to config
-    date_filtered_df = df.loc[(df.index.date >= settings.data.start_date) & (df.index.date <= settings.data.end_date)]
+    # Filter date range
+    df = df.loc[(df.index.date >= settings.data.start_date) & (df.index.date <= settings.data.end_date)]
     
-    # Print data range info
-    print(f"[info] Data loaded with date range: {date_filtered_df.index.min().date()} to {date_filtered_df.index.max().date()}")
-    print(f"[info] Config date range: {settings.data.start_date} to {settings.data.end_date}")
+    print(f"Data loaded successfully. Shape: {df.shape}")
+    print(f"Date range: {df.index.min().date()} to {df.index.max().date()}")
     
-    return date_filtered_df
+    return df
 
-
-def build_signals(master_df: pd.DataFrame):
-    # Build feature matrix with your registry (events included, leak-safe shifts inside)
-    X = build_feature_matrix(master_df)
-    # Compile primitive signals from features
-    signals_df, signals_meta = compile_signals(X)
-    # Ensure boolean dtype & drop ultra-sparse signals (unfireable setups)
-    fires = {}
-    for c in list(signals_df.columns):
-        if signals_df[c].dtype != bool:
-            signals_df[c] = signals_df[c].astype(bool)
-        fires[c] = int(signals_df[c].sum())
-    min_fires = int(settings.validation.min_signal_fires)
-    keep_cols = [c for c in signals_df.columns if fires.get(c, 0) >= min_fires]
-    dropped = len(signals_df.columns) - len(keep_cols)
-    if dropped:
-        print(f"[signals] Dropping {dropped} ultra-sparse signals (<{min_fires} fires)")
-    signals_df = signals_df[keep_cols]
-    # prune metadata to match (best-effort if dicts with 'id')
-    try:
-        signals_meta = [m for m in signals_meta if m.get('signal_id') in keep_cols]
-    except Exception:
-        pass
-    return signals_df, signals_meta
-
-
-
-
-# -----------------------------
-# Evolution + Reporting
-# -----------------------------
 
 def create_run_dir() -> str:
-    """Creates a unique run directory based on current time and seed."""
+    """Create timestamped run directory."""
     rd_base = settings.reporting.runs_dir
     _ensure_dir(rd_base)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = os.path.join(rd_base, f"forecast_first_seed{settings.ga.seed}_{ts}")
+    run_dir = os.path.join(rd_base, f"pawf_npwf_seed{settings.ga.seed}_{ts}")
     _ensure_dir(run_dir)
     return run_dir
 
 
 def print_header():
-    """Prints a stylized header to the console."""
+    """Print stylized header."""
     print("=" * 80)
-    print("         ALPHA DISCOVERY ENGINE v10 - Forecast-First")
+    print("         ALPHA DISCOVERY - PAWF + NPWF + Options Backtesting")
     print("=" * 80)
     print(f"Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Configuration Seed: {settings.ga.seed}")
@@ -175,214 +113,191 @@ def print_header():
 
 
 def main():
-    """Forecast-first discovery and validation workflow."""
+    """Main entry point."""
     print_header()
-    
-    # Run the forecast-first workflow
     main_discover_workflow()
 
 
 def main_discover_workflow():
     """
-    Forecast-first discovery mode.
+    Full PAWF + NPWF workflow with options backtesting.
     
-    Runs:
-    1. Load data and build features
-    2. Create PAWF splits for outer validation
-    3. Run GA with NPWF inner folds
-    4. Validate all candidates on outer PAWF folds
-    5. Generate EligibilityMatrix with skill/calibration/drift metrics
-    6. Save eligibility matrix for selection phase
+    Steps:
+    1. Load data and build signals (with caching)
+    2. Build PAWF outer splits (4 folds with purging)
+    3. For each outer fold:
+       - Build NPWF inner folds from train data
+       - Run Island GA with NPWF-based backtesting fitness
+       - Collect Pareto-optimal setups
+    4. Aggregate and save all results
     """
-    # Header already printed by main()
     
     # Load data
+    print("\n--- Loading Data ---")
     master_df = load_data()
     if master_df.empty:
         print("No data; exiting.")
         return
     
-    print("--- Building features and signals ---")
-    feature_matrix = build_feature_matrix(master_df)
-    signals_df, signals_meta = compile_signals(feature_matrix)
+    # Build/load signals (with caching)
+    print("\n--- Building Features & Signals ---")
+    signals_df, signals_meta = check_signals_cache(master_df)
+    
+    if signals_df is None:
+        print("  Cache miss - building features...")
+        feature_matrix = build_feature_matrix(master_df)
+        signals_df, signals_meta = compile_signals(feature_matrix)
+    else:
+        print(f"  ✅ Loaded {len(signals_df.columns)} cached signals")
     
     # Create run directory
     run_dir = create_run_dir()
-    print(f"\n--- Run directory: {run_dir} ---")
+    print(f"\n--- Run Directory: {run_dir} ---")
     
-    # Import forecast-first orchestrator
-    from alpha_discovery.eval.orchestrator import ForecastOrchestrator
-    from alpha_discovery.adapters.features import FeatureAdapter, calculate_max_lookback
+    # Build PAWF outer splits
+    print("\n--- Building PAWF Outer Splits ---")
+    from alpha_discovery.splits.pawf import build_pawf_splits
+    from alpha_discovery.splits.ids import generate_split_id
+    from alpha_discovery.adapters.features import FeatureAdapter, calculate_max_lookback_from_list
     
-    print("\n--- Initializing Forecast-First Orchestrator ---")
-    
-    # Setup feature adapter
     adapter = FeatureAdapter()
-    lookback_tail = calculate_max_lookback(adapter.features, adapter.pairwise)
-    print(f"Feature lookback tail: {lookback_tail} days")
+    feature_names = adapter.list_features()
+    lookback_tail = calculate_max_lookback_from_list(feature_names)
+    label_horizon_days = 5  # 1-week horizon for backtesting
     
-    # Create orchestrator
-    orchestrator = ForecastOrchestrator(
-        master_df=master_df,
-        signals_df=signals_df,
-        signals_meta=signals_meta,
-        output_dir=Path(run_dir),
+    pawf_splits = build_pawf_splits(
+        df=master_df,
+        label_horizon_days=label_horizon_days,
         feature_lookback_tail=lookback_tail,
-        seed=settings.ga.seed
+        min_train_months=36,        # 3 years minimum training
+        test_window_days=180,       # 6-month test windows
+        step_months=1,              # 1-month step forward
+        regime_version="R1"
     )
     
-    # Run validation with PAWF + NPWF
-    print("\n--- Running PAWF validation with NPWF inner folds ---")
-    eligibility_matrix = orchestrator.run_validation(
-        n_outer_splits=4,           # PAWF outer splits
-        test_size_months=6,          # 6-month test windows
-        purge_days=5,                # 5-day purge
-        n_inner_folds=3,             # NPWF inner folds for GA
-        n_regimes=5,                 # GMM regimes
-        run_ga=True,                 # Run GA for discovery
-        n_ga_generations=settings.ga.generations,
-        ga_population=settings.ga.population_size
-    )
+    print(f"Created {len(pawf_splits)} PAWF outer folds")
+    print(f"  Label horizon: {label_horizon_days} days")
+    print(f"  Feature lookback: {lookback_tail} days")
     
-    # Generate reports
-    print("\n--- Generating Eligibility Reports ---")
-    from alpha_discovery.reporting.eligibility_report import (
-        generate_eligibility_report,
-        print_eligibility_summary
-    )
+    # Get tradable tickers
+    tradable_tickers = settings.data.effective_tradable_tickers
+    print(f"\n--- Tradable Tickers: {len(tradable_tickers)} ---")
+    print(f"  {', '.join(tradable_tickers[:10])}{'...' if len(tradable_tickers) > 10 else ''}")
     
-    reports_dir = Path(run_dir) / "reports"
-    eligibility_path = Path(run_dir) / "eligibility_matrix.json"
+    # Run GA discovery for each outer fold
+    print(f"\n{'='*80}")
+    print(f"RUNNING PAWF + NPWF DISCOVERY")
+    print(f"{'='*80}")
     
-    report_outputs = generate_eligibility_report(
-        eligibility_matrix_path=eligibility_path,
-        output_dir=reports_dir,
-        min_skill_vs_marginal=0.01,
-        max_calibration_mae=0.15,
-        drift_gate=True,
-        top_n=50
-    )
+    all_fold_results = []
     
-    # Print summary
-    print_eligibility_summary(report_outputs['summary'])
+    from alpha_discovery.splits.npwf import make_inner_folds
+    from alpha_discovery.search.island_model import IslandManager, ExitPolicy
     
-    print(f"\n--- Discovery Complete ---")
-    print(f"Eligibility matrix: {eligibility_path}")
-    print(f"Reports directory: {reports_dir}")
-    print(f"\nNext step: Run with --mode select --eligibility {eligibility_path}")
-
-
-def main_select(eligibility_path: Optional[Path] = None):
-    """
-    Selection mode: Load eligibility matrix and generate forecast slate.
-    
-    Runs:
-    1. Load eligibility matrix
-    2. Filter by skill/calibration/drift thresholds
-    3. Rank by skill_vs_marginal
-    4. Apply portfolio constraints (max per ticker, diversification)
-    5. Generate actionable forecast slate
-    """
-    print_header(mode="select")
-    
-    # Find eligibility matrix
-    if eligibility_path is None:
-        # Look for most recent run
-        runs_dir = Path(settings.reporting.runs_dir)
-        if not runs_dir.exists():
-            print(f"No runs directory found: {runs_dir}")
-            return
+    for fold_idx, split_spec in enumerate(pawf_splits, 1):
+        # Extract train/test indices from SplitSpec and intersect with actual trading days
+        outer_train_idx = master_df.index.intersection(split_spec.train_index)
+        outer_test_idx = master_df.index.intersection(split_spec.test_index)
+        split_id = generate_split_id(split_spec)
         
-        # Find most recent eligibility matrix
-        eligible_runs = list(runs_dir.glob("*/eligibility_matrix.json"))
-        if not eligible_runs:
-            print(f"No eligibility matrices found in {runs_dir}")
-            print("Run with --mode discover first!")
-            return
+        print(f"\n{'='*80}")
+        print(f"OUTER FOLD {fold_idx}/{len(pawf_splits)}: {split_id}")
+        print(f"{'='*80}")
+        print(f"Training Period: {outer_train_idx[0]} to {outer_train_idx[-1]} ({len(outer_train_idx)} days)")
+        print(f"Testing  Period: {outer_test_idx[0]} to {outer_test_idx[-1]} ({len(outer_test_idx)} days)")
         
-        eligibility_path = max(eligible_runs, key=lambda p: p.stat().st_mtime)
-        print(f"Using most recent eligibility matrix: {eligibility_path}")
-    
-    if not eligibility_path.exists():
-        print(f"Eligibility matrix not found: {eligibility_path}")
-        return
-    
-    # Load eligibility matrix
-    import json
-    import pandas as pd
-    
-    with open(eligibility_path, 'r') as f:
-        data = json.load(f)
-    
-    results_df = pd.DataFrame(data['results'])
-    metadata = data['metadata']
-    
-    print(f"\n--- Loaded {len(results_df)} validated setups ---")
-    print(f"Validation date: {metadata.get('timestamp', 'unknown')}")
-    
-    # Apply selection criteria
-    print("\n--- Applying Selection Criteria ---")
-    
-    MIN_SKILL = 0.01  # Must beat marginal by 1% CRPS
-    MAX_CALIB_MAE = 0.15  # Max 15% calibration error
-    DRIFT_GATE = True
-    MAX_PER_TICKER = 2  # Max 2 setups per ticker
-    TOP_N = 20  # Final portfolio size
-    
-    eligible = results_df[
-        (results_df['skill_vs_marginal'] >= MIN_SKILL) &
-        (results_df['calibration_mae'] <= MAX_CALIB_MAE)
-    ]
-    
-    if DRIFT_GATE:
-        eligible = eligible[eligible['drift_passed'] == True]
-    
-    print(f"  Eligible setups: {len(eligible)}/{len(results_df)}")
-    
-    # Rank by skill
-    eligible = eligible.sort_values('skill_vs_marginal', ascending=False)
-    
-    # Apply max-per-ticker constraint
-    selected = []
-    ticker_counts = {}
-    
-    for idx, row in eligible.iterrows():
-        ticker = row['ticker']
-        if ticker_counts.get(ticker, 0) < MAX_PER_TICKER:
-            selected.append(row)
-            ticker_counts[ticker] = ticker_counts.get(ticker, 0) + 1
+        # Build NPWF inner folds from outer train data
+        print(f"\n[Fold {fold_idx}] Building NPWF inner folds...")
+        df_train_outer = master_df.loc[outer_train_idx]
+        inner_folds = make_inner_folds(
+            df_train_outer=df_train_outer,
+            label_horizon_days=label_horizon_days,
+            feature_lookback_tail=lookback_tail,
+            k_folds=3           # 3-fold inner CV
+        )
+        print(f"  Created {len(inner_folds)} NPWF inner folds for GA evaluation")
         
-        if len(selected) >= TOP_N:
-            break
+        # Get train/test data slices
+        train_master_df = master_df.loc[outer_train_idx]
+        train_signals_df = signals_df.loc[outer_train_idx]
+        
+        # Create ExitPolicy for GA (includes NPWF inner folds)
+        exit_policy = ExitPolicy(
+            train_indices=outer_train_idx,
+            splits=inner_folds
+        )
+        
+        # Run Island Model GA
+        print(f"\n[Fold {fold_idx}] Running Island Model GA with NPWF-based backtesting fitness...")
+        print(f"  Population: {settings.ga.population_size}, Generations: {settings.ga.generations}")
+        print(f"  Islands: {settings.ga.n_islands}, Migration Interval: {settings.ga.migration_interval}")
+        
+        island_manager = IslandManager(
+            n_islands=settings.ga.n_islands,
+            n_individuals=settings.ga.population_size,
+            n_generations=settings.ga.generations,
+            signals_df=train_signals_df,
+            signals_metadata=signals_meta,
+            master_df=train_master_df,
+            exit_policy=exit_policy,
+            migration_interval=settings.ga.migration_interval,
+            seed=settings.ga.seed + fold_idx  # Different seed per fold
+        )
+        
+        pareto_front = island_manager.evolve()
+        
+        # Tag results with fold number
+        for setup in pareto_front:
+            setup['fold'] = fold_idx
+            setup['train_start'] = str(outer_train_idx[0])
+            setup['train_end'] = str(outer_train_idx[-1])
+            setup['test_start'] = str(outer_test_idx[0])
+            setup['test_end'] = str(outer_test_idx[-1])
+        
+        all_fold_results.extend(pareto_front)
+        
+        print(f"\n[Fold {fold_idx}] Discovered {len(pareto_front)} Pareto-optimal setups")
     
-    final_df = pd.DataFrame(selected)
+    print(f"\n{'='*80}")
+    print(f"PAWF + NPWF DISCOVERY COMPLETE")
+    print(f"{'='*80}")
+    print(f"Total setups discovered: {len(all_fold_results)}")
     
-    print(f"  Final portfolio: {len(final_df)} setups across {len(ticker_counts)} tickers")
+    # Save results
+    print("\n--- Saving Results ---")
+    from alpha_discovery.reporting.artifacts import save_results
     
-    # Generate forecast slate
-    output_dir = eligibility_path.parent / "selection"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    results_df = pd.DataFrame(all_fold_results)
     
-    forecast_slate_path = output_dir / "forecast_slate.csv"
-    final_df.to_csv(forecast_slate_path, index=False)
+    # Build splits object for save_results (simple dict representation)
+    splits_dict = {
+        'n_splits': len(pawf_splits),
+        'type': 'PAWF',
+        'inner_type': 'NPWF',
+        'inner_folds': 3,
+        'splits': [
+            {
+                'id': split_spec.split_id,
+                'train_start': str(train_idx[0]),
+                'train_end': str(train_idx[-1]),
+                'test_start': str(test_idx[0]),
+                'test_end': str(test_idx[-1])
+            }
+            for split_spec, train_idx, test_idx in pawf_splits
+        ]
+    }
     
-    print(f"\n--- Forecast Slate Generated ---")
-    print(f"Output: {forecast_slate_path}")
+    save_results(results_df, signals_meta, run_dir, splits_dict, settings)
     
-    # Print top 10
-    print(f"\n🏆 Top 10 Setups:")
-    for i, row in final_df.head(10).iterrows():
-        print(f"  {i+1}. {row['ticker']} H{row['horizon']}: "
-              f"skill={row['skill_vs_marginal']:.4f}, "
-              f"CRPS={row['crps']:.4f}, "
-              f"calib_mae={row['calibration_mae']:.4f}")
-    
-    print(f"\n--- Selection Complete ---")
-
-
-# Simple CLI: Run forecast-first discovery
-if __name__ == "__main__":
-    main()
+    print(f"\n{'='*80}")
+    print(f"✅ DISCOVERY COMPLETE!")
+    print(f"{'='*80}")
+    print(f"📁 Results saved to: {run_dir}")
+    print(f"   - Pareto front: {run_dir}/pareto_front_elv.csv")
+    print(f"   - Forecast slate: {run_dir}/forecast_slate.csv")
+    print(f"   - Config: {run_dir}/config.json")
+    print(f"\n🎯 Check the forecast slate for today's trade recommendations!")
+    print(f"{'='*80}\n")
 
 
 if __name__ == "__main__":

@@ -122,6 +122,10 @@ def _filter_eligible(
     drift_gate: bool
 ) -> pd.DataFrame:
     """Filter to eligible setups."""
+    # Handle empty dataframe
+    if df.empty:
+        return df
+    
     eligible = df.copy()
     
     # Skill gate

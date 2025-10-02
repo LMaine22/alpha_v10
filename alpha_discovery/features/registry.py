@@ -2,14 +2,124 @@
 import numpy as np
 import pandas as pd
 import os
-from typing import Dict, Callable, List, Tuple
+from typing import Dict, Callable, List, Tuple, Set
 from functools import lru_cache
+import gc
 from joblib import Parallel, delayed, Memory
+import inspect
+from itertools import count
+
+# --- Pairwise perf helpers: footprint, caching, slimming, warnings ---
+import os as _os2, hashlib, warnings, contextlib, time
+from joblib import Memory as _Memory2
+
+# persistent cache directory for pairwise outputs
+_PAIRWISE_CACHE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "cache", "pairwise"))
+os.makedirs(_PAIRWISE_CACHE_DIR, exist_ok=True)
+pair_mem = _Memory2(_PAIRWISE_CACHE_DIR, verbose=0, compress=3)
+
+def _df_footprint_bytes(df) -> int:
+    try:
+        return int(df.memory_usage(deep=True).sum())
+    except Exception:
+        return 0
+
+def _hash_series_fast(s):
+    """Stable 64-bit hash for a pandas Series of numeric values + index."""
+    try:
+        a = s.values.view("i8") if str(s.dtype).startswith("datetime") else s.values
+        raw = a.tobytes() + s.index.view("i8").tobytes()
+    except Exception:
+        raw = repr(s).encode("utf-8")
+    return hashlib.sha1(raw).hexdigest()[:16]
+
+def _data_hash_for_pair(df, t1: str, t2: str, ret_col: str = "ret"):
+    """Hash only the minimal inputs for this pair (returns or price columns)."""
+    cand1 = [f"{t1}.ret", f"{t1}|ret", f"{t1}_{ret_col}", (t1, ret_col), t1]
+    cand2 = [f"{t2}.ret", f"{t2}|ret", f"{t2}_{ret_col}", (t2, ret_col), t2]
+    s1, s2 = None, None
+    for c in cand1:
+        if c in getattr(df, 'columns', []):
+            s1 = df[c]; break
+    for c in cand2:
+        if c in getattr(df, 'columns', []):
+            s2 = df[c]; break
+    if s1 is None or s2 is None:
+        try:
+            s1 = df[(t1, ret_col)]
+            s2 = df[(t2, ret_col)]
+        except Exception:
+            return hashlib.sha1(df.index.view("i8").tobytes()).hexdigest()[:16]
+    h = hashlib.sha1()
+    h.update(_hash_series_fast(s1).encode("utf-8"))
+    h.update(_hash_series_fast(s2).encode("utf-8"))
+    return h.hexdigest()[:16]
+
+@contextlib.contextmanager
+def suppress_pairwise_runtime_warnings():
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Degrees of freedom <= 0 for slice")
+        warnings.filterwarnings("ignore", message="divide by zero encountered in divide")
+        warnings.filterwarnings("ignore", message="invalid value encountered in multiply")
+        yield
+
+def _slim_view_for_pairwise(df, tickers: List[str], ret_col: str = "ret"):
+    """Return a narrow DataFrame containing only what pairwise needs (returns or price proxies)."""
+    cols = []
+    for t in tickers:
+        for pat in (f"{t}.ret", f"{t}|ret", f"{t}_{ret_col}", (t, ret_col), t):
+            if pat in getattr(df, 'columns', []):
+                cols.append(pat); break
+    view = df[cols].copy() if cols else df.copy()
+    return view
+
+# --- Memory threshold alert + adaptive job scaling ---
+def decide_pairwise_jobs(df_footprint_bytes: int,
+                         default_jobs: int,
+                         warn_mb: int = None) -> tuple[int, str]:
+    """
+    Return (n_jobs, note). If footprint exceeds threshold, reduce jobs.
+    Env:
+      FEATURES_PAIRWISE_WARN_MB (int, MB)  -> warn threshold (default 800)
+      FEATURES_PAIRWISE_MAX_JOBS_ON_WARN   -> clamp jobs when threshold exceeded (default 4)
+    """
+    mb = df_footprint_bytes / 1e6
+    warn_mb = warn_mb or int(os.environ.get("FEATURES_PAIRWISE_WARN_MB", "800"))
+    clamp_jobs = int(os.environ.get("FEATURES_PAIRWISE_MAX_JOBS_ON_WARN", "4"))
+    if mb >= warn_mb:
+        print(f"  [pairwise][WARN] DataFrame footprint {mb:.1f} MB ≥ {warn_mb} MB; clamping jobs to {clamp_jobs}.")
+        return max(1, clamp_jobs), "clamped"
+    return max(1, default_jobs), "default"
+
+# joblib-cached wrapper that avoids pickling the heavy DataFrame
+@pair_mem.cache(ignore=["view_df", "pair_specs"])
+def _compute_pairwise_features_cached(target: str, bench: str, spec_version: str, data_hash: str, view_df, pair_specs):
+    return _compute_pairwise_features(target, bench, view_df, pair_specs)
 
 from ..config import settings
 from . import core as f
 from ..data.events import build_event_features  # daily EV_* features from your events.py
 from .complexity_engine import get_fast_complexity_engine, compute_complexity_feature
+try:  # pairwise helper safe imports
+    from .pairwise_utils import safe_rolling_corr, safe_rolling_cov, safe_zscore, safe_leadlag_corr  # type: ignore
+except Exception:  # fallback no-op stubs if import resolution lags
+    def safe_rolling_corr(a,b,window,min_periods):
+        return a.rolling(window, min_periods=min_periods).corr(b)
+    def safe_rolling_cov(a,b,window,min_periods):
+        return a.rolling(window, min_periods=min_periods).cov(b)
+    def safe_zscore(x,window,min_periods):
+        r = x.rolling(window, min_periods=min_periods)
+        mu = r.mean(); sd = r.std(ddof=1)
+        return (x - mu) / sd.replace(0, np.nan)
+    def safe_leadlag_corr(a,b,lags,window,min_periods):
+        best_abs=-np.inf; best=None; best_lag=0
+        for L in lags:
+            s2=b.shift(L)
+            corr=a.rolling(window, min_periods=min_periods).corr(s2)
+            cmax=np.nanmax(np.abs(corr.values))
+            if np.isfinite(cmax) and cmax>best_abs:
+                best_abs=float(cmax); best=corr; best_lag=L
+        return best_lag, best
 
 # Setup caching with improved configuration
 cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'cache', 'features')
@@ -241,6 +351,12 @@ FEAT: Dict[str, Callable[[pd.DataFrame, str], pd.Series]] = {
     "pos.oi_call_put_ratio":  lambda D,t: f.safe_div(_col(D,t,"OPEN_INT_TOTAL_CALL"), _col(D,t,"OPEN_INT_TOTAL_PUT")),
     "pos.oi_skew_z60":        lambda D,t: f.zscore_rolling(_oi_skew(D,t),60),
 
+    # L8: Advanced Options Features
+    "opt.skew_dynamics_21":   lambda D,t: f.skew_dynamics(_col(D,t,"CALL_IMP_VOL_30D"), _col(D,t,"PUT_IMP_VOL_30D"), 21),
+    "opt.flow_pressure_5":    lambda D,t: f.flow_pressure(_col(D,t,"OPEN_INT_TOTAL_CALL"), _col(D,t,"OPEN_INT_TOTAL_PUT"), 5),
+    "opt.congestion_dist_21": lambda D,t: f.congestion_distance(_col(D,t,"PX_LAST"), _col(D,t,"OPEN_INT_TOTAL_CALL"), 21),
+    "opt.iv_term_slope":      lambda D,t: f.iv_term_structure_slope(_col(D,t,"CALL_IMP_VOL_30D"), _col(D,t,"3MO_CALL_IMP_VOL")),
+
     # L5: Sentiment / Media
     "sent.tw_pub_z30":        lambda D,t: f.zscore_rolling(_col(D,t,"TWITTER_PUBLICATION_COUNT"),30),
     "sent.tw_avg_z30":        lambda D,t: f.zscore_rolling(_col(D,t,"TWITTER_SENTIMENT_DAILY_AVG"),30),
@@ -248,6 +364,15 @@ FEAT: Dict[str, Callable[[pd.DataFrame, str], pd.Series]] = {
     "sent.news_pub_z30":      lambda D,t: f.zscore_rolling(_col(D,t,"NEWS_PUBLICATION_COUNT"),30),
     "sent.news_heat_z21":     lambda D,t: f.zscore_rolling(_col(D,t,"NEWS_HEAT_READ_DMAX"),21),
     "sent.cn_avg_z60":        lambda D,t: f.zscore_rolling(_col(D,t,"CHINESE_NEWS_SENTMNT_DAILY_AVG"),60),
+
+    # L9: Advanced Sentiment Features
+    "sent.consensus_z30":     lambda D,t: f.zscore_rolling(f.sentiment_consensus([
+        _col(D,t,"TWITTER_SENTIMENT_DAILY_AVG"),
+        _col(D,t,"CHINESE_NEWS_SENTMNT_DAILY_AVG"),
+        _col(D,t,"NEWS_HEAT_READ_DMAX")
+    ]), 30),
+    "sent.burst_detect_21":   lambda D,t: f.sentiment_burst_detection(_col(D,t,"TWITTER_SENTIMENT_DAILY_AVG"), 21),
+    "sent.roc_5":             lambda D,t: f.sentiment_roc(_col(D,t,"TWITTER_SENTIMENT_DAILY_AVG"), 5),
 
     # L6: Cross-asset β & spreads - ENHANCED
     "x.beta_spy_63":          lambda D,t: f.rolling_beta(_ret1d(D,t), _ret1d(D, SPY if SPY in TICKS_ALL else SPX), 63),
@@ -267,25 +392,42 @@ FEAT: Dict[str, Callable[[pd.DataFrame, str], pd.Series]] = {
     #"cmplx.dfa_alpha_252":    lambda D,t: compute_complexity_feature(D, t, "cmplx.dfa_alpha_252"),
     #"cmplx.run_length_mean":  lambda D,t: compute_complexity_feature(D, t, "cmplx.run_length_mean"),
     #"cmplx.run_entropy":      lambda D,t: compute_complexity_feature(D, t, "cmplx.run_entropy"),
+
+    # L10: Advanced Macro Regime Features
+    "macro.trend_filter_20_50": lambda D,t: f.trend_filter(_col(D,t,"PX_LAST"), 20, 50),
+    "macro.momentum_regime_21": lambda D,t: f.momentum_regime(_ret1d(D,t), 21),
+    "macro.beta_conditioned_63": lambda D,t: f.beta_conditioned_return(_ret1d(D,t), _ret1d(D, SPY), 63),
 }
 
 
 # ----------------------
 # Pairwise vs benchmark - ENHANCED
 # ----------------------
-PAIR_SPECS: Dict[str, Callable[[pd.DataFrame, str, str], pd.Series]] = {
-    # Original features
-    "x.corr_fisher20_z60":    lambda D,a,b: f.zscore_rolling(f.rolling_corr_fisher(_ret1d(D,a), _ret1d(D,b),20)[1],60),
-    "x.corr_delta_20_60_z60": lambda D,a,b: f.zscore_rolling(
+def _pw_corr_fisher20_z60(D,a,b):
+    return f.zscore_rolling(f.rolling_corr_fisher(_ret1d(D,a), _ret1d(D,b),20)[1],60)
+def _pw_corr_delta_20_60_z60(D,a,b):
+    return f.zscore_rolling(
         f.rolling_corr_fisher(_ret1d(D,a), _ret1d(D,b),20)[1] - f.rolling_corr_fisher(_ret1d(D,a), _ret1d(D,b),60)[1],60
-    ),
-    "x.beta_60_z120":         lambda D,a,b: f.zscore_rolling(f.rolling_beta(_ret1d(D,a), _ret1d(D,b),60),120),
-    "x.corr_abs_21":          lambda D,a,b: f.corr_abs_to_abs(_ret1d(D,a), _ret1d(D,b),21),
-    
-    # New pairwise features
-    "x.partial_corr_21":      lambda D,a,b: _partial_correlation(D, a, b, 21),
-    "x.leadlag_best_5":       lambda D,a,b: f.max_leadlag_correlation(_ret1d(D,a), _ret1d(D,b), 21, 5),
-    "x.coint_resid_z_252":    lambda D,a,b: f.cointegration_residual_z(_col(D,a,"PX_LAST"), _col(D,b,"PX_LAST"), 252),
+    )
+def _pw_beta_60_z120(D,a,b):
+    return f.zscore_rolling(f.rolling_beta(_ret1d(D,a), _ret1d(D,b),60),120)
+def _pw_corr_abs_21(D,a,b):
+    return f.corr_abs_to_abs(_ret1d(D,a), _ret1d(D,b),21)
+def _pw_partial_corr_21(D,a,b):
+    return _partial_correlation(D,a,b,21)
+def _pw_leadlag_best_5(D,a,b):
+    return f.max_leadlag_correlation(_ret1d(D,a), _ret1d(D,b),21,5)
+def _pw_coint_resid_z_252(D,a,b):
+    return f.cointegration_residual_z(_col(D,a,"PX_LAST"), _col(D,b,"PX_LAST"),252)
+
+PAIR_SPECS: Dict[str, Callable[[pd.DataFrame, str, str], pd.Series]] = {
+    "x.corr_fisher20_z60": _pw_corr_fisher20_z60,
+    "x.corr_delta_20_60_z60": _pw_corr_delta_20_60_z60,
+    "x.beta_60_z120": _pw_beta_60_z120,
+    "x.corr_abs_21": _pw_corr_abs_21,
+    "x.partial_corr_21": _pw_partial_corr_21,
+    "x.leadlag_best_5": _pw_leadlag_best_5,
+    "x.coint_resid_z_252": _pw_coint_resid_z_252,
 }
 
 
@@ -308,8 +450,9 @@ def _partial_correlation(df: pd.DataFrame, asset: str, bench: str, window: int) 
     resid_asset = r_asset - beta_asset * r_sector
     resid_bench = r_bench - beta_bench * r_sector
     
-    # Correlation of residuals
-    return resid_asset.rolling(window).corr(resid_bench)
+    # Correlation of residuals (safe)
+    minp = int(os.environ.get("PAIRWISE_MIN_PERIODS", "20"))
+    return safe_rolling_corr(resid_asset, resid_bench, window, minp)
 
 
 # ----------------------
@@ -349,6 +492,11 @@ EV_INTERACT: Dict[str, Callable[[pd.DataFrame, pd.DataFrame, str], pd.Series]] =
     "ev.tail_carry":      lambda EV,D,t: EV["EV_after_surprise_z"].ewm(span=5, min_periods=2).mean(),
     "ev.infl_beta_gate":  lambda EV,D,t: EV["EV.bucket_inflation_surp"] * f.rolling_beta(_ret1d(D,t), f.pct_change_n(_col(D,DXY,"PX_LAST"),1),63),
     "ev.growth_rotation": lambda EV,D,t: EV["EV.bucket_growth_surp"] * ( f.pct_change_n(_col(D,"XLY US Equity","PX_LAST"),21) - f.pct_change_n(_col(D,"XLP US Equity","PX_LAST"),21) ),
+    
+    # Advanced Event Interactions
+    "ev.intensity_gated_mom": lambda EV,D,t: f.pct_change_n(_col(D,t,"PX_LAST"),21) * EV.get("EV_forward_calendar_heat_3", pd.Series(index=EV.index, dtype=float)),
+    "ev.regime_sensitivity":  lambda EV,D,t: EV.get("EV.bucket_divergence", pd.Series(index=EV.index, dtype=float)) * f.rolling_beta(_ret1d(D,t), _ret1d(D,SPY), 63),
+    "ev.vol_regime_gate":     lambda EV,D,t: f.pct_change_n(_col(D,t,"PX_LAST"),5) * (EV.get("EV_tail_intensity_21", pd.Series(index=EV.index, dtype=float)) > 0.5).astype(float),
 }
 
 
@@ -364,13 +512,39 @@ def _compute_single_asset_features(ticker: str, df: pd.DataFrame, feature_specs:
             print(f"[feat warn] {col}: {e}")
     return feats
 
+def _process_ticker_chunk(tickers_chunk: List[str], df: pd.DataFrame, feature_specs: Dict) -> Dict[str, pd.Series]:
+    """Process a chunk of tickers to reduce memory pressure."""
+    chunk_feats = {}
+    # Skip expensive features for speed
+    fast_specs = {k: v for k, v in feature_specs.items() 
+                  if not any(slow in k for slow in ['hurst', 'dfa_alpha_252', 'lz_complexity', 'run_entropy', 'sentiment_consensus'])}
+    
+    for ticker in tickers_chunk:
+        for name, fn in fast_specs.items():
+            col = f"{ticker}_{name}"
+            try:
+                s = pd.to_numeric(fn(df, ticker), errors="coerce").shift(1)
+                chunk_feats[col] = s
+            except Exception as e:
+                if getattr(settings.ga, "verbose", 0) >= 2:
+                    print(f"[feat warn] {col}: {e}")
+    return chunk_feats
+
 def _compute_pairwise_features(ticker: str, bench: str, df: pd.DataFrame, pair_specs: Dict) -> Dict[str, pd.Series]:
     """Compute pairwise features for a single asset - parallelized."""
+    # Safety defaults for rolling window operations
+    DEFAULT_MIN_PERIODS = 20
+    pd.options.mode.use_inf_as_na = True
     feats = {}
+    MINP = int(os.environ.get("PAIRWISE_MIN_PERIODS", str(DEFAULT_MIN_PERIODS)))
     for name, fn in pair_specs.items():
         col = f"{ticker}_{name}"
         try:
-            result = fn(df, ticker, bench)
+            # centralized min_periods injection (only if supported) 
+            # Skip expensive features during signal generation for speed
+            if any(expensive in name for expensive in ['coint_resid', 'leadlag', 'partial_corr']):
+                continue
+            result = call_pair_spec(fn, df, ticker, bench, min_periods=MINP)
             if isinstance(result, tuple):
                 s_corr, s_lag = result
                 feats[col] = pd.to_numeric(s_corr, errors="coerce").shift(1)
@@ -381,6 +555,28 @@ def _compute_pairwise_features(ticker: str, bench: str, df: pd.DataFrame, pair_s
         except Exception as e:
             print(f"[pair warn] {col}: {e}")
     return feats
+
+# --- Safe spec invocation shim (inject min_periods when supported) ---
+def call_with_supported_kwargs(func, /, *args, **kwargs):
+    """
+    Call func(*args, **filtered_kwargs) where filtered_kwargs are those present in func's signature.
+    Prevents passing unsupported keywords to legacy spec functions.
+    """
+    try:
+        sig = inspect.signature(func)
+        allowed = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        return func(*args, **allowed)
+    except Exception:
+        # if inspection fails, just call without kwargs
+        return func(*args)
+
+def call_pair_spec(func, *args, min_periods: int | None = None, **kwargs):
+    """
+    Call pairwise spec function, injecting min_periods if the function supports it.
+    """
+    if min_periods is not None:
+        kwargs = {**kwargs, "min_periods": min_periods}
+    return call_with_supported_kwargs(func, *args, **kwargs)
 
 def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -404,27 +600,108 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
         except Exception as e:
             print(f"[macro warn] {name}: {e}")
 
-    # ---- Single-asset features (parallelized) ----
-    print(f"  Computing single-asset features for {len(all_ticks)} tickers...")
-    single_asset_results = Parallel(n_jobs=-1, batch_size="auto")(
-        delayed(_compute_single_asset_features)(t, df, FEAT) for t in all_ticks
-    )
+    # ---- Chunked Single-asset processing ----
+    chunk_size = 10  # Process 10 tickers at a time
+    print(f"  Computing single-asset features for {len(all_ticks)} tickers in chunks...")
     
-    # Merge single-asset results
-    for result in single_asset_results:
-        feats.update(result)
+    for i in range(0, len(all_ticks), chunk_size):
+        chunk = all_ticks[i:i + chunk_size]
+        print(f"    Processing chunk {i//chunk_size + 1}/{(len(all_ticks) + chunk_size - 1)//chunk_size}: {chunk}")
+        chunk_results = _process_ticker_chunk(chunk, df, FEAT)
+        feats.update(chunk_results)
+        
+        # Force garbage collection between chunks
+        if i % (chunk_size * 3) == 0:
+            gc.collect()
+        if i % (chunk_size * 3) == 0:
+            gc.collect()
 
     # ---- Pairwise vs benchmark (parallelized) ----
     print(f"  Computing pairwise features for {len(tradables)} tickers...")
     pairwise_tickers = [t for t in tradables if t != bench]
+
+    # --- Pairwise config gates ---
+    disable_pairwise = bool(int(os.environ.get("FEATURES_DISABLE_PAIRWISE", "0")))
+    pairwise_cap = os.environ.get("FEATURES_PAIRWISE_MAX_TICKERS", "")
+    pairwise_cap = int(pairwise_cap) if str(pairwise_cap).isdigit() else None
+
+    if disable_pairwise:
+        print("  [pairwise] DISABLED via FEATURES_DISABLE_PAIRWISE=1")
+        pairwise_tickers = []
+    else:
+        if pairwise_cap is not None and pairwise_cap > 0:
+            if len(pairwise_tickers) > pairwise_cap:
+                print(f"  [pairwise] Limiting tickers from {len(pairwise_tickers)} -> {pairwise_cap}")
+                pairwise_tickers = pairwise_tickers[:pairwise_cap]
+        else:
+            # Auto-limit for performance: cap at 32 tickers for speed
+            if len(pairwise_tickers) > 32:
+                print(f"  [pairwise] Auto-limiting from {len(pairwise_tickers)} -> 32 for performance")
+                pairwise_tickers = pairwise_tickers[:32]
+    # --- Optional micro-profiler hook ---
+    def _maybe_profile_pairwise(enabled_env="FEATURES_PAIRWISE_PROFILE"):
+        try:
+            flag = os.environ.get(enabled_env, "0") == "1"
+            if not flag:
+                return contextlib.nullcontext()
+            import cProfile, pstats, io
+            class _Profiler:
+                def __enter__(self):
+                    self.pr = cProfile.Profile(); self.pr.enable(); return self
+                def __exit__(self, exc_type, exc, tb):
+                    self.pr.disable()
+                    s = io.StringIO()
+                    pstats.Stats(self.pr, stream=s).sort_stats("tottime").print_stats(25)
+                    print("\n[top25 pairwise profile]\n", s.getvalue())
+            return _Profiler()
+        except Exception:
+            return contextlib.nullcontext()
+
     if pairwise_tickers:
-        pairwise_results = Parallel(n_jobs=-1, batch_size="auto")(
-            delayed(_compute_pairwise_features)(t, bench, df, PAIR_SPECS) for t in pairwise_tickers
-        )
-        
-        # Merge pairwise results
-        for result in pairwise_results:
-            feats.update(result)
+        with _maybe_profile_pairwise():
+            #  Computing pairwise features for N tickers... (adaptive, streaming)
+            print(f"  Computing pairwise features for {len(pairwise_tickers)} tickers...")
+            t0_pair = time.time()
+            foot = _df_footprint_bytes(df)
+            use_threads = True  # heuristic: always threads to avoid pickling large df
+            max_jobs = int(os.environ.get("FEATURES_PAIRWISE_JOBS", "8"))
+            backend = "threading" if use_threads else "loky"
+
+            # slim the input DF to just what's needed by pairwise logic
+            view_df = _slim_view_for_pairwise(df, tickers=pairwise_tickers + [bench])
+            spec_version = os.environ.get("PAIRWISE_SPEC_VERSION", "v1")  # bump when you change specs
+
+            from joblib import Parallel as _P2, delayed as _d2
+            with suppress_pairwise_runtime_warnings():
+                if use_threads:
+                    # heartbeat progress controls
+                    _progress_ctr = count(start=1)
+                    _progress_every = int(os.environ.get("FEATURES_PAIRWISE_PROGRESS_EVERY", "10"))
+
+                    def _emit(target):
+                        dh = _data_hash_for_pair(view_df, target, bench)
+                        res = _compute_pairwise_features_cached(target, bench, spec_version, dh, view_df, PAIR_SPECS)
+                        feats.update(res)
+                        k = next(_progress_ctr)
+                        if k % _progress_every == 0:
+                            print(f"    [pairwise] completed {k}/{len(pairwise_tickers)}")
+
+                    n_jobs_raw = min(max_jobs, max(1, len(pairwise_tickers)))
+                    n_jobs, nj_note = decide_pairwise_jobs(foot, n_jobs_raw)
+                    _P2(n_jobs=n_jobs, backend=backend, batch_size="auto")(
+                        _d2(_emit)(t) for t in pairwise_tickers
+                    )
+                else:
+                    for t in pairwise_tickers:
+                        dh = _data_hash_for_pair(view_df, t, bench)
+                        res = _compute_pairwise_features_cached(t, bench, spec_version, dh, view_df, PAIR_SPECS)
+                        feats.update(res)
+
+            dt_pair = time.time() - t0_pair
+            try:
+                print(f"    Pairwise stage: backend={backend}, jobs={n_jobs if use_threads else 1}, df_footprint={foot/1e6:.1f} MB, elapsed={dt_pair:.1f}s")
+            except Exception:
+                pass
 
     # Complexity features are now computed via individual lambdas above
     # No bulk computation needed - handled by the fast engine on-demand
@@ -593,4 +870,67 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
     _sector_neutral_z("vol.rv_21", "sn.z_rv_21")
 
     print(f"Feature matrix complete: {X.shape[1]} features, {X.shape[0]} observations")
+    return X
+
+
+# =========================
+# Adaptive Feature Selection System
+# =========================
+class AdaptiveFeatureSelector:
+    def __init__(self, lookback: int = 252, min_correlation: float = 0.1):
+        self.lookback = lookback
+        self.min_correlation = min_correlation
+        self._feature_scores: Dict[str, float] = {}
+        
+    def score_features(self, feature_matrix: pd.DataFrame, target: pd.Series) -> Dict[str, float]:
+        """Score features based on rolling correlation with target."""
+        scores = {}
+        for col in feature_matrix.columns:
+            if col.startswith(('liquid_flag', 'opt_avail_flag')):
+                continue
+                
+            feat = feature_matrix[col].dropna()
+            if len(feat) < self.lookback // 2:
+                continue
+                
+            # Rolling correlation with target
+            corr = feat.rolling(self.lookback).corr(target.reindex(feat.index))
+            avg_abs_corr = corr.abs().mean()
+            
+            if pd.notna(avg_abs_corr):
+                scores[col] = avg_abs_corr
+        
+        return scores
+    
+    def select_features(self, feature_matrix: pd.DataFrame, target: pd.Series, 
+                       max_features: int = 200) -> List[str]:
+        """Select top features based on adaptive scoring."""
+        scores = self.score_features(feature_matrix, target)
+        
+        # Filter by minimum correlation
+        filtered_scores = {k: v for k, v in scores.items() if v >= self.min_correlation}
+        
+        # Sort by score and take top N
+        sorted_features = sorted(filtered_scores.items(), key=lambda x: x[1], reverse=True)
+        selected = [feat for feat, score in sorted_features[:max_features]]
+        
+        print(f"Selected {len(selected)} features (avg score: {np.mean([s for _, s in sorted_features[:max_features]]):.3f})")
+        return selected
+
+def build_adaptive_feature_matrix(df: pd.DataFrame, target: pd.Series = None) -> pd.DataFrame:
+    """Build feature matrix with adaptive selection if target provided."""
+    # Build full matrix first
+    X = build_feature_matrix(df)
+    
+    if target is not None:
+        selector = AdaptiveFeatureSelector()
+        selected_features = selector.select_features(X, target)
+        
+        # Keep gating flags regardless
+        gate_cols = [c for c in X.columns if 'flag' in c.lower()]
+        final_cols = list(set(selected_features + gate_cols))
+        
+        X = X[final_cols]
+        print(f"Adaptive selection reduced features from {len(X.columns)} to {len(final_cols)}")
+    
     return X

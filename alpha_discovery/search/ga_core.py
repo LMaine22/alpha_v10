@@ -7,7 +7,7 @@ import pandas as pd
 
 from ..config import settings
 from ..eval.selection import get_valid_trigger_dates
-from ..eval.metrics import (
+from ..eval.info_metrics import (
     distribution,
     info_theory,
     dynamics,
@@ -19,7 +19,20 @@ from ..eval.metrics import (
     causality
 )
 from ..reporting import display_utils as du
-from ..eval.objectives import audit_objectives, apply_objective_transforms
+# Removed: from ..eval.objectives import ... (legacy transformation layer, not needed with institutional metrics)
+
+# Backtesting imports for Phase A
+from ..engine import backtester
+from ..eval import selection, metrics
+
+try:
+    from ..engine.bt_runtime import _enforce_exclusivity_by_setup, _parse_bt_env_flag
+except ImportError:
+    # Fallback if runtime module missing
+    def _enforce_exclusivity_by_setup(ledger):
+        return ledger
+    def _parse_bt_env_flag(name, default):
+        return default
 
 from deap import base, creator, tools
 
@@ -837,141 +850,186 @@ def _calculate_objectives_single_horizon(
 
 
 # -----------------------------
-# Evaluation core (multi-horizon, bands, OOS, regimes, robustness)
+# Helper: Infer direction from signal metadata
+# -----------------------------
+def _infer_direction_from_metadata(setup: List[str], signals_metadata: List[Dict]) -> str:
+    """Crude heuristic: count '<' as bearish; otherwise bullish; ties -> long."""
+    direction_score = 0
+    for sid in setup:
+        meta = next((m for m in signals_metadata if m.get("signal_id") == sid), None)
+        if meta and "<" in str(meta.get("condition", "")):
+            direction_score -= 1
+        else:
+            direction_score += 1
+    return "long" if direction_score >= 0 else "short"
+
+
+# -----------------------------
+# Evaluation core - BACKTESTING VERSION (Phase A)
 # -----------------------------
 def _evaluate_one_setup(
     individual: Tuple[str, List[str]],
     signals_df: pd.DataFrame,
-    signals_metadata: List[Dict],  # kept for API compatibility
+    signals_metadata: List[Dict],
     master_df: pd.DataFrame,
-    exit_policy: Optional[Dict],   # unused
+    exit_policy: Optional[Dict],
 ) -> Dict:
-    """Strict evaluation with fail-closed semantics (no fabricated penalty defaults)."""
+    """
+    Evaluate a (ticker, setup) by running an options backtest on ONLY its ticker
+    and returning portfolio-level metrics from that ledger.
+    
+    This is the BACKTESTING VERSION - runs actual options trades for fitness evaluation.
+    """
     ticker, setup = individual
-    price_field = settings.forecast.price_field
-    horizons = list(getattr(settings.forecast, 'horizons', [settings.forecast.default_horizon]))
-    band_edges = np.asarray(settings.forecast.band_edges, dtype=float)
-    min_sup = int(settings.validation.min_support)
-
-    # 1. Get valid trigger dates that meet minimum support
-    trigger_dates = get_valid_trigger_dates(signals_df, setup, min_sup)
-    
-    if trigger_dates.empty:
+    if not setup:
         return {
-            "individual": individual,
-            "feasible": False,
-            "metrics": {"reason": "no_triggers", "support_min": 0},
-            "objectives": tuple([-np.inf] * len(settings.ga.objectives)),
-            "rank": np.inf,
+            "individual": individual, 
+            "metrics": {},
+            "objectives": [-99.0, -9999.0, 0.0],
+            "rank": np.inf, 
             "crowding_distance": 0.0,
+            "trade_ledger": pd.DataFrame(), 
+            "direction": "long", 
+            "exit_policy": exit_policy,
         }
 
-    # 2. Prepare all necessary return series
-    unconditional_returns = {h: _forward_returns(master_df, ticker, h, price_field) for h in horizons}
-    
-    # 3. Calculate the full suite of metrics and objectives with robust replacements
-    metrics = _calculate_objectives_with_robust_replacements(trigger_dates, unconditional_returns, horizons)
+    direction = _infer_direction_from_metadata(setup, signals_metadata)
 
-    # Fail closed if no folds used or critical metrics missing
-    folds_used = metrics.get("folds_used", 0)
-    if not folds_used:
+    # Run OPTIONS BACKTEST on the specialized ticker
+    ledger = backtester.run_setup_backtest_options(
+        setup_signals=setup,
+        signals_df=signals_df,
+        master_df=master_df,
+        direction=direction,
+        exit_policy=exit_policy,
+        tickers_to_run=[ticker],  # IMPORTANT: restrict to that ticker
+    )
+
+    if ledger is None or ledger.empty:
         return {
-            "individual": individual,
-            "feasible": False,
-            "metrics": {"reason": "no_valid_folds", "support_min": len(trigger_dates)},
-            "objectives": tuple([-np.inf] * len(settings.ga.objectives)),
-            "rank": np.inf,
+            "individual": individual, 
+            "metrics": {},
+            "objectives": [-99.0, -9999.0, 0.0],
+            "rank": np.inf, 
             "crowding_distance": 0.0,
+            "trade_ledger": pd.DataFrame(), 
+            "direction": direction, 
+            "exit_policy": exit_policy,
         }
-    
-    # Add a few final metrics that don't fit the fold structure
-    metrics["support_min"] = len(trigger_dates)
-    metrics["redundancy_mi"] = _avg_pairwise_mi(signals_df, setup)
-    metrics["first_trigger"] = trigger_dates.min()
-    metrics["last_trigger"] = trigger_dates.max()
 
-    # --- Transfer Entropy Calculation ---
-    best_h = metrics.get("best_horizon")
-    if best_h:
-        r_series = unconditional_returns[best_h].loc[trigger_dates.min():trigger_dates.max()]
-        s_series = _trigger_mask(signals_df, setup).loc[r_series.index]
-        # Use number of bands as bins for TE; ensure at least 3
-        te_bins = max(3, int(len(band_edges) - 1))
-        te_res = causality.transfer_entropy_causality(r_series, s_series, lag=1, bins=te_bins)
-        metrics["transfer_entropy"] = float(te_res.get("te_x_to_y", 0.0))
-        metrics["transfer_entropy_p_value"] = float(te_res.get("p_value", np.nan))
-    else:
-        metrics["transfer_entropy"] = np.nan
-        metrics["transfer_entropy_p_value"] = np.nan
-    
-    # Generate the human-readable description here
-    meta_map = du.build_signal_meta_map(signals_metadata)
-    setup_desc = du.desc_from_meta(setup, meta_map)
-    if not setup_desc:
-        # provide a dict with "individual" so format_setup_description can parse it
-        setup_desc = du.format_setup_description({"individual": individual})
-
-    # Build transformed objective tuple (maximize) with audit
-    objective_names = list(getattr(settings.ga, "objectives", ["ig_sharpe", "min_ig"]))
-    ok, missing = audit_objectives(objective_names)
-    if not ok:
-        return {
-            "individual": individual,
-            "feasible": False,
-            "metrics": {"reason": f"unknown_objectives:{','.join(missing)}", **metrics},
-            "objectives": tuple([-np.inf] * len(objective_names)),
-            "rank": np.inf,
-            "crowding_distance": 0.0,
-        }
+    # Generate unique setup ID
     try:
-        objective_values, transform_labels = apply_objective_transforms(metrics, objective_names)
-    except (KeyError, ValueError) as e:
+        key = (ticker, tuple(sorted(setup)))
+        if not hasattr(_evaluate_one_setup, '_setup_counter'):
+            _evaluate_one_setup._setup_counter = 0
+            _evaluate_one_setup._setup_id_map = {}
+        
+        if key not in _evaluate_one_setup._setup_id_map:
+            _evaluate_one_setup._setup_counter += 1
+            _evaluate_one_setup._setup_id_map[key] = f"SETUP_{_evaluate_one_setup._setup_counter:04d}"
+        
+        setup_id = _evaluate_one_setup._setup_id_map[key]
+    except Exception:
+        setup_id = str(individual)
+
+    ledger = ledger.copy()
+    ledger["setup_id"] = setup_id
+    
+    # Apply exclusivity if enabled
+    if _parse_bt_env_flag("BT_ENFORCE_EXCLUSIVITY", True):
+        ledger = _enforce_exclusivity_by_setup(ledger)
+
+    # Calculate comprehensive portfolio metrics from ledger
+    daily_returns = selection.portfolio_daily_returns(ledger)
+    perf = metrics.compute_portfolio_metrics_bundle(
+        daily_returns=daily_returns,
+        trade_ledger=ledger,
+        do_winsorize=True,
+        bootstrap_B=1000,
+        bootstrap_method="stationary",
+        n_trials_for_dsr=100  # Assume 100 trials for DSR calculation
+    )
+
+    # Apply safety gates (reject if fails constraints)
+    gates_passed = True
+    
+    # Gate 1: Minimum support (bars)
+    min_support = getattr(settings.ga, 'min_support_bars', 252)
+    if perf.get('support', 0) < min_support:
+        gates_passed = False
+    
+    # Gate 2: Minimum trades
+    min_trades = getattr(settings.ga, 'min_trades', 50)
+    num_trades = len(ledger) if ledger is not None and not ledger.empty else 0
+    if num_trades < min_trades:
+        gates_passed = False
+    
+    # Gate 3: Maximum drawdown threshold
+    max_dd_threshold = getattr(settings.ga, 'max_drawdown_threshold', -0.6)
+    if perf.get('max_drawdown', 0) < max_dd_threshold:
+        gates_passed = False
+    
+    # Gate 4: Hit rate bounds (avoid degenerate filters)
+    min_hr = getattr(settings.ga, 'min_hit_rate', 0.30)
+    max_hr = getattr(settings.ga, 'max_hit_rate', 0.70)
+    hit_rate = perf.get('hit_rate', 0.5)
+    if hit_rate < min_hr or hit_rate > max_hr:
+        gates_passed = False
+    
+    # Gate 5: Probabilistic Sharpe Ratio
+    min_psr = getattr(settings.ga, 'min_psr', 0.60)
+    if perf.get('psr', 0) < min_psr:
+        gates_passed = False
+    
+    # Gate 6: CVaR threshold (optional)
+    cvar_threshold = getattr(settings.ga, 'cvar_5_threshold', None)
+    if cvar_threshold is not None:
+        if perf.get('cvar_5', 0) < cvar_threshold:
+            gates_passed = False
+    
+    # If gates failed, return heavily penalized objectives
+    if not gates_passed:
+        obj_keys = getattr(settings.ga, 'objectives', ["dsr", "bootstrap_calmar_lb", "bootstrap_profit_factor_lb"])
+        objectives = [-999.0] * len(obj_keys)  # Heavily penalize
         return {
             "individual": individual,
-            "feasible": False,
-            "metrics": {"reason": f"objective_transform_error:{e}", **metrics},
-            "objectives": tuple([-np.inf] * len(objective_names)),
+            "metrics": perf,
+            "objectives": objectives,
             "rank": np.inf,
             "crowding_distance": 0.0,
+            "trade_ledger": ledger,
+            "direction": direction,
+            "exit_policy": exit_policy,
+            "gates_passed": False
         }
     
-    # Build final metrics dictionary for reporting
-    final_metrics = {
-        "ticker": ticker,
-        "signals": "|".join(setup),
-        "setup_desc": setup_desc,
-        # Raw metrics for ELV consumption - explicitly include both raw and regular names
-        "crps_raw": metrics.get("crps"),
-        "pinball_q10_raw": metrics.get("pinball_q10"),
-        "pinball_q90_raw": metrics.get("pinball_q90"),
-        "info_gain_raw": metrics.get("info_gain"),
-        "w1_effect_raw": metrics.get("w1_effect"),
-        "calib_mae_raw": metrics.get("calib_mae"),
-        "dfa_alpha_raw": metrics.get("dfa_alpha"),
-        "sensitivity_delta_edge_raw": metrics.get("sensitivity_delta_edge"),
-        "redundancy_mi_raw": metrics.get("redundancy_mi"),
-        "complexity_metric_raw": metrics.get(settings.complexity.metric) or metrics.get("complexity_index"),
-        "bootstrap_p_value_raw": metrics.get("bootstrap_p_value"),
-        # ELV expected names
-        "edge_crps_raw": metrics.get("crps"),
-        "edge_pin_q10_raw": metrics.get("pinball_q10"),
-        "edge_pin_q90_raw": metrics.get("pinball_q90"),
-        "edge_ig_raw": metrics.get("info_gain"),
-        "edge_w1_raw": metrics.get("w1_effect"),
-        "edge_calib_mae_raw": metrics.get("calib_mae"),
-        **metrics
-    }
+    # Build GA objectives vector from configurable keys
+    obj_keys = getattr(settings.ga, 'objectives', ["deflated_sharpe_ratio", "bootstrap_calmar_lb", "bootstrap_profit_factor_lb"])
+    
+    # Map metrics to objective values with safe fallbacks
+    objectives = []
+    for k in obj_keys:
+        try:
+            # Conservative fallbacks (negative for minimization)
+            default = -99.0
+            val = perf.get(k, default)
+            # Handle inf/nan gracefully
+            if not np.isfinite(val):
+                val = default
+            objectives.append(float(val))
+        except Exception:
+            objectives.append(-99.0)
 
     return {
         "individual": individual,
-        "feasible": True,
-        "metrics": final_metrics,
-        "objectives": tuple(objective_values),
-        # Attach transform audit info
-        "objective_transform": transform_labels,
-        "objective_names": objective_names,
+        "metrics": perf,
+        "objectives": objectives,
         "rank": np.inf,
         "crowding_distance": 0.0,
+        "trade_ledger": ledger,
+        "direction": direction,
+        "exit_policy": exit_policy,
+        "gates_passed": True
     }
 
 

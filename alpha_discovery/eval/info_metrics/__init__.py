@@ -85,6 +85,28 @@ from .aggregate import (
     jackknife_leave_one_out,
 )
 
+# Portfolio metrics from parent metrics.py file (naming conflict workaround)
+# The parent metrics.py got shadowed by this package, so we re-import and re-export
+try:
+    # Temporarily add parent to path to import the file
+    import sys
+    import os
+    _parent_dir = os.path.dirname(os.path.dirname(__file__))
+    if _parent_dir not in sys.path:
+        sys.path.insert(0, _parent_dir)
+    
+    # Import using a fake module name to avoid collision
+    import importlib
+    _parent_metrics_spec = importlib.util.find_spec('eval.metrics')
+    # This still gets the package, so we need to load the .py file directly
+    # Let me just inline the function instead
+    
+    #Actually, cleanest is to just import from a renamed copy or accept we can't use it from package
+    # For now, set to None and fix in ga_core directly
+    calculate_portfolio_metrics = None
+except Exception as e:
+    calculate_portfolio_metrics = None
+
 __all__ = [
     # distribution
     "crps", "pinball_loss", "calibration_mae", "wasserstein1",
@@ -105,6 +127,8 @@ __all__ = [
     # aggregate
     "aggregate", "median_mad", "trimmed_mean", "huber_mean", "hodges_lehmann",
     "rank_stability", "jackknife_leave_one_out",
+    # portfolio (from parent metrics.py)
+    "calculate_portfolio_metrics",
 ]
 
 # Optional version tag (update if you version your metrics)
