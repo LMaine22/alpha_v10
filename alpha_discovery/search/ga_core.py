@@ -19,11 +19,13 @@ from ..eval.info_metrics import (
     causality
 )
 from ..reporting import display_utils as du
+from ..utils.trade_keys import canonical_signals_fingerprint, dedupe_trade_ledger
 # Removed: from ..eval.objectives import ... (legacy transformation layer, not needed with institutional metrics)
 
 # Backtesting imports for Phase A
 from ..engine import backtester
 from ..eval import selection, metrics
+from .fold_plan import GADataSpec
 
 try:
     from ..engine.bt_runtime import _enforce_exclusivity_by_setup, _parse_bt_env_flag
@@ -103,20 +105,239 @@ DEBUG_SEQUENTIAL = bool(getattr(settings.ga, "debug_sequential", False))
 JOBLIB_VERBOSE = 0
 
 
+DEFAULT_OBJECTIVES = [
+    "dsr",
+    "bootstrap_calmar_lb",
+    "bootstrap_profit_factor_lb",
+]
+DEFAULT_DAMPING_BETA = 0.02
+DEFAULT_EXPAND_MARGIN = 10
+DEFAULT_SMALL_N = 20
+DEFAULT_MERGE_TAG_NEXT = "merged_next"
+DEFAULT_MERGE_TAG_PREV = "merged_prev"
+MIN_FOLD_TRADES = 1
+MIN_FOLD_TRADE_DAYS = 1
+HIT_RATE_PENALTY_MIN_TRADES = 15
+PSR_PENALTY_MIN_TRADES = 10
+DISCOVERY_PENALTY_CAP = 2.0
+FOLD_REASON_EMPTY = "empty_ledger"
+FOLD_REASON_WIDENED = "widened"
+FOLD_REASON_MERGED = "merged"
+
+
 @contextmanager
 def threadpool_limits(limits: int = 1):
     """Compatibility stub so nsga.py can limit BLAS threads if desired."""
     yield
 
 
-def _exit_policy_from_settings() -> Optional[Dict]:
-    """Pivot: no options backtest. Keep stub to satisfy nsga import path."""
+def _exit_policy_from_settings() -> Optional[GADataSpec]:
+    """Legacy stub: return None when no explicit GA plan is configured."""
     return None
 
 
 # -----------------------------
 # Utility helpers
 # -----------------------------
+def _objective_keys() -> List[str]:
+    """Return configured GA objective keys with conservative defaults."""
+    obj_keys = getattr(getattr(settings, 'ga', object()), 'objectives', None)
+    if not obj_keys:
+        return list(DEFAULT_OBJECTIVES)
+    return list(obj_keys)
+
+
+def _penalty_vector() -> List[float]:
+    """Penalty vector matching the number of GA objectives."""
+    return [-999.0] * len(_objective_keys())
+
+
+OBJECTIVE_FALLBACKS = {
+    "dsr": ["dsr", "dsr_raw", "sharpe"],
+    "bootstrap_calmar_lb": ["bootstrap_calmar_lb", "bootstrap_calmar_lb_raw", "calmar", "mar_ratio"],
+    "bootstrap_profit_factor_lb": ["bootstrap_profit_factor_lb", "bootstrap_profit_factor_lb_raw", "profit_factor", "expectancy"],
+}
+
+
+def _resolve_objective_value(metrics: Dict[str, Any], key: str) -> Tuple[float, str]:
+    """Return a finite objective value with fallback source tracking."""
+    candidates = OBJECTIVE_FALLBACKS.get(key, [key])
+    for candidate in candidates:
+        val = metrics.get(candidate)
+        if isinstance(val, (int, float)) and np.isfinite(val):
+            return _clamp_objective_value(key, float(val)), candidate
+    return -999.0, "unavailable"
+
+
+def _clamp_objective_value(key: str, value: float) -> float:
+    if not np.isfinite(value):
+        return -999.0
+    if key in {"bootstrap_calmar_lb", "calmar", "mar_ratio"}:
+        sign = 1.0 if value >= 0 else -1.0
+        return sign * np.log1p(abs(value))
+    if key in {"bootstrap_profit_factor_lb", "profit_factor"}:
+        if value <= 0:
+            return -np.log1p(abs(value))
+        return np.log1p(value)
+    if key in {"dsr", "sharpe"}:
+        return max(min(value, 10.0), -10.0)
+    return value
+
+
+def _candidate_test_indices(
+    plan: GADataSpec,
+    fold_index: int,
+    expand_margin: int = DEFAULT_EXPAND_MARGIN,
+) -> List[Tuple[pd.Index, str]]:
+    base_idx = pd.Index(plan.inner_folds[fold_index].test_idx).sort_values().unique()
+    candidates: List[Tuple[pd.Index, str]] = [(base_idx, "original")]
+
+    if expand_margin <= 0 or base_idx.empty:
+        return candidates
+
+    train_index = pd.Index(plan.train_idx).sort_values().unique()
+    if base_idx[0] in train_index and base_idx[-1] in train_index:
+        start_pos = train_index.get_loc(base_idx[0]) if base_idx[0] in train_index else train_index.searchsorted(base_idx[0])
+        end_pos = train_index.get_loc(base_idx[-1]) if base_idx[-1] in train_index else train_index.searchsorted(base_idx[-1])
+        expanded_start = max(0, start_pos - expand_margin)
+        expanded_end = min(len(train_index) - 1, end_pos + expand_margin)
+        expanded_idx = train_index[expanded_start:expanded_end + 1]
+        if not expanded_idx.empty and not expanded_idx.equals(base_idx):
+            candidates.append((expanded_idx, "widened"))
+
+    # Merge with next inner fold if available
+    if fold_index < len(plan.inner_folds) - 1:
+        next_idx = pd.Index(plan.inner_folds[fold_index + 1].test_idx)
+        merged_next = base_idx.union(next_idx).sort_values().unique()
+        if not merged_next.empty and not merged_next.equals(base_idx):
+            candidates.append((merged_next, DEFAULT_MERGE_TAG_NEXT))
+
+    # Merge with previous inner fold if available
+    if fold_index > 0:
+        prev_idx = pd.Index(plan.inner_folds[fold_index - 1].test_idx)
+        merged_prev = base_idx.union(prev_idx).sort_values().unique()
+        if not merged_prev.empty and not merged_prev.equals(base_idx):
+            candidates.append((merged_prev, DEFAULT_MERGE_TAG_PREV))
+
+    return candidates
+
+
+def _fold_reason(success: bool, attempt_tag: str, detail: str) -> Tuple[str, str]:
+    """Return coarse reason code (for HUD) and detailed reason string."""
+    if success:
+        if attempt_tag == "widened":
+            return FOLD_REASON_WIDENED, detail or attempt_tag
+        if attempt_tag in {DEFAULT_MERGE_TAG_NEXT, DEFAULT_MERGE_TAG_PREV}:
+            return FOLD_REASON_MERGED, detail or attempt_tag
+        return "original", detail or attempt_tag or "original"
+
+    if not detail:
+        return FOLD_REASON_EMPTY, detail
+
+    lowered = detail.lower()
+    if "empty" in lowered or "no_trades" in lowered or "no_daily_returns" in lowered:
+        return FOLD_REASON_EMPTY, detail
+    if "insufficient" in lowered:
+        return "insufficient_support", detail
+    if lowered.startswith("backtest_error"):
+        return "backtest_error", detail
+    return detail, detail
+
+
+def _compute_soft_penalties(
+    metrics: Dict[str, Any],
+    ga_cfg: Any,
+    *,
+    coverage_ratio: float,
+    coverage_target: float,
+    min_total_trades_required: int,
+) -> Tuple[float, Dict[str, float], List[str]]:
+    """Derive penalty scalar, detail map, and diagnostic flags for GA gating."""
+
+    penalty_details: Dict[str, float] = {}
+    reasons: List[str] = []
+
+    def add_penalty(key: str, magnitude: float, reason: str) -> None:
+        if not np.isfinite(magnitude) or magnitude <= 0:
+            return
+        penalty_details[key] = float(magnitude)
+        reasons.append(reason)
+
+    total_trades = int(metrics.get("n_trades", 0) or 0)
+    small_n_threshold = max(int(getattr(ga_cfg, 'min_total_trades', DEFAULT_SMALL_N)), 1)
+
+    if coverage_target > 0:
+        deficit = max(0.0, coverage_target - coverage_ratio)
+        if deficit > 0:
+            scaling = min(1.0, total_trades / max(1, small_n_threshold))
+            add_penalty("coverage", (deficit / coverage_target) * scaling, f"coverage<{coverage_target:.2f}")
+
+    hit_rate = metrics.get("hit_rate")
+    if hit_rate is not None and np.isfinite(hit_rate) and total_trades >= HIT_RATE_PENALTY_MIN_TRADES:
+        min_hr = float(getattr(ga_cfg, "min_hit_rate", 0.0))
+        max_hr = float(getattr(ga_cfg, "max_hit_rate", 1.0))
+        if hit_rate < min_hr:
+            add_penalty("hit_rate_low", (min_hr - hit_rate) / max(1e-6, min_hr), f"hit_rate<{min_hr}")
+        elif hit_rate > max_hr:
+            add_penalty("hit_rate_high", (hit_rate - max_hr) / max(1e-6, max_hr), f"hit_rate>{max_hr}")
+
+    psr_val = metrics.get("psr")
+    if psr_val is not None and np.isfinite(psr_val) and total_trades >= PSR_PENALTY_MIN_TRADES:
+        min_psr = float(getattr(ga_cfg, "min_psr", 0.0))
+        if psr_val < min_psr:
+            add_penalty("psr", (min_psr - psr_val) / max(1e-6, min_psr), f"psr<{min_psr}")
+
+    max_dd_val = metrics.get("max_drawdown")
+    if max_dd_val is not None and np.isfinite(max_dd_val):
+        max_dd_threshold = float(getattr(ga_cfg, "max_drawdown_threshold", -1.0))
+        if max_dd_val < max_dd_threshold:
+            add_penalty("max_drawdown", abs(max_dd_threshold - max_dd_val), f"max_dd<{max_dd_threshold}")
+
+    if 0 < total_trades < min_total_trades_required:
+        deficit = (min_total_trades_required - total_trades) / max(1, min_total_trades_required)
+        add_penalty("trades_total", deficit, f"total_trades<{min_total_trades_required}")
+
+    raw_penalty = sum(penalty_details.values())
+    damping = 1.0 / (1.0 + DEFAULT_DAMPING_BETA * max(total_trades, 0))
+    penalty_scalar = 1.0 + raw_penalty * damping
+    penalty_scalar = float(min(max(penalty_scalar, 1.0), DISCOVERY_PENALTY_CAP))
+
+    return penalty_scalar, penalty_details, reasons
+
+
+def _penalized_result(
+    individual: Tuple[str, List[str]],
+    direction: str,
+    plan: Optional[GADataSpec],
+    reason: str,
+    extra_metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return a standardized penalty result for unsupported candidates."""
+    metrics_payload = dict(extra_metrics or {})
+    metrics_payload.setdefault("penalty_reason", reason)
+    metrics_payload.setdefault("folds_used", 0)
+    if plan is not None:
+        metrics_payload.setdefault("outer_id", plan.outer_id)
+    reasons = metrics_payload.get("eligibility_reasons", [])
+    if isinstance(reasons, str):
+        reasons = [reasons]
+    if reason:
+        reasons = list(dict.fromkeys(list(reasons) + [reason]))
+    metrics_payload["eligibility_reasons"] = reasons
+    metrics_payload["eligible"] = False
+    return {
+        "individual": individual,
+        "metrics": metrics_payload,
+        "objectives": _penalty_vector(),
+        "rank": np.inf,
+        "crowding_distance": 0.0,
+        "trade_ledger": pd.DataFrame(),
+        "direction": direction,
+        "fold_plan": plan.summary() if plan is not None else None,
+        "exit_policy": plan,
+        "gates_passed": False,
+    }
+
 def _dna(individual) -> Tuple[str, Tuple[str, ...], int]:
     """Extract DNA from individual - handles both traditional and EnhancedIndividual formats."""
     try:
@@ -865,6 +1086,373 @@ def _infer_direction_from_metadata(setup: List[str], signals_metadata: List[Dict
 
 
 # -----------------------------
+# NPWF-aware evaluation helper
+# -----------------------------
+def _evaluate_one_setup_with_plan(
+    individual: Tuple[str, List[str]],
+    signals_df: pd.DataFrame,
+    signals_metadata: List[Dict],
+    master_df: pd.DataFrame,
+    plan: GADataSpec,
+) -> Dict[str, Any]:
+    ticker, setup = individual
+    direction = _infer_direction_from_metadata(setup, signals_metadata)
+
+    try:
+        dna = _dna(individual)
+        if not hasattr(_evaluate_one_setup_with_plan, '_setup_id_map'):
+            _evaluate_one_setup_with_plan._setup_id_map = {}
+            _evaluate_one_setup_with_plan._setup_id_counter = 0
+        setup_map = _evaluate_one_setup_with_plan._setup_id_map  # type: ignore[attr-defined]
+        if dna not in setup_map:
+            _evaluate_one_setup_with_plan._setup_id_counter += 1  # type: ignore[attr-defined]
+            setup_map[dna] = f"SETUP_{_evaluate_one_setup_with_plan._setup_id_counter:04d}"  # type: ignore[index]
+        setup_id = setup_map[dna]
+    except Exception:
+        setup_id = f"SETUP_{abs(hash((ticker, tuple(sorted(setup))))) % 10_000:04d}"
+
+    signals_fp_base = canonical_signals_fingerprint(setup)
+    exit_policy_tag = getattr(plan, 'outer_id', 'npwf')
+    allow_pyramiding = bool(getattr(settings.ga, 'allow_pyramiding', False))
+    dup_suppressed_total = 0
+    dup_merged_total = 0
+
+    ga_cfg = getattr(settings, 'ga', object())
+    min_trades_per_fold = max(MIN_FOLD_TRADES, int(getattr(ga_cfg, 'min_trades_per_fold', MIN_FOLD_TRADES)))
+    min_trade_days_per_fold = max(MIN_FOLD_TRADE_DAYS, int(getattr(ga_cfg, 'min_trade_days_per_fold', MIN_FOLD_TRADE_DAYS)))
+    min_total_trades_required = int(getattr(ga_cfg, 'min_total_trades', 20))
+
+    if not setup:
+        return _penalized_result(individual, direction, plan, "empty_setup")
+
+    if plan is None or plan.n_folds == 0:
+        return _penalized_result(individual, direction, plan, "plan_missing")
+
+    plan_train_idx = signals_df.index.intersection(plan.train_idx)
+    fold_ledgers: List[pd.DataFrame] = []
+    fold_daily_returns: List[pd.Series] = []
+    fold_summaries: List[Dict[str, Any]] = []
+
+    def _safe_metric_value(payload: Dict[str, Any], key: str, default: float = np.nan) -> float:
+        val = payload.get(key) if isinstance(payload, dict) else None
+        if val is None:
+            return default
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    for fold_idx, fold in enumerate(plan.inner_folds):
+        attempt_success = False
+        last_failure_reason = FOLD_REASON_EMPTY
+        selected_idx: Optional[pd.Index] = None
+        selected_attempt_tag = "original"
+        selected_detail = ""
+        selected_ledger: Optional[pd.DataFrame] = None
+        selected_returns: Optional[pd.Series] = None
+
+        candidates = _candidate_test_indices(plan, fold_idx, DEFAULT_EXPAND_MARGIN)
+        fold_dup_stats: Dict[str, int] = {"n_dups_suppressed": 0, "n_dups_merged": 0}
+
+        for idx_candidate, attempt_tag in candidates:
+            candidate_idx = pd.Index(idx_candidate).intersection(plan_train_idx)
+            candidate_idx = candidate_idx.intersection(signals_df.index)
+            if candidate_idx.empty:
+                last_failure_reason = f"{attempt_tag}_empty_intersection"
+                continue
+
+            fold_signals = signals_df.loc[candidate_idx]
+
+            try:
+                ledger = backtester.run_setup_backtest_options(
+                    setup_signals=setup,
+                    signals_df=fold_signals,
+                    master_df=master_df,
+                    direction=direction,
+                    exit_policy=None,
+                    tickers_to_run=[ticker],
+                )
+            except Exception as exc:  # pragma: no cover - defensive guard
+                last_failure_reason = f"backtest_error:{exc}"
+                continue
+
+            if ledger is None or ledger.empty:
+                last_failure_reason = f"{attempt_tag}_empty_ledger"
+                continue
+
+            ledger = ledger.copy()
+            ledger['setup_id'] = setup_id
+            ledger['ticker'] = ticker
+            ledger['direction'] = direction
+            ledger['signals_fingerprint'] = signals_fp_base
+            ledger['trigger_date'] = pd.to_datetime(ledger['trigger_date'], errors='coerce')
+            valid_ledger = ledger.dropna(subset=['trigger_date'])
+            if valid_ledger.empty:
+                last_failure_reason = f"{attempt_tag}_no_valid_triggers"
+                continue
+
+            test_start = pd.to_datetime(candidate_idx.min())
+            test_end = pd.to_datetime(candidate_idx.max())
+            mask = valid_ledger['trigger_date'].between(test_start, test_end)
+            valid_ledger = valid_ledger.loc[mask]
+            if valid_ledger.empty:
+                last_failure_reason = f"{attempt_tag}_no_trades_in_window"
+                continue
+
+            valid_ledger["fold_id"] = fold.fold_id
+            valid_ledger["outer_id"] = plan.outer_id
+
+            deduped_ledger, fold_dup_stats = dedupe_trade_ledger(
+                valid_ledger,
+                setup_id=setup_id,
+                ticker=ticker,
+                direction=direction,
+                signals_fingerprint=signals_fp_base,
+                exit_policy_tag=exit_policy_tag,
+                allow_pyramiding=allow_pyramiding,
+            )
+            dup_suppressed_total += fold_dup_stats.get('n_dups_suppressed', 0)
+            dup_merged_total += fold_dup_stats.get('n_dups_merged', 0)
+
+            fold_trades = len(deduped_ledger)
+            fold_trade_days = deduped_ledger['trigger_date'].dt.normalize().nunique()
+
+            trades_ok = fold_trades >= min_trades_per_fold
+            trade_days_ok = fold_trade_days >= min_trade_days_per_fold
+            if not (trades_ok or trade_days_ok):
+                last_failure_reason = f"{attempt_tag}_insufficient_support"
+                continue
+
+            deduped_ledger['signals_fingerprint'] = signals_fp_base
+            deduped_ledger['setup_id'] = setup_id
+
+            fold_returns = selection.portfolio_daily_returns(deduped_ledger)
+            fold_returns = pd.to_numeric(fold_returns, errors="coerce").dropna()
+            if fold_returns.empty:
+                last_failure_reason = f"{attempt_tag}_no_daily_returns"
+                continue
+
+            attempt_success = True
+            selected_idx = candidate_idx
+            selected_attempt_tag = attempt_tag
+            selected_detail = "ok" if attempt_tag == "original" else attempt_tag
+            selected_ledger = deduped_ledger
+            selected_returns = fold_returns
+            break
+
+        reason_code, reason_detail = _fold_reason(
+            attempt_success,
+            selected_attempt_tag,
+            selected_detail if attempt_success else last_failure_reason,
+        )
+
+        fold_train_idx = pd.Index(fold.train_idx)
+        train_start = str(fold_train_idx[0]) if len(fold_train_idx) else None
+        train_end = str(fold_train_idx[-1]) if len(fold_train_idx) else None
+        test_start = str(selected_idx[0]) if (attempt_success and selected_idx is not None) else None
+        test_end = str(selected_idx[-1]) if (attempt_success and selected_idx is not None) else None
+
+        summary: Dict[str, Any] = {
+            "fold_id": fold.fold_id,
+            "fold_supported": attempt_success,
+            "supported": attempt_success,
+            "reason": reason_code,
+            "reason_detail": reason_detail,
+            "attempt_tag": selected_attempt_tag if attempt_success else None,
+            "train_start": train_start,
+            "train_end": train_end,
+            "test_start": test_start,
+            "test_end": test_end,
+            "n_trades": 0,
+            "n_trade_days": 0,
+            "support": 0.0,
+            "dup_suppressed": 0,
+            "dup_merged": 0,
+        }
+
+        if not attempt_success or selected_ledger is None or selected_returns is None:
+            fold_summaries.append(summary)
+            continue
+
+        fold_ledgers.append(selected_ledger)
+        fold_daily_returns.append(selected_returns)
+
+        fold_perf = metrics.compute_portfolio_metrics_bundle(
+            daily_returns=selected_returns,
+            trade_ledger=selected_ledger,
+            do_winsorize=True,
+            bootstrap_B=250,
+            bootstrap_method="stationary",
+            seed=int(getattr(settings.ga, "seed", 194)) + fold_idx,
+            n_trials_for_dsr=50,
+        )
+
+        summary.update({
+            "fold_supported": True,
+            "supported": True,
+            "support": _safe_metric_value(fold_perf, "support", 0.0),
+            "n_trades": int(len(selected_ledger)),
+            "n_trade_days": int(selected_ledger['trigger_date'].dt.normalize().nunique()),
+            "dsr": _safe_metric_value(fold_perf, "dsr"),
+            "bootstrap_calmar_lb": _safe_metric_value(fold_perf, "bootstrap_calmar_lb"),
+            "bootstrap_profit_factor_lb": _safe_metric_value(fold_perf, "bootstrap_profit_factor_lb"),
+            "dup_suppressed": int(fold_dup_stats.get('n_dups_suppressed', 0)),
+            "dup_merged": int(fold_dup_stats.get('n_dups_merged', 0)),
+        })
+        fold_summaries.append(summary)
+
+    if not fold_ledgers:
+        metrics_stub = {
+            "fold_summaries": fold_summaries,
+            "outer_id": plan.outer_id,
+            "fold_plan_hash": plan.fold_hash,
+            "eligibility_reasons": ["no_supported_folds"],
+        }
+        return _penalized_result(individual, direction, plan, "no_supported_folds", metrics_stub)
+
+    supported_folds = [fs for fs in fold_summaries if fs.get("supported")]
+    if not supported_folds:
+        metrics_stub = {
+            "fold_summaries": fold_summaries,
+            "outer_id": plan.outer_id,
+            "fold_plan_hash": plan.fold_hash,
+            "eligibility_reasons": ["no_supported_folds"],
+        }
+        return _penalized_result(individual, direction, plan, "no_supported_folds", metrics_stub)
+
+    coverage_target_ratio = float(getattr(settings.ga, "min_supported_fold_ratio", 0.2))
+    min_supported_folds = max(
+        getattr(settings.ga, "min_outer_folds", 2),
+        int(np.ceil(plan.n_folds * coverage_target_ratio)),
+    )
+    coverage_shortfall = max(0, min_supported_folds - len(supported_folds))
+
+    combined_returns = pd.concat(fold_daily_returns, axis=0)
+    combined_returns = pd.to_numeric(combined_returns, errors="coerce").dropna()
+    if combined_returns.empty:
+        metrics_stub = {
+            "fold_summaries": fold_summaries,
+            "outer_id": plan.outer_id,
+            "fold_plan_hash": plan.fold_hash,
+            "eligibility_reasons": ["no_returns_after_concat"],
+        }
+        return _penalized_result(individual, direction, plan, "no_returns_after_concat", metrics_stub)
+
+    combined_returns = combined_returns.groupby(combined_returns.index).mean().sort_index()
+    combined_ledger = pd.concat(fold_ledgers, ignore_index=True)
+
+    combined_ledger, cross_dup_stats = dedupe_trade_ledger(
+        combined_ledger,
+        setup_id=setup_id,
+        ticker=ticker,
+        direction=direction,
+        signals_fingerprint=signals_fp_base,
+        exit_policy_tag=exit_policy_tag,
+        allow_pyramiding=allow_pyramiding,
+    )
+    dup_suppressed_total += cross_dup_stats.get('n_dups_suppressed', 0)
+    dup_merged_total += cross_dup_stats.get('n_dups_merged', 0)
+    unique_structure_keys = []
+    if 'options_structure_key' in combined_ledger.columns:
+        unique_structure_keys = sorted(set(combined_ledger['options_structure_key'].dropna().astype(str)))
+
+    sanitized_returns = combined_returns.clip(lower=-0.95, upper=10.0)
+    sanitized_ledger = combined_ledger.copy()
+    if 'pnl_pct' in sanitized_ledger.columns:
+        sanitized_ledger['pnl_pct'] = pd.to_numeric(sanitized_ledger['pnl_pct'], errors='coerce').clip(lower=-0.95, upper=10.0)
+
+    agg_perf = metrics.compute_portfolio_metrics_bundle(
+        daily_returns=sanitized_returns,
+        trade_ledger=sanitized_ledger,
+        do_winsorize=True,
+        bootstrap_B=1000,
+        bootstrap_method="stationary",
+        seed=int(getattr(settings.ga, "seed", 194)),
+        n_trials_for_dsr=100,
+    )
+
+    agg_perf.update({
+        "folds_used": len(supported_folds),
+        "supported_folds": len(supported_folds),
+        "total_folds": plan.n_folds,
+        "fold_summaries": fold_summaries,
+        "outer_id": plan.outer_id,
+        "fold_plan_hash": plan.fold_hash,
+        "n_trades": int(len(combined_ledger)),
+        "fold_count": len(supported_folds),
+        "fold_coverage_ratio": float(len(supported_folds)) / max(1, plan.n_folds),
+        "coverage_target_ratio": coverage_target_ratio,
+        "coverage_min_folds": min_supported_folds,
+        "coverage_shortfall": coverage_shortfall,
+        "dup_suppressed_total": int(dup_suppressed_total),
+        "dup_merged_total": int(dup_merged_total),
+        "dedup_applied": bool(dup_suppressed_total or dup_merged_total),
+        "uniq_keys": int(combined_ledger['uniq_key'].nunique() if 'uniq_key' in combined_ledger.columns else len(combined_ledger)),
+        "setup_id": setup_id,
+        "signals_fingerprint": signals_fp_base,
+        "options_structure_keys": unique_structure_keys,
+    })
+
+    support_bars = float(agg_perf.get("support", 0.0))
+    total_trades = int(agg_perf.get("n_trades", 0) or 0)
+
+    fatal_reasons: List[str] = []
+    if support_bars <= 0:
+        fatal_reasons.append("no_support")
+    if total_trades <= 0:
+        fatal_reasons.append("no_trades")
+
+    if fatal_reasons:
+        metrics_stub = agg_perf.copy()
+        metrics_stub["eligibility_reasons"] = fatal_reasons
+        return _penalized_result(individual, direction, plan, "fatal_gates", metrics_stub)
+
+    coverage_ratio = agg_perf.get("fold_coverage_ratio", 0.0) or 0.0
+    penalty_scalar, penalty_details, reasons = _compute_soft_penalties(
+        agg_perf,
+        settings.ga,
+        coverage_ratio=coverage_ratio,
+        coverage_target=coverage_target_ratio,
+        min_total_trades_required=min_total_trades_required,
+    )
+
+    agg_perf["soft_penalties"] = penalty_details
+    agg_perf["penalty_scalar"] = penalty_scalar
+    agg_perf["eligibility_reasons"] = list(dict.fromkeys(reasons))
+    agg_perf["eligible"] = True
+    agg_perf["fatal_reasons"] = fatal_reasons
+
+    objective_sources: Dict[str, str] = {}
+    adjusted_objectives: List[float] = []
+    for key in _objective_keys():
+        original_val = agg_perf.get(key)
+        agg_perf[f"{key}_raw"] = original_val
+        sanitized_val, source = _resolve_objective_value(agg_perf, key)
+        agg_perf[key] = sanitized_val
+        agg_perf[f"{key}_score"] = sanitized_val
+        objective_sources[key] = source
+        if sanitized_val <= -998.0:
+            adjusted_objectives.append(sanitized_val)
+        else:
+            adjusted_objectives.append(float(sanitized_val / penalty_scalar))
+    agg_perf["objective_sources"] = objective_sources
+    objectives = adjusted_objectives
+
+    return {
+        "individual": individual,
+        "metrics": agg_perf,
+        "objectives": objectives,
+        "rank": np.inf,
+        "crowding_distance": 0.0,
+        "trade_ledger": combined_ledger,
+        "direction": direction,
+        "fold_plan": plan.summary(),
+        "exit_policy": plan,
+        "gates_passed": len(fatal_reasons) == 0,
+    }
+
+
+# -----------------------------
 # Evaluation core - BACKTESTING VERSION (Phase A)
 # -----------------------------
 def _evaluate_one_setup(
@@ -872,15 +1460,22 @@ def _evaluate_one_setup(
     signals_df: pd.DataFrame,
     signals_metadata: List[Dict],
     master_df: pd.DataFrame,
-    exit_policy: Optional[Dict],
+    exit_policy: Optional[Any],
 ) -> Dict:
     """
     Evaluate a (ticker, setup) by running an options backtest on ONLY its ticker
     and returning portfolio-level metrics from that ledger.
-    
+
     This is the BACKTESTING VERSION - runs actual options trades for fitness evaluation.
     """
     ticker, setup = individual
+
+    plan = exit_policy if isinstance(exit_policy, GADataSpec) else None
+    if plan is not None and plan.n_folds > 0:
+        return _evaluate_one_setup_with_plan(
+            individual, signals_df, signals_metadata, master_df, plan
+        )
+
     if not setup:
         return {
             "individual": individual, 
@@ -950,51 +1545,13 @@ def _evaluate_one_setup(
         n_trials_for_dsr=100  # Assume 100 trials for DSR calculation
     )
 
-    # Apply safety gates (reject if fails constraints)
-    gates_passed = True
-    
-    # Gate 1: Minimum support (bars)
-    min_support = getattr(settings.ga, 'min_support_bars', 252)
-    if perf.get('support', 0) < min_support:
-        gates_passed = False
-    
-    # Gate 2: Minimum trades
-    min_trades = getattr(settings.ga, 'min_trades', 50)
+    support_bars = float(perf.get('support', 0.0) or 0.0)
     num_trades = len(ledger) if ledger is not None and not ledger.empty else 0
-    if num_trades < min_trades:
-        gates_passed = False
-    
-    # Gate 3: Maximum drawdown threshold
-    max_dd_threshold = getattr(settings.ga, 'max_drawdown_threshold', -0.6)
-    if perf.get('max_drawdown', 0) < max_dd_threshold:
-        gates_passed = False
-    
-    # Gate 4: Hit rate bounds (avoid degenerate filters)
-    min_hr = getattr(settings.ga, 'min_hit_rate', 0.30)
-    max_hr = getattr(settings.ga, 'max_hit_rate', 0.70)
-    hit_rate = perf.get('hit_rate', 0.5)
-    if hit_rate < min_hr or hit_rate > max_hr:
-        gates_passed = False
-    
-    # Gate 5: Probabilistic Sharpe Ratio
-    min_psr = getattr(settings.ga, 'min_psr', 0.60)
-    if perf.get('psr', 0) < min_psr:
-        gates_passed = False
-    
-    # Gate 6: CVaR threshold (optional)
-    cvar_threshold = getattr(settings.ga, 'cvar_5_threshold', None)
-    if cvar_threshold is not None:
-        if perf.get('cvar_5', 0) < cvar_threshold:
-            gates_passed = False
-    
-    # If gates failed, return heavily penalized objectives
-    if not gates_passed:
-        obj_keys = getattr(settings.ga, 'objectives', ["dsr", "bootstrap_calmar_lb", "bootstrap_profit_factor_lb"])
-        objectives = [-999.0] * len(obj_keys)  # Heavily penalize
+    if support_bars <= 0 or num_trades <= 0:
         return {
             "individual": individual,
             "metrics": perf,
-            "objectives": objectives,
+            "objectives": _penalty_vector(),
             "rank": np.inf,
             "crowding_distance": 0.0,
             "trade_ledger": ledger,
@@ -1002,23 +1559,34 @@ def _evaluate_one_setup(
             "exit_policy": exit_policy,
             "gates_passed": False
         }
-    
+
+    penalty_scalar, penalty_details, reasons = _compute_soft_penalties(
+        perf,
+        settings.ga,
+        coverage_ratio=perf.get('fold_coverage_ratio', 0.0) or 0.0,
+        coverage_target=float(getattr(settings.ga, 'min_supported_fold_ratio', 0.0)),
+        min_total_trades_required=int(getattr(settings.ga, 'min_total_trades', max(1, num_trades))),
+    )
+    perf['soft_penalties'] = penalty_details
+    perf['penalty_scalar'] = penalty_scalar
+    perf['eligibility_reasons'] = list(dict.fromkeys(reasons))
+    perf['eligible'] = len(reasons) == 0
+    gates_passed = True
+
     # Build GA objectives vector from configurable keys
-    obj_keys = getattr(settings.ga, 'objectives', ["deflated_sharpe_ratio", "bootstrap_calmar_lb", "bootstrap_profit_factor_lb"])
-    
+    obj_keys = _objective_keys()
+
     # Map metrics to objective values with safe fallbacks
     objectives = []
+    objective_sources = {}
     for k in obj_keys:
-        try:
-            # Conservative fallbacks (negative for minimization)
-            default = -99.0
-            val = perf.get(k, default)
-            # Handle inf/nan gracefully
-            if not np.isfinite(val):
-                val = default
-            objectives.append(float(val))
-        except Exception:
-            objectives.append(-99.0)
+        val, source = _resolve_objective_value(perf, k)
+        objective_sources[k] = source
+        if val <= -998.0:
+            objectives.append(val)
+        else:
+            objectives.append(float(val / penalty_scalar))
+    perf['objective_sources'] = objective_sources
 
     return {
         "individual": individual,
@@ -1029,7 +1597,7 @@ def _evaluate_one_setup(
         "trade_ledger": ledger,
         "direction": direction,
         "exit_policy": exit_policy,
-        "gates_passed": True
+        "gates_passed": gates_passed
     }
 
 
@@ -1139,7 +1707,7 @@ def _evaluate_one_setup_cached(
     signals_df: pd.DataFrame,
     signals_metadata: List[Dict],
     master_df: pd.DataFrame,
-    exit_policy: Optional[Dict],
+    exit_policy: Optional[GADataSpec],
     folds_hash: Optional[str] = None  # Hash of fold boundaries for cache key
 ) -> Dict:
     """Cached evaluation with optional fold-aware key for determinism."""
@@ -1157,22 +1725,20 @@ def _evaluate_one_setup_cached(
 def _summarize_evals(tag: str, evaluated: List[Dict]) -> None:
     if not evaluated:
         return
-    sup = [e.get("metrics", {}).get("support_min", 0) for e in evaluated]
-    ig = [e.get("metrics", {}).get("info_gain", np.nan) for e in evaluated]
-    cr = [e.get("metrics", {}).get("crps", np.nan) for e in evaluated]
-    emove = [e.get("metrics", {}).get("E_move", np.nan) for e in evaluated]
-    folds = [e.get("metrics", {}).get("folds_used", 0) for e in evaluated]
+    sup = [e.get("metrics", {}).get("support", 0) for e in evaluated]
+    dsr_vals = [e.get("metrics", {}).get("dsr_score", e.get("metrics", {}).get("dsr", np.nan)) for e in evaluated]
+    calmar_lb_vals = [e.get("metrics", {}).get("bootstrap_calmar_lb_score", e.get("metrics", {}).get("bootstrap_calmar_lb", np.nan)) for e in evaluated]
+    pf_lb_vals = [e.get("metrics", {}).get("bootstrap_profit_factor_lb_score", e.get("metrics", {}).get("bootstrap_profit_factor_lb", np.nan)) for e in evaluated]
+    folds = [e.get("metrics", {}).get("folds_used", e.get("metrics", {}).get("supported_folds", 0)) for e in evaluated]
+    dup_vals = [e.get("metrics", {}).get("dup_suppressed_total", 0) for e in evaluated]
 
     def _med(x):
         return _safe_median(x)
 
-    has_probs = sum(1 for e in evaluated if e.get("metrics", {}).get("band_probs"))
-    prob_pct = (has_probs / len(evaluated)) * 100 if evaluated else 0
-
     print(
         f"[{tag}] med(support)={_fmt(_med(sup),1)} | med(folds)={_fmt(_med(folds),1)} | "
-        f"med(IG)={_fmt(_med(ig),4)} med(CRPS)={_fmt(_med(cr),5)} | "
-        f"Probs OK: {prob_pct:.1f}% | med(E_move)={_fmt(_med(emove),4)}"
+        f"med(DSR)={_fmt(_med(dsr_vals),4)} med(Calmar_LB)={_fmt(_med(calmar_lb_vals),4)} | "
+        f"med(PF_LB)={_fmt(_med(pf_lb_vals),4)} | med(DupSupp)={_fmt(_med(dup_vals),1)}"
     )
 
 

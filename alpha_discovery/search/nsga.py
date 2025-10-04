@@ -1,7 +1,7 @@
 # alpha_discovery/search/nsga.py
 from __future__ import annotations
 
-from typing import List, Dict, Tuple, Optional, Set
+from typing import List, Dict, Tuple, Optional, Set, TYPE_CHECKING
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
@@ -16,6 +16,10 @@ from .ga_core import (
     _dna, _exit_policy_from_settings,
     _evaluate_one_setup_cached, _summarize_evals,
 )
+from .fold_plan import GADataSpec
+
+if TYPE_CHECKING:  # pragma: no cover - typing aid only
+    from .island_model import IslandManager
 
 import zlib
 
@@ -37,7 +41,7 @@ def _deterministic_eval(
     signals_df: pd.DataFrame,
     signals_metadata: List[Dict],
     master_df: pd.DataFrame,
-    exit_policy: Optional[Dict],
+    plan: Optional[GADataSpec],
     base_seed: int,
 ) -> Dict:
     """Wrapper to seed evaluation for the new individual structure."""
@@ -53,8 +57,9 @@ def _deterministic_eval(
     except Exception:
         pass
 
+    folds_hash = plan.fold_hash if plan is not None else None
     return _evaluate_one_setup_cached(
-        individual, signals_df, signals_metadata, master_df, exit_policy
+        individual, signals_df, signals_metadata, master_df, plan, folds_hash=folds_hash
     )
 
 # ---------- NSGA machinery ----------
@@ -124,27 +129,23 @@ def _dedup_individuals(seq: List[Tuple[str, List[str]]]) -> List[Tuple[str, List
     return out
 
 # ---------- Evolution loop ----------
-def evolve(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd.DataFrame) -> List[Dict]:
+def evolve(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd.DataFrame,
+           plan: Optional[GADataSpec] = None) -> List[Dict]:
     """NSGA-II evolution for specialized (ticker, setup) individuals."""
     
     # Check if island model is enabled (n_islands > 1 means use island model)
     if settings.ga.n_islands > 1:
-        return _evolve_with_islands(signals_df, signals_metadata, master_df)
+        return _evolve_with_islands(signals_df, signals_metadata, master_df, plan)
     else:
-        return _evolve_single_population(signals_df, signals_metadata, master_df)
+        return _evolve_single_population(signals_df, signals_metadata, master_df, plan)
 
 
-def _evolve_with_islands(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd.DataFrame) -> List[Dict]:
+def _evolve_with_islands(signals_df: pd.DataFrame, signals_metadata: List[Dict],
+                         master_df: pd.DataFrame, plan: Optional[GADataSpec]) -> List[Dict]:
     """Evolve using island model."""
-    from .island_model import IslandManager, ExitPolicy
+    from .island_model import IslandManager
     
     tqdm.write("\n--- Starting Island Model Evolution ---")
-    
-    # Create exit policy (simple - no inner folds for Phase A)
-    exit_policy = ExitPolicy(
-        train_indices=master_df.index,
-        splits=[]  # Empty for simple backtesting
-    )
     
     # Create island manager with all required arguments
     island_manager = IslandManager(
@@ -154,7 +155,7 @@ def _evolve_with_islands(signals_df: pd.DataFrame, signals_metadata: List[Dict],
         signals_df=signals_df,
         signals_metadata=signals_metadata,
         master_df=master_df,
-        exit_policy=exit_policy,
+        plan=plan,
         migration_interval=settings.ga.migration_interval,
         seed=settings.ga.seed
     )
@@ -174,7 +175,8 @@ def _evolve_with_islands(signals_df: pd.DataFrame, signals_metadata: List[Dict],
     return final_population
 
 
-def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[Dict], master_df: pd.DataFrame) -> List[Dict]:
+def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[Dict],
+                              master_df: pd.DataFrame, plan: Optional[GADataSpec]) -> List[Dict]:
     """Original single population evolution."""
     rng = np.random.default_rng(settings.ga.seed)
     all_signal_ids = list(signals_df.columns)
@@ -184,7 +186,7 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
     parent_population = _dedup_individuals(parent_population)
 
     # Build a single exit policy from config (used for ALL evals)
-    exit_policy = _exit_policy_from_settings()
+    plan = plan or _exit_policy_from_settings()
 
     g = int(settings.ga.generations)
     p = int(settings.ga.population_size)
@@ -198,7 +200,7 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                 evaluated_parents = [
                     _deterministic_eval(
                         ind, signals_df, signals_metadata, master_df,
-                        exit_policy,
+                        plan,
                         base_seed=int(settings.ga.seed),
                     ) for ind in parent_population
                 ]
@@ -207,7 +209,7 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                     evaluated_parents = Parallel(n_jobs=-1, verbose=JOBLIB_VERBOSE)(
                         delayed(_deterministic_eval)(
                             ind, signals_df, signals_metadata, master_df,
-                            exit_policy,
+                            plan,
                             int(settings.ga.seed),
                         ) for ind in parent_population
                     )
@@ -301,7 +303,7 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                 evaluated_children = [
                     _deterministic_eval(
                         ind, signals_df, signals_metadata, master_df,
-                        exit_policy,
+                        plan,
                         base_seed=int(settings.ga.seed),
                     ) for ind in children_population
                 ]
@@ -310,7 +312,7 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                     evaluated_children = Parallel(n_jobs=-1, verbose=JOBLIB_VERBOSE)(
                         delayed(_deterministic_eval)(
                             ind, signals_df, signals_metadata, master_df,
-                            exit_policy,
+                            plan,
                             int(settings.ga.seed),
                         ) for ind in children_population
                     )
@@ -386,7 +388,7 @@ def _evolve_single_population(signals_df: pd.DataFrame, signals_metadata: List[D
                             "crowding_distance": 0.0,
                             "trade_ledger": pd.DataFrame(),
                             "direction": "long",
-                            "exit_policy": exit_policy,
+                            "fold_plan": plan.summary() if plan else None,
                         })
                         existing.add(_dna(child))
                     else:

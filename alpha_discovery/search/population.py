@@ -2,7 +2,7 @@
 
 import numpy as np
 import pandas as pd
-from typing import List, Tuple, Optional, NamedTuple, Any
+from typing import List, Tuple, Optional, NamedTuple, Any, Dict, Iterable, Set
 from tqdm import tqdm
 
 from ..config import settings
@@ -54,6 +54,10 @@ def initialize_population(
         all_signal_ids: List[str],
         signals_df: Optional[pd.DataFrame] = None,
         population_size: Optional[int] = None,
+        *,
+        whitelist: Optional[Iterable[str]] = None,
+        seed_ratio: float = 0.0,
+        stats: Optional[Dict[str, int]] = None,
 ) -> List[Tuple[str, List[str]]]:
     """
     Creates the initial random population of specialized setups.
@@ -62,6 +66,7 @@ def initialize_population(
     pop_size = population_size or settings.ga.population_size
     print(f"Initializing specialized population of size {pop_size}...")
     population: List[Tuple[str, List[str]]] = []
+    all_ids = list(all_signal_ids)
     
     # Use effective tradable tickers (respects single ticker mode)
     tradable_tickers = settings.data.effective_tradable_tickers
@@ -70,6 +75,18 @@ def initialize_population(
     
     if not tradable_tickers:
         raise ValueError("Cannot initialize population: no tradable tickers available.")
+
+    # RSD seeding controls
+    whitelist_list = list(dict.fromkeys(whitelist or []))
+    whitelist_set: Set[str] = set(whitelist_list)
+    target_seeded = int(round(pop_size * float(np.clip(seed_ratio, 0.0, 1.0)))) if whitelist_set else 0
+    seeded_count = 0
+
+    # Stats aggregation (shared across islands)
+    if stats is None:
+        stats = {}
+    stats.setdefault('init_total', 0)
+    stats.setdefault('init_seeded', 0)
 
     # Use a set to ensure we don't create duplicate setups in the first generation
     seen_dna = set()
@@ -83,10 +100,28 @@ def initialize_population(
         ticker = rng.choice(tradable_tickers)
 
         # 2. Randomly choose a length for this setup (e.g., 2 or 3 signals)
-        length = rng.choice(settings.ga.setup_lengths_to_explore)
+        length = int(rng.choice(settings.ga.setup_lengths_to_explore))
 
         # 3. Randomly choose signal IDs without replacement
-        setup = list(rng.choice(all_signal_ids, size=length, replace=False))
+        seeded_this = False
+        signal_pool = all_ids
+        if whitelist_set and seeded_count < target_seeded:
+            if len(whitelist_set) >= length:
+                signal_pool = whitelist_list
+                seeded_this = True
+            else:
+                # Not enough signals in whitelist for this length; fallback to global pool
+                seeded_this = False
+                signal_pool = all_ids
+
+        max_pool = len(signal_pool)
+        if max_pool == 0:
+            continue
+        length = min(length, max_pool)
+        if length == 0:
+            continue
+
+        setup = list(rng.choice(signal_pool, size=length, replace=False))
 
         # 4. Create a canonical representation (DNA) including ticker
         dna = (str(ticker), tuple(sorted(setup)))
@@ -95,12 +130,20 @@ def initialize_population(
             seen_dna.add(dna)
             
             # 5. Check support requirements if signals_df is provided
+            appended = False
             if signals_df is not None:
                 if _meets_support_requirements((ticker, setup), signals_df):
                     population.append((ticker, setup))
+                    appended = True
             else:
-                # If no signals_df provided, skip support filtering
                 population.append((ticker, setup))
+                appended = True
+
+            if appended:
+                stats['init_total'] += 1
+                if seeded_this:
+                    stats['init_seeded'] += 1
+                    seeded_count += 1
 
     if len(population) < pop_size:
         print(f"Warning: Only generated {len(population)}/{pop_size} individuals meeting support requirements")
@@ -227,7 +270,11 @@ def mutate(
         individual: Tuple[str, List[str]],
         all_signal_ids: List[str],
         rng: np.random.Generator,
-        signals_df: Optional[pd.DataFrame] = None
+        signals_df: Optional[pd.DataFrame] = None,
+        *,
+        whitelist: Optional[Iterable[str]] = None,
+        mutation_bias: float = 0.0,
+        stats: Optional[Dict[str, int]] = None,
 ) -> Tuple[str, List[str]]:
     """
     Applies a random mutation to a specialized setup.
@@ -240,6 +287,14 @@ def mutate(
         return individual # No mutation occurs
 
     ticker, setup = individual
+    whitelist_list = list(dict.fromkeys(whitelist or []))
+    whitelist_set = set(whitelist_list)
+    mutation_bias = float(np.clip(mutation_bias, 0.0, 1.0))
+
+    if stats is None:
+        stats = {}
+    stats.setdefault('mutation_total', 0)
+    stats.setdefault('mutation_whitelist', 0)
     
     # Use effective tradable tickers (respects single ticker mode)
     tradable_tickers = settings.data.effective_tradable_tickers
@@ -272,20 +327,35 @@ def mutate(
             potential_new_signals = [sig for sig in all_signal_ids if sig not in current_signals]
 
             if potential_new_signals:
-                new_signal = rng.choice(potential_new_signals)
+                stats['mutation_total'] += 1
+                use_whitelist_pool = False
+                candidate_pool = potential_new_signals
+                if whitelist_set and rng.random() < mutation_bias:
+                    whitelist_candidates = [sig for sig in whitelist_list if sig not in current_signals]
+                    if whitelist_candidates:
+                        candidate_pool = whitelist_candidates
+                        use_whitelist_pool = True
+
+                if not candidate_pool:
+                    return individual
+
+                new_signal = rng.choice(candidate_pool)
                 mutated_setup = setup.copy()
                 mutated_setup[index_to_mutate] = new_signal
                 mutated_individual = (ticker, mutated_setup)
-                
+
+                if use_whitelist_pool:
+                    stats['mutation_whitelist'] += 1
+
                 # Check support requirements if signals_df is provided
                 if signals_df is not None:
                     if _meets_support_requirements(mutated_individual, signals_df):
                         return mutated_individual
                     else:
                         # Try other signals
-                        max_attempts = min(5, len(potential_new_signals) - 1)
+                        max_attempts = min(5, len(candidate_pool) - 1)
                         for _ in range(max_attempts):
-                            new_signal = rng.choice(potential_new_signals)
+                            new_signal = rng.choice(candidate_pool)
                             mutated_setup = setup.copy()
                             mutated_setup[index_to_mutate] = new_signal
                             mutated_individual = (ticker, mutated_setup)

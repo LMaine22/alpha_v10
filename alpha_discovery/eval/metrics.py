@@ -787,11 +787,21 @@ def compute_portfolio_metrics_bundle(
         "bootstrap_profit_factor_ub": float(bs_pf["ub"]),
     }
 
-    # Replace non-finite with finite placeholders ONLY in bundle if needed for vector math.
-    # (Leave infinities in raw point metrics; the *_lb fields are finite for ranking.)
-    for k, v in list(out.items()):
-        if isinstance(v, float) and (not np.isfinite(v)):
-            # map +/-inf to a very large/small finite sentinel without capping legit signals
-            out[k] = 1e9 if v > 0 else -1e9
+    cleaned: Dict[str, Any] = {}
+    raw_non_finite: Dict[str, Any] = {}
 
-    return out
+    for key, value in out.items():
+        if isinstance(value, float):
+            if np.isnan(value):
+                cleaned[key] = None
+                raw_non_finite[f"{key}_raw"] = float('nan')
+            elif np.isinf(value):
+                cleaned[key] = None
+                raw_non_finite[f"{key}_raw"] = value
+            else:
+                cleaned[key] = float(value)
+        else:
+            cleaned[key] = value
+
+    cleaned.update(raw_non_finite)
+    return cleaned

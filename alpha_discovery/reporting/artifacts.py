@@ -7,14 +7,163 @@ import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Iterable
 
 import pandas as pd
+import numpy as np
 from datetime import datetime
 
-from ..config import Settings  # do not import global settings here
+from pandas.tseries.offsets import BDay
+
+# ------------ priors helper ------------
+
+OBJECTIVE_FALLBACKS = {
+    "dsr": ["dsr", "dsr_raw", "sharpe"],
+    "bootstrap_calmar_lb": ["bootstrap_calmar_lb", "bootstrap_calmar_lb_raw", "calmar", "mar_ratio"],
+    "bootstrap_profit_factor_lb": ["bootstrap_profit_factor_lb", "bootstrap_profit_factor_lb_raw", "profit_factor", "expectancy"],
+}
+
+
+def _resolve_metric(metrics: Dict[str, Any], key: str) -> Tuple[float, str]:
+    for candidate in OBJECTIVE_FALLBACKS.get(key, [key]):
+        val = metrics.get(candidate)
+        if isinstance(val, (int, float)) and np.isfinite(val):
+            return float(val), candidate
+    return 0.0, "unavailable"
+
+
+def _sanitized_growth(ledger: Optional[pd.DataFrame]) -> float:
+    if ledger is None or ledger.empty:
+        return 0.0
+    returns = pd.to_numeric(ledger.get('pnl_pct'), errors='coerce').dropna()
+    if returns.empty:
+        return 0.0
+    clipped = returns.clip(lower=-0.95)
+    return float(np.expm1(np.log1p(clipped).sum()))
+
+def _build_prior_record(
+    setup_id: str,
+    ticker: str,
+    signals: List[str],
+    direction: str,
+    metrics: Dict[str, Any],
+    ledger: Optional[pd.DataFrame],
+    data_end: Optional[pd.Timestamp],
+    ga_settings: Any,
+) -> Dict[str, Any]:
+    as_of = pd.to_datetime(data_end) if data_end is not None else None
+    if as_of is None or pd.isna(as_of):
+        as_of = pd.Timestamp.utcnow().normalize()
+
+    trades_total = 0
+    trades_12m = 0
+    trades_6m = 0
+    if isinstance(ledger, pd.DataFrame) and not ledger.empty:
+        ledger_dates = pd.to_datetime(ledger.get('trigger_date'), errors='coerce')
+        ledger_dates = ledger_dates.dropna()
+        trades_total = int(len(ledger_dates))
+        if trades_total:
+            trades_12m = int((ledger_dates >= (as_of - BDay(252))).sum())
+            trades_6m = int((ledger_dates >= (as_of - BDay(126))).sum())
+
+    replacements: Dict[str, bool] = {}
+
+    def _finite(value: Any, key: str) -> float:
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            replacements[key] = True
+            return 0.0
+        if not np.isfinite(val):
+            replacements[key] = True
+            return 0.0
+        return float(val)
+
+    psr_val = _finite(metrics.get('psr'), 'psr')
+    max_dd_val = _finite(metrics.get('max_drawdown'), 'max_drawdown')
+    max_dd_threshold = float(getattr(ga_settings, 'max_drawdown_threshold', -0.6))
+    min_psr = float(getattr(ga_settings, 'min_psr', 0.60))
+
+    last_trigger = metrics.get('last_trigger')
+    first_trigger = metrics.get('first_trigger')
+
+    coverage_ratio = _finite(metrics.get('fold_coverage_ratio'), 'fold_coverage_ratio')
+    coverage_target = _finite(metrics.get('coverage_target_ratio'), 'coverage_target_ratio')
+
+    flags = {
+        'psr_ok': ('psr' not in replacements) and psr_val >= min_psr,
+        'dd_ok': ('max_drawdown' not in replacements) and max_dd_val >= max_dd_threshold,
+        'coverage_pct': coverage_ratio,
+        'coverage_ok': coverage_ratio >= coverage_target if coverage_target > 0 else True,
+        'n_outer_with_support': int(metrics.get('fold_count') or 0),
+        'eligible': bool(metrics.get('eligible', False)),
+        'dedup_applied': bool(metrics.get('dedup_applied', False)),
+    }
+
+    record = {
+        'setup_id': setup_id,
+        'ticker': ticker,
+        'signals': '|'.join(signals),
+        'signals_list': signals,
+        'signals_fingerprint': metrics.get('signals_fingerprint'),
+        'options_structure_keys': metrics.get('options_structure_keys', []),
+        'individual': [ticker, signals],
+        'direction': direction,
+        'horizon': metrics.get('label_horizon'),
+        'regime': metrics.get('regime', 'ALL'),
+        'dsr': _finite(metrics.get('dsr'), 'dsr'),
+        'bootstrap_calmar_lb': _finite(metrics.get('bootstrap_calmar_lb'), 'bootstrap_calmar_lb'),
+        'bootstrap_profit_factor_lb': _finite(metrics.get('bootstrap_profit_factor_lb'), 'bootstrap_profit_factor_lb'),
+        'expectancy': _finite(metrics.get('expectancy'), 'expectancy'),
+        'trades_total': trades_total,
+        'trades_12m': trades_12m,
+        'trades_6m': trades_6m,
+        'first_trigger': first_trigger,
+        'last_trigger': last_trigger,
+        'fold_count': int(metrics.get('fold_count') or 0),
+        'fold_coverage_ratio': coverage_ratio,
+        'psr': psr_val,
+        'max_drawdown': max_dd_val,
+        'penalty_scalar': _finite(metrics.get('penalty_scalar'), 'penalty_scalar'), 
+        'soft_penalties': metrics.get('soft_penalties', {}),
+        'eligible': bool(metrics.get('eligible', False)),
+        'eligibility_reasons': metrics.get('eligibility_reasons', []),
+        'objective_sources': metrics.get('objective_sources', {}),
+        'flags': flags,
+        'dup_suppressed_total': int(metrics.get('dup_suppressed_total', 0) or 0),
+        'dup_merged_total': int(metrics.get('dup_merged_total', 0) or 0),
+        'dedup_applied': bool(metrics.get('dedup_applied', False)),
+    }
+
+    if replacements:
+        record['flags'] = dict(flags, metric_replacements=sorted(k for k, v in replacements.items() if v))
+
+    score_values: Dict[str, float] = {}
+    score_sources: Dict[str, str] = {}
+    for key in ('dsr', 'bootstrap_calmar_lb', 'bootstrap_profit_factor_lb'):
+        val, source = _resolve_metric(metrics, key)
+        score_values[f'{key}_score'] = val
+        score_sources[f'{key}_source'] = source
+    record.update(score_values)
+    record.update(score_sources)
+
+    recency_days = None
+    if last_trigger:
+        try:
+            recency_days = int((as_of - pd.to_datetime(last_trigger)).days)
+        except Exception:
+            recency_days = None
+    record['recency_days'] = recency_days
+    if isinstance(recency_days, int) and recency_days >= 0:
+        half_life = max(1, int(getattr(getattr(settings, 'dts', object()), 'dormancy_half_life_days', 180)))
+        record['recency_weight'] = float(max(0.05, 0.5 ** (recency_days / half_life)))
+    else:
+        record['recency_weight'] = 1.0
+
+    record['penalty_scalar'] = float(max(1.0, record['penalty_scalar'] or 1.0))
+
+    return record
+
+from ..config import Settings, settings
+from ..utils.trade_keys import canonical_signals_fingerprint, dedupe_trade_ledger
 from . import display_utils as du
-# Removed unused imports: from ..core.splits import HybridSplits (core.splits deleted in Phase 10)
-# from .diagnostics import write_split_audit  # Depends on HybridSplits
-from .pareto_csv import write_pareto_csv
-from .forecast_slate import write_forecast_slate
 from ..eval.regime import RegimeModel
 
 
@@ -238,191 +387,281 @@ def _compound_total_return(daily_returns: pd.Series) -> float:
         return 0.0
 
 
-# ------------ main saver (TRAIN-only artifacts) ------------
-
-def _df_to_individual_list(df: pd.DataFrame) -> list[Dict[str, Any]]:
-    rows = []
-    for _, r in df.iterrows():
-        try:
-            individual = eval(r['individual'])
-        except Exception:
-            continue
-        metrics = r.to_dict()
-        rows.append({"individual": individual, "metrics": metrics})
-    return rows
+# ------------ main saver (PAWF/NPWF artifacts) ------------
 
 def save_results(
     final_results_df: pd.DataFrame,
     signals_metadata: List[Dict[str, Any]],
     run_dir: str,
-    splits: Any,  # Was HybridSplits, now generic for walk-forward splits
+    splits: Any,
     settings: Settings,
+    data_end: Optional[pd.Timestamp] = None,
     regime_model: Optional[RegimeModel] = None,
     simulation_summary: Optional[pd.DataFrame] = None,
     simulation_ledger: Optional[pd.DataFrame] = None,
     correlation_report: Optional[str] = None
 ) -> str:
-    """
-    Main entry point for saving all run artifacts.
-    This orchestrates calls to specialized writers for each artifact.
-    
-    Returns:
-        The path to the generated forecast slate CSV.
-    """
+    """Persist PAWF/NPWF discovery outputs and DTS-ready artifacts."""
     print("\n--- Saving All Run Artifacts ---")
     _ensure_dir(run_dir)
 
-    # 1. Save config and split audit
     config_path = os.path.join(run_dir, 'config.json')
     with open(config_path, 'w') as f:
         f.write(_settings_to_json(settings))
     print(f"Configuration saved to: {config_path}")
-    
-    # write_split_audit(splits, run_dir)  # Disabled - HybridSplits deleted in Phase 10
-    
-    # Add human-readable description
+
     meta_map = du.build_signal_meta_map(signals_metadata)
-    def get_desc(row):
+
+    summary_records: List[Dict[str, Any]] = []
+    ledger_frames: List[pd.DataFrame] = []
+    priors_records: List[Dict[str, Any]] = []
+
+    data_end_override = pd.to_datetime(data_end) if data_end is not None else None
+    data_end_computed: Optional[pd.Timestamp] = None
+    if isinstance(splits, dict):
+        split_candidates = []
+        for spec in splits.get('splits', []) or []:
+            candidate = spec.get('test_end') or spec.get('train_end')
+            if candidate:
+                try:
+                    split_candidates.append(pd.to_datetime(candidate))
+                except Exception:
+                    continue
+        if split_candidates:
+            data_end_computed = max(split_candidates)
+
+    data_end_final = data_end_override or data_end_computed
+
+    if data_end_final is None:
         try:
-            # Handle both tuple and string representations
-            if isinstance(row['individual'], str):
-                individual_tuple = eval(row['individual'])
-            else:
-                individual_tuple = row['individual']
-            
-            # Unpack, ignoring the horizon if it's present
-            _, signals, *_ = individual_tuple
-            return du.desc_from_meta(signals, meta_map)
-        except Exception as e:
-            print(f"Error getting description: {e}")
-            return "Invalid setup"
-    final_results_df['setup_desc'] = final_results_df.apply(get_desc, axis=1)
-
-    # Convert individual tuples to clean string representation for CSV
-    # but keep the original tuple form for passing to write_forecast_slate
-    df_for_csv = final_results_df.copy()
-    
-    def clean_individual_str(ind):
-        if isinstance(ind, str):
-            return ind
-        
-        if len(ind) == 3:
-            ticker, signals, horizon = ind
-            ticker_str = str(ticker)
-            signals_list = [str(s) for s in signals]
-            return str((ticker_str, signals_list, horizon))
-        elif len(ind) == 2:
-            ticker, signals = ind
-            ticker_str = str(ticker)
-            signals_list = [str(s) for s in signals]
-            return str((ticker_str, signals_list))
-        else:
-            return str(ind)
-    
-    df_for_csv['individual'] = df_for_csv['individual'].apply(clean_individual_str)
-    pareto_path = os.path.join(run_dir, "pareto_front_elv.csv")
-    df_for_csv.to_csv(pareto_path, index=False, float_format='%.4f')
-    print(f"ELV-scored Pareto front saved to: {pareto_path}")
-
-    # Also write a slim CSV with essential columns for operator consumption
-    slim_cols = [
-        'individual', 'setup_desc', 'ticker', 'elv', 'hart_index', 'hart_label',
-        'edge_oos', 'n_trig_oos', 'best_horizon', 'first_trigger', 'last_trigger'
-    ]
-    slim_df = final_results_df.copy()
-    # Derive ticker column and clean individual representation
-    def _split_ind(ind):
-        try:
-            # Handle string representation
-            if isinstance(ind, str):
-                ind = eval(ind)
-
-            # Unpack, handling both 2 and 3 element tuples
-            if len(ind) == 3:
-                t, sigs, h = ind
-                return str(t), str((str(t), list(map(str, sigs)), h))
-            elif len(ind) == 2:
-                t, sigs = ind
-                return str(t), str((str(t), list(map(str, sigs))))
-            else:
-                return "", str(ind)
+            data_end_final = pd.to_datetime(getattr(settings.data, 'end_date', None))
         except Exception:
-            return "", str(ind)
+            data_end_final = None
 
-    pairs = slim_df['individual'].apply(_split_ind)
-    slim_df['ticker'] = pairs.apply(lambda x: x[0])
-    slim_df['individual'] = pairs.apply(lambda x: x[1])
-    have = [c for c in slim_cols if c in slim_df.columns]
-    slim_df = slim_df[have]
-    slim_path = os.path.join(run_dir, "pareto_front_elv_slim.csv")
-    slim_df.to_csv(slim_path, index=False, float_format='%.4f')
-    print(f"ELV slim CSV saved to: {slim_path}")
+    def _normalize_individual(ind: Any) -> Tuple[str, List[str]]:
+        if isinstance(ind, str):
+            ind = eval(ind)
+        if isinstance(ind, (list, tuple)) and len(ind) >= 2:
+            ticker = str(ind[0])
+            signals = [str(s) for s in ind[1]] if isinstance(ind[1], (list, tuple)) else []
+            return ticker, signals
+        return str(ind), []
 
-    # Save the Forecast Slate
-    # Convert DataFrame back to list of dicts for the writer function
-    pf_list = []
-    for _, row in final_results_df.iterrows():
-        metrics = row.to_dict()
-        # The 'individual' is already in the correct tuple format in final_results_df
-        individual = metrics.pop('individual')
-        pf_list.append({'individual': individual, 'metrics': metrics})
+    for idx, row in final_results_df.iterrows():
+        metrics = dict(row.get('metrics', {}) or {})
+        direction = row.get('direction') or metrics.get('direction') or 'long'
+        individual = row.get('individual')
+        ticker, signals = _normalize_individual(individual)
+        setup_id = metrics.get('setup_id') or f"SETUP_{idx + 1:04d}"
 
-    forecast_slate_path = write_forecast_slate(pf_list, signals_metadata, run_dir)
-    
-    # Save Regime Diagnostics
+        signals_fp = metrics.get('signals_fingerprint') or canonical_signals_fingerprint(signals)
+        exit_policy_tag = metrics.get('outer_id') or metrics.get('exit_policy_tag') or 'npwf'
+        allow_pyramiding = bool(getattr(settings.ga, 'allow_pyramiding', False))
+
+        desc = metrics.get('setup_desc') or du.desc_from_meta(signals, meta_map)
+        if not desc:
+            try:
+                desc = du.format_setup_description({'individual': individual})
+            except Exception:
+                desc = ""
+
+        objectives = row.get('objectives') or []
+        eligible_flag = bool(metrics.get('eligible', False))
+        support_val = metrics.get('support', 0.0) or 0.0
+        n_trades_val = metrics.get('n_trades', 0) or 0
+
+        ledger = row.get('trade_ledger')
+        ledger_for_growth: Optional[pd.DataFrame]
+        if isinstance(ledger, pd.DataFrame) and not ledger.empty:
+            ledger_with_id = ledger.copy()
+            ledger_with_id['setup_id'] = setup_id
+            ledger_with_id['ticker'] = ticker
+            ledger_with_id['direction'] = direction
+            ledger_with_id['signals_fingerprint'] = signals_fp
+            deduped_ledger, ledger_dup_stats = dedupe_trade_ledger(
+                ledger_with_id,
+                setup_id=setup_id,
+                ticker=ticker,
+                direction=direction,
+                signals_fingerprint=signals_fp,
+                exit_policy_tag=exit_policy_tag,
+                allow_pyramiding=allow_pyramiding,
+            )
+            ledger_frames.append(deduped_ledger)
+            metrics.setdefault('dup_suppressed_total', 0)
+            metrics.setdefault('dup_merged_total', 0)
+            metrics['dup_suppressed_total'] = int(metrics.get('dup_suppressed_total', 0)) + int(ledger_dup_stats.get('n_dups_suppressed', 0))
+            metrics['dup_merged_total'] = int(metrics.get('dup_merged_total', 0)) + int(ledger_dup_stats.get('n_dups_merged', 0))
+            metrics['dedup_applied'] = bool(metrics.get('dedup_applied', False) or ledger_dup_stats.get('n_dups_suppressed', 0) or ledger_dup_stats.get('n_dups_merged', 0))
+            ledger_for_growth = deduped_ledger
+        else:
+            ledger_for_growth = None
+
+        geom_cagr = _sanitized_growth(ledger_for_growth)
+        display_cagr = geom_cagr
+        display_calmar = metrics.get('bootstrap_calmar_lb')
+        display_pf = metrics.get('bootstrap_profit_factor_lb')
+
+        summary_records.append({
+            'setup_id': setup_id,
+            'ticker': ticker,
+            'signals': '|'.join(signals),
+            'direction': direction,
+            'description': desc,
+            'dsr': metrics.get('dsr'),
+            'bootstrap_calmar_lb': display_calmar,
+            'bootstrap_profit_factor_lb': display_pf,
+            'expectancy': metrics.get('expectancy'),
+            'support': support_val,
+            'n_trades': n_trades_val,
+            'fold_count': metrics.get('fold_count'),
+            'fold_coverage_ratio': metrics.get('fold_coverage_ratio'),
+            'outer_split_ids': '|'.join(metrics.get('outer_split_ids', [])),
+            'first_trigger': metrics.get('first_trigger'),
+            'last_trigger': metrics.get('last_trigger'),
+            'max_drawdown': metrics.get('max_drawdown'),
+            'cagr': display_cagr,
+            'geom_cagr': geom_cagr,
+            'eligible': eligible_flag,
+            'eligibility_reasons': ';'.join(metrics.get('eligibility_reasons', [])),
+            'fatal_reasons': ';'.join(metrics.get('fatal_reasons', [])),
+            'penalty_scalar': metrics.get('penalty_scalar'),
+            'soft_penalties': metrics.get('soft_penalties'),
+            'dup_suppressed_total': metrics.get('dup_suppressed_total', 0),
+            'dup_merged_total': metrics.get('dup_merged_total', 0),
+            'dedup_applied': metrics.get('dedup_applied', False),
+            'objectives': objectives,
+        })
+
+        priors_records.append(
+            _build_prior_record(
+                setup_id=setup_id,
+                ticker=ticker,
+                signals=signals,
+                direction=direction,
+                metrics=metrics,
+                ledger=ledger_for_growth,
+                data_end=data_end_final,
+                ga_settings=settings.ga,
+            )
+        )
+
+    summary_df = pd.DataFrame(summary_records)
+    summary_cols = [
+        'setup_id', 'ticker', 'signals', 'direction', 'description',
+        'dsr', 'bootstrap_calmar_lb', 'bootstrap_profit_factor_lb',
+        'expectancy', 'support', 'n_trades', 'fold_count', 'fold_coverage_ratio',
+        'outer_split_ids', 'first_trigger', 'last_trigger', 'max_drawdown', 'cagr',
+        'geom_cagr', 'eligible', 'eligibility_reasons', 'fatal_reasons', 'penalty_scalar',
+        'soft_penalties', 'dup_suppressed_total', 'dup_merged_total', 'dedup_applied',
+        'objective_sources', 'objectives'
+    ]
+    summary_df = summary_df.reindex(columns=summary_cols)
+    for col in ('soft_penalties', 'objective_sources'):
+        if col in summary_df.columns:
+            summary_df[col] = summary_df[col].apply(lambda v: json.dumps(v, default=str) if isinstance(v, (dict, list)) else v)
+    summary_path = os.path.join(run_dir, 'options_summary.csv')
+    summary_df.to_csv(summary_path, index=False)
+    print(f"Options summary saved to: {summary_path}")
+
+    if ledger_frames:
+        ledger_df = pd.concat(ledger_frames, ignore_index=True)
+        if 'uniq_key' in ledger_df.columns:
+            before_rows = len(ledger_df)
+            ledger_df = ledger_df.loc[~ledger_df.duplicated('uniq_key', keep='first')].copy()
+            dup_rows = before_rows - len(ledger_df)
+            if dup_rows > 0:
+                print(f"Deduped {dup_rows} duplicate trade rows at ledger export.")
+        ledger_columns = [
+            'setup_id', 'fold_id', 'outer_id', 'trigger_date', 'exit_date',
+            'ticker', 'direction', 'horizon_days', 'exit_policy_id', 'exit_reason',
+            'strike', 'entry_underlying', 'exit_underlying', 'entry_iv', 'exit_iv',
+            'entry_option_price', 'exit_option_price', 'contracts',
+            'capital_allocated', 'capital_allocated_used', 'pnl_dollars', 'pnl_pct'
+        ]
+        existing = [c for c in ledger_columns if c in ledger_df.columns]
+        ledger_df = ledger_df.reindex(columns=existing + [c for c in ledger_df.columns if c not in existing])
+        ledger_path = os.path.join(run_dir, 'options_trade_ledger.csv')
+        ledger_df.to_csv(ledger_path, index=False)
+        print(f"Options trade ledger saved to: {ledger_path}")
+    else:
+        ledger_path = ""
+
+    split_rows: List[Dict[str, Any]] = []
+    split_list = splits.get('splits', []) if isinstance(splits, dict) else []
+    for spec in split_list:
+        split_id = spec.get('split_id') or spec.get('id')
+        if not split_id:
+            continue
+        candidate_count = sum(split_id in (summary_df.at[i, 'outer_split_ids'] or '') for i in summary_df.index)
+        row = dict(spec)
+        row['candidates_with_support'] = candidate_count
+        split_rows.append(row)
+
+    if split_rows:
+        split_df = pd.DataFrame(split_rows)
+        split_path = os.path.join(run_dir, 'split_summary.csv')
+        split_df.to_csv(split_path, index=False)
+        print(f"Split summary saved to: {split_path}")
+    else:
+        split_path = ""
+
+    priors_df = pd.DataFrame(priors_records)
+    if not priors_df.empty:
+        for col in ('flags', 'soft_penalties', 'objective_sources'):
+            if col in priors_df.columns:
+                priors_df[col] = priors_df[col].apply(lambda v: json.dumps(v, default=str) if isinstance(v, (dict, list)) else v)
+    priors_csv_path = os.path.join(run_dir, 'options_priors.csv')
+    priors_df.to_csv(priors_csv_path, index=False)
+    print(f"Options priors saved to: {priors_csv_path}")
+
+    priors_json_path = os.path.join(run_dir, 'options_priors.json')
+    with open(priors_json_path, 'w') as f:
+        json.dump(priors_records, f, indent=2, default=str)
+
     if regime_model:
         write_regime_artifacts(regime_model, run_dir)
 
-    # Save simulation artifacts if they exist
     if simulation_summary is not None:
         write_simulation_summary(simulation_summary, run_dir)
     if simulation_ledger is not None:
         write_simulation_ledger(simulation_ledger, run_dir)
+
     if correlation_report is not None:
-        write_correlation_report(correlation_report, run_dir)
-        
-    return forecast_slate_path
+        print(f"Correlation report available at: {correlation_report}")
 
-
-def write_simulation_summary(summary_df: pd.DataFrame, run_dir: str):
-    """Saves the simulation summary to a CSV file."""
-    path = os.path.join(run_dir, "simulation_summary.csv")
-    summary_df.to_csv(path, index=False, float_format="%.4f")
-    print(f"Simulation summary saved to: {path}")
-
-def write_simulation_ledger(ledger_df: pd.DataFrame, run_dir: str):
-    """Saves the full simulation trade ledger to a CSV file."""
-    path = os.path.join(run_dir, "simulation_trade_ledger.csv")
-    ledger_df.to_csv(path, index=False, float_format="%.4f")
-    print(f"Simulation trade ledger saved to: {path}")
-
-def write_correlation_report(report_str: str, run_dir: str):
-    """Saves the HartIndex correlation report to a text file."""
-    diag_dir = os.path.join(run_dir, "diagnostics")
-    os.makedirs(diag_dir, exist_ok=True)
-    path = os.path.join(diag_dir, "hart_index_correlation.txt")
-    with open(path, 'w') as f:
-        f.write(report_str)
-    print(f"HartIndex correlation report saved to: {path}")
-
-
-def write_regime_artifacts(regime_model: RegimeModel, run_dir: str):
-    """Saves the regime model parameters and summary to disk."""
-    diag_dir = os.path.join(run_dir, "diagnostics", "regimes")
-    os.makedirs(diag_dir, exist_ok=True)
-    
-    # Save model params to JSON
-    meta = {
-        "anchor_model_id": regime_model.anchor_model_id,
-        "n_regimes": regime_model.n_regimes,
-        "features_used": regime_model.features_used,
-        "means": regime_model.original_means.tolist(),
-        "covariances": regime_model.model.covars_.tolist(),
-        "scaler_mean": regime_model.scaler.mean_.tolist(),
-        "scaler_scale": regime_model.scaler.scale_.tolist()
+    run_summary_payload: Dict[str, Any] = {
+        "outer_split_count": splits.get('outer_split_count') if isinstance(splits, dict) else None,
+        "tail_aligned": splits.get('tail_aligned') if isinstance(splits, dict) else None,
+        "cutoff_respected": splits.get('cutoff_respected') if isinstance(splits, dict) else None,
+        "rsd_summary": splits.get('rsd_summary') if isinstance(splits, dict) else None,
+        "frozen_library_stats": splits.get('frozen_library_stats') if isinstance(splits, dict) else None,
+        "dts_summary": splits.get('dts_summary') if isinstance(splits, dict) else None,
+        "dts_hud_line": splits.get('dts_hud_line') if isinstance(splits, dict) else None,
+        "dts_near_miss": splits.get('dts_near_miss') if isinstance(splits, dict) else None,
+        "files": {
+            "options_summary_csv": summary_path,
+            "options_trade_ledger_csv": ledger_path,
+            "split_summary_csv": split_path,
+            "options_priors_csv": priors_csv_path,
+            "options_priors_json": priors_json_path,
+        },
     }
-    with open(os.path.join(diag_dir, "regime_model.json"), 'w') as f:
-        json.dump(meta, f, indent=4)
-        
-    print(f"Regime model artifacts saved to: {diag_dir}")
+    if isinstance(splits, dict):
+        run_summary_payload["plans"] = splits.get('plans')
+        run_summary_payload["signal_duplicate_suppressed"] = splits.get('signal_duplicate_suppressed')
 
+    run_summary_path = os.path.join(run_dir, 'run_summary.json')
+    with open(run_summary_path, 'w') as f:
+        json.dump(run_summary_payload, f, indent=2, default=str)
+    print(f"Run summary saved to: {run_summary_path}")
+
+    return {
+        "summary_path": summary_path,
+        "ledger_path": ledger_path,
+        "split_path": split_path,
+        "priors_csv": priors_csv_path,
+        "priors_json": priors_json_path,
+        "priors_records": priors_records,
+        "run_summary": run_summary_path,
+    }

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict, Any
 import pandas as pd
 
 
@@ -31,32 +31,39 @@ class SplitSpec:
     split_version: str = "PAWF_v1"
     regime_version: str = "R1"
     event_class: str = "normal"
+    is_tail: bool = False
+    notes: Optional[Dict[str, Any]] = None
     
     def __post_init__(self):
         """Validate timestamps."""
         assert self.train_start < self.train_end, "Invalid train window"
         assert self.test_start < self.test_end, "Invalid test window"
         assert self.train_end <= self.test_start, "Train must end before test"
-    
+
     @property
     def train_index(self) -> pd.DatetimeIndex:
         """Training date range."""
         return pd.date_range(self.train_start, self.train_end, freq='D')
-    
+
     @property
     def test_index(self) -> pd.DatetimeIndex:
         """Test date range."""
         return pd.date_range(self.test_start, self.test_end, freq='D')
-    
+
     @property
     def train_span_days(self) -> int:
         """Training window span in days."""
         return (self.train_end - self.train_start).days
-    
+
     @property
     def test_span_days(self) -> int:
         """Test window span in days."""
         return (self.test_end - self.test_start).days
+
+    @property
+    def split_id(self) -> str:
+        """Convenience accessor mirroring generate_split_id."""
+        return generate_split_id(self)
 
 
 def generate_split_id(spec: SplitSpec) -> str:

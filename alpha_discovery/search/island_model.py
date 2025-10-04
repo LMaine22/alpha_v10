@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import List, Dict, Tuple, Optional, Any, NamedTuple
+from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass
 from collections import defaultdict
 
@@ -23,26 +23,40 @@ from tqdm.auto import tqdm
 from ..config import settings
 from . import nsga
 from . import population as pop
-from .ga_core import _evaluate_one_setup_cached, _evaluate_one_setup_horizon_specific
+from .ga_core import _evaluate_one_setup_cached, _evaluate_one_setup_horizon_specific, _resolve_objective_value
 from .population import EnhancedIndividual
-
-
-class ExitPolicy(NamedTuple):
-    """Defines the data available for a GA run."""
-    train_indices: pd.Index
-    splits: List[Tuple[pd.Index, pd.Index]]
+from .fold_plan import GADataSpec, InnerFoldPlan
 
 
 class Island:
     """Represents a single island in the island model."""
     
-    def __init__(self, island_id: int, population_size: int, 
-                 all_signal_ids: List[str], base_seed: int, signals_df: Optional[pd.DataFrame] = None):
+    def __init__(
+        self,
+        island_id: int,
+        population_size: int,
+        all_signal_ids: List[str],
+        base_seed: int,
+        signals_df: Optional[pd.DataFrame] = None,
+        rsd_context: Optional[Dict[str, Any]] = None,
+    ):
         self.island_id = island_id
         self.population_size = population_size
         self.all_signal_ids = all_signal_ids
         self.base_seed = base_seed
         self.signals_df = signals_df
+
+        # Reverse-seeded discovery context (shared across islands)
+        self.rsd_context: Dict[str, Any] = rsd_context or {}
+        stats = self.rsd_context.setdefault('stats', {})
+        stats.setdefault('init_total', 0)
+        stats.setdefault('init_seeded', 0)
+        stats.setdefault('mutation_total', 0)
+        stats.setdefault('mutation_whitelist', 0)
+        self.rsd_stats = stats
+        self.rsd_whitelist = list(self.rsd_context.get('whitelist', []))
+        self.rsd_seed_ratio = float(self.rsd_context.get('seed_ratio', 0.0))
+        self.rsd_mutation_prob = float(self.rsd_context.get('mutation_prob', 0.0))
         
         # Island-specific RNG for reproducibility
         self.rng = np.random.default_rng(base_seed + island_id)
@@ -62,13 +76,19 @@ class Island:
     def _initialize_population(self, signals_df: Optional[pd.DataFrame] = None):
         """Initialize the island's population."""
         self.parent_population = pop.initialize_population(
-            self.rng, self.all_signal_ids, signals_df, self.population_size
+            self.rng,
+            self.all_signal_ids,
+            signals_df,
+            self.population_size,
+            whitelist=self.rsd_whitelist,
+            seed_ratio=self.rsd_seed_ratio,
+            stats=self.rsd_stats,
         )
         # Deduplicate
         self.parent_population = nsga._dedup_individuals(self.parent_population)
     
     def evolve_generation(self, signals_df: pd.DataFrame, signals_metadata: List[Dict],
-                         master_df: pd.DataFrame, exit_policy: Optional[Dict]) -> IslandMetrics:
+                         master_df: pd.DataFrame, plan: Optional[GADataSpec]) -> IslandMetrics:
         """Evolve one generation on this island."""
         start_time = time.time()
         
@@ -78,7 +98,7 @@ class Island:
 
         # Evaluate parents
         self.evaluated_parents = self._evaluate_population(
-            self.parent_population, signals_df, signals_metadata, master_df, exit_policy
+            self.parent_population, signals_df, signals_metadata, master_df, plan
         )
         
         # Generate children through crossover and mutation
@@ -86,7 +106,7 @@ class Island:
         
         # Evaluate children
         evaluated_children = self._evaluate_population(
-            children_population, signals_df, signals_metadata, master_df, exit_policy
+            children_population, signals_df, signals_metadata, master_df, plan
         )
         
         # Select survivors using NSGA-II
@@ -104,21 +124,24 @@ class Island:
     
     def _evaluate_population(self, population: List[Tuple[str, List[str]]],
                            signals_df: pd.DataFrame, signals_metadata: List[Dict],
-                           master_df: pd.DataFrame, exit_policy: Optional[Dict]) -> List[Dict]:
+                           master_df: pd.DataFrame, plan: Optional[GADataSpec]) -> List[Dict]:
         """Evaluate a population of individuals."""
         if not population:
             return []
         
         # Use cached evaluation for reproducibility
         evaluated = []
+        fold_hash = plan.fold_hash if plan is not None else None
         for individual in population:
             eval_result = _evaluate_one_setup_cached(
-                individual, signals_df, signals_metadata, master_df, exit_policy
+                individual, signals_df, signals_metadata, master_df, plan, folds_hash=fold_hash
             )
             # Add island tracking
             eval_result['island_id'] = self.island_id
+            if plan is not None:
+                eval_result.setdefault('fold_plan', plan.summary())
             evaluated.append(eval_result)
-        
+
         return evaluated
     
     def _generate_children(self) -> List[Tuple[str, List[str]]]:
@@ -136,7 +159,15 @@ class Island:
             
             # Mutation
             if self.rng.random() < settings.ga.mutation_rate:
-                child = pop.mutate(child, self.all_signal_ids, self.rng, self.signals_df)
+                child = pop.mutate(
+                    child,
+                    self.all_signal_ids,
+                    self.rng,
+                    self.signals_df,
+                    whitelist=self.rsd_whitelist,
+                    mutation_bias=self.rsd_mutation_prob,
+                    stats=self.rsd_stats,
+                )
             
             children.append(child)
         
@@ -331,21 +362,25 @@ class HorizonIsland(Island):
     
     def _evaluate_population(self, population: List[EnhancedIndividual],
                            signals_df: pd.DataFrame, signals_metadata: List[Dict],
-                           master_df: pd.DataFrame, exit_policy: Optional[Dict]) -> List[Dict]:
+                           master_df: pd.DataFrame, plan: Optional[GADataSpec]) -> List[Dict]:
         """Evaluate a population of enhanced individuals."""
         if not population:
             return []
         
         # Use horizon-specific evaluation
         evaluated = []
+        splits = []
+        if plan is not None:
+            splits = [(fold.train_idx, fold.test_idx) for fold in plan.inner_folds]
+
         for individual in population:
             eval_result = _evaluate_one_setup_horizon_specific(
-                individual, signals_df, signals_metadata, master_df, exit_policy
+                individual, signals_df, signals_metadata, master_df, {'splits': splits}
             )
             # Add island tracking
             eval_result['island_id'] = self.island_id
             evaluated.append(eval_result)
-        
+
         return evaluated
     
     def _generate_children(self) -> List[EnhancedIndividual]:
@@ -445,14 +480,24 @@ class MigrationEvent:
 class IslandManager:
     """Manages multiple islands and coordinates migration."""
     
-    def __init__(self, n_islands: int, n_individuals: int, n_generations: int,
-                 signals_df: pd.DataFrame, signals_metadata: List[Dict],
-                 master_df: pd.DataFrame, exit_policy: ExitPolicy,
-                 migration_interval: int, seed: int):
+    def __init__(
+        self,
+        n_islands: int,
+        n_individuals: int,
+        n_generations: int,
+        signals_df: pd.DataFrame,
+        signals_metadata: List[Dict],
+        master_df: pd.DataFrame,
+        plan: Optional[GADataSpec],
+        migration_interval: int,
+        seed: int,
+        rsd_context: Optional[Dict[str, Any]] = None,
+    ):
         self.signals_df = signals_df
         self.signals_metadata = signals_metadata
         self.master_df = master_df
-        self.exit_policy = exit_policy
+        self.plan = plan
+        self.rsd_context = rsd_context or {}
         
         # Configuration
         self.n_islands = n_islands
@@ -474,6 +519,20 @@ class IslandManager:
         # Migration tracking
         self.migration_events: List[MigrationEvent] = []
         self.island_metrics_history: List[IslandMetrics] = []
+        self._last_viable_snapshot: Dict[str, Any] = {
+            'Best_DSR': 0.0,
+            'Med_Calmar_LB': 0.0,
+            'Med_PF_LB': 0.0,
+            'Support': 0,
+            'Viable': 0,
+            'Eligible': 0,
+            'SoftPen': 0,
+            'Penalized': 0,
+            'Checked': 0,
+            'Bootstrap': 0,
+            'PointEst': 0,
+            'DupSupp': 0,
+        }
     
     def _initialize_islands(self):
         """Initialize all islands."""
@@ -483,7 +542,8 @@ class IslandManager:
                 population_size=self.island_pop_size,
                 all_signal_ids=self.all_signal_ids,
                 base_seed=self.seed,
-                signals_df=self.signals_df
+                signals_df=self.signals_df,
+                rsd_context=self.rsd_context,
             )
             self.islands.append(island)
     
@@ -509,7 +569,7 @@ class IslandManager:
                 for island in self.islands:
                     metrics = island.evolve_generation(
                         self.signals_df, self.signals_metadata, 
-                        self.master_df, self.exit_policy
+                        self.master_df, self.plan
                     )
                     generation_metrics.append(metrics)
                 
@@ -530,29 +590,128 @@ class IslandManager:
                 all_individuals = []
                 for island in self.islands:
                     all_individuals.extend(island.evaluated_parents)
-                
-                # Extract NEW backtesting metrics from individuals
-                dsr_values = [ind.get('metrics', {}).get('dsr', -99) for ind in all_individuals if 'metrics' in ind]
-                calmar_values = [ind.get('metrics', {}).get('bootstrap_calmar_lb', -99) for ind in all_individuals if 'metrics' in ind]
-                pf_values = [ind.get('metrics', {}).get('bootstrap_profit_factor_lb', -99) for ind in all_individuals if 'metrics' in ind]
-                support_values = [ind.get('metrics', {}).get('support', 0) for ind in all_individuals if 'metrics' in ind]
-                
-                # Calculate statistics
-                best_dsr = max([v for v in dsr_values if v > -99]) if any(v > -99 for v in dsr_values) else 0
-                med_calmar = np.median([v for v in calmar_values if v > -99]) if any(v > -99 for v in calmar_values) else 0
-                med_pf = np.median([v for v in pf_values if v > -99]) if any(v > -99 for v in pf_values) else 0
-                med_support = int(np.median(support_values)) if support_values else 0
-                
+
+                viable_metrics: List[Dict[str, Any]] = []
+                penalized_results = 0
+                soft_penalized = 0
+                dup_supp_total = 0
+                recent_threshold = 30
+                if self.plan is not None and getattr(self.plan, 'test_idx', None) is not None:
+                    ref_date = pd.Timestamp(self.plan.test_idx[-1])
+                else:
+                    ref_date = None
+                for ind in all_individuals:
+                    metrics = ind.get('metrics') if isinstance(ind, dict) else None
+                    if not isinstance(metrics, dict):
+                        continue
+                    if metrics.get('penalty_reason'):
+                        penalized_results += 1
+                        continue
+                    dup_supp_total += int(metrics.get('dup_suppressed_total', 0) or 0)
+                    dsr_val, dsr_source = _resolve_objective_value(metrics, 'dsr')
+                    calmar_val, calmar_source = _resolve_objective_value(metrics, 'bootstrap_calmar_lb')
+                    pf_val, pf_source = _resolve_objective_value(metrics, 'bootstrap_profit_factor_lb')
+                    if not (np.isfinite(dsr_val) and np.isfinite(calmar_val) and np.isfinite(pf_val)):
+                        continue
+                    if (metrics.get('penalty_scalar') or 0.0) > 1.0:
+                        soft_penalized += 1
+                    viable_metrics.append({
+                        'metrics': metrics,
+                        'dsr': dsr_val,
+                        'calmar': calmar_val,
+                        'pf': pf_val,
+                        'sources': {
+                            'dsr': dsr_source,
+                            'bootstrap_calmar_lb': calmar_source,
+                            'bootstrap_profit_factor_lb': pf_source,
+                        },
+                    })
+
+                dsr_values = [entry['dsr'] for entry in viable_metrics]
+                calmar_values = [entry['calmar'] for entry in viable_metrics]
+                pf_values = [entry['pf'] for entry in viable_metrics]
+                support_values = [entry['metrics'].get('support', 0) for entry in viable_metrics]
+                snapshot = self._last_viable_snapshot
+                if viable_metrics:
+                    best_dsr = max(dsr_values) if dsr_values else 0.0
+                    med_calmar = float(np.median(calmar_values)) if calmar_values else 0.0
+                    med_pf = float(np.median(pf_values)) if pf_values else 0.0
+                    med_support = int(np.median(support_values)) if support_values else 0
+                else:
+                    best_dsr = snapshot.get('Best_DSR', 0.0)
+                    med_calmar = snapshot.get('Med_Calmar_LB', 0.0)
+                    med_pf = snapshot.get('Med_PF_LB', 0.0)
+                    med_support = snapshot.get('Support', 0)
+                viable_count = len(viable_metrics)
+                eligible_count = sum(1 for entry in viable_metrics if entry['metrics'].get('eligible'))
+                bootstrap_count = 0
+                if viable_metrics:
+                    for entry in viable_metrics:
+                        sources = entry.get('sources', {})
+                        if any(sources.get(k) == k for k in ("bootstrap_calmar_lb", "bootstrap_profit_factor_lb")):
+                            bootstrap_count += 1
+                point_estimate_count = max(0, viable_count - bootstrap_count)
+
+                recent_trigger_count = 0
+                if ref_date is not None:
+                    for entry in viable_metrics:
+                        last_trigger = entry['metrics'].get('last_trigger')
+                        if last_trigger:
+                            try:
+                                days = (ref_date - pd.to_datetime(last_trigger)).days
+                                if days <= recent_threshold:
+                                    recent_trigger_count += 1
+                            except Exception:
+                                continue
+                hud_summary = {
+                    'n_checked': len(all_individuals),
+                    'n_recent_trigger': recent_trigger_count,
+                    'n_blocked_fatal': penalized_results,
+                    'n_soft_flagged': soft_penalized,
+                    'n_scored_with_bootstrap': bootstrap_count,
+                    'n_scored_point_estimate': point_estimate_count,
+                    'n_final_selected': eligible_count,
+                    'dup_suppressed_total': dup_supp_total,
+                }
+
                 # Update progress bar with NEW metrics
                 if settings.ga.verbose >= 3:
                     self._log_generation_metrics(generation, generation_metrics)
-                
-                pbar.set_postfix({
-                    'Best_DSR': f'{best_dsr:.2f}',
-                    'Med_Calmar_LB': f'{med_calmar:.2f}',
-                    'Med_PF_LB': f'{med_pf:.2f}',
-                    'Support': med_support
-                })
+
+                snapshot_values = {
+                    'Best_DSR': best_dsr,
+                    'Med_Calmar_LB': med_calmar,
+                    'Med_PF_LB': med_pf,
+                    'Support': med_support,
+                    'Viable': viable_count,
+                    'Eligible': eligible_count,
+                    'SoftPen': soft_penalized,
+                    'Penalized': penalized_results,
+                    'Checked': hud_summary['n_checked'],
+                    'Bootstrap': hud_summary['n_scored_with_bootstrap'],
+                    'PointEst': hud_summary['n_scored_point_estimate'],
+                    'DupSupp': dup_supp_total,
+                }
+
+                if viable_metrics:
+                    snapshot.update(snapshot_values)
+
+                hud_postfix = {
+                    'Best_DSR': f"{snapshot_values['Best_DSR']:.2f}",
+                    'Med_Calmar_LB': f"{snapshot_values['Med_Calmar_LB']:.2f}",
+                    'Med_PF_LB': f"{snapshot_values['Med_PF_LB']:.2f}",
+                    'Support': snapshot_values['Support'],
+                    'Viable': snapshot_values['Viable'],
+                    'Eligible': snapshot_values['Eligible'],
+                    'SoftPen': snapshot_values['SoftPen'],
+                    'Penalized': snapshot_values['Penalized'],
+                    'Checked': snapshot_values['Checked'],
+                    'Bootstrap': snapshot_values['Bootstrap'],
+                    'PointEst': snapshot_values['PointEst'],
+                    'DupSupp': snapshot_values['DupSupp'],
+                }
+
+                pbar.set_postfix(hud_postfix)
         
         # Final synchronization
         if settings.ga.sync_final:
@@ -930,12 +1089,25 @@ def run_island_evolution(
         for col in signals_df.columns
     ]
     
-    # Create exit policy (use all available data for discovery)
-    train_indices = master_df.index
-    # Simple 70/30 split for internal validation
-    split_point = int(len(train_indices) * 0.7)
-    splits = [(train_indices[:split_point], train_indices[split_point:])]
-    exit_policy = ExitPolicy(train_indices=train_indices, splits=splits)
+    # Create GA plan (use all available data for discovery)
+    full_index = master_df.index
+    split_point = int(len(full_index) * 0.7)
+    outer_train_idx = full_index[:split_point]
+    outer_test_idx = full_index[split_point:]
+    inner_fold = InnerFoldPlan(
+        fold_id="fold_00",
+        train_idx=outer_train_idx,
+        test_idx=outer_test_idx
+    )
+    plan = GADataSpec(
+        outer_id="LEGACY_FULL",
+        train_idx=outer_train_idx,
+        test_idx=outer_test_idx,
+        inner_folds=[inner_fold],
+        label_horizon=0,
+        embargo_days=0,
+        metadata={"mode": "legacy_simple"}
+    )
     
     # Create island manager with proper signature
     island_pop_size = population_size // n_islands
@@ -946,7 +1118,7 @@ def run_island_evolution(
         signals_df=signals_df,
         signals_metadata=signals_metadata,
         master_df=master_df,
-        exit_policy=exit_policy,
+        plan=plan,
         migration_interval=migration_interval,
         seed=settings.ga.seed
     )

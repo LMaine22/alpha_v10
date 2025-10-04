@@ -6,15 +6,15 @@ from datetime import date
 
 class GaConfig(BaseModel):
     """Genetic Algorithm parameters (model-agnostic, NSGA-compatible)."""
-    population_size: int = 50  # Reduced for faster testing
-    generations: int = 5   # Reduced for faster testing
+    population_size: int = 120  # Reduced for faster testing
+    generations: int = 6 # Reduced for faster testing
     elitism_rate: float = 0.1
     mutation_rate: float = 0.3
     crossover_rate: float = 0.7
-    seed: int = 194 # keep visible in run_dir names
+    seed: int = 217 # keep visible in run_dir names
 
     # Setup grammar — PAIRS ONLY
-    setup_lengths_to_explore: List[int] = [2]
+    setup_lengths_to_explore: List[int] = [1, 2]
 
     # Logging/debug used by nsga/population
     verbose: int = 2
@@ -27,15 +27,36 @@ class GaConfig(BaseModel):
         "bootstrap_calmar_lb",         # Conservative CAGR/MaxDD with bootstrap LB
         "bootstrap_profit_factor_lb",  # Trade quality (wins/losses) with bootstrap LB
     ]
+
+    # Pipeline feature toggles (discovery scope)
+    use_inner_npwf: bool = False
+    use_cpcv: bool = False
+    use_mc_resampling: bool = False
+
+    # Reverse-Seeded Discovery (RSD) knobs
+    rsd_recent_days: int = 10
+    rsd_seed_ratio: float = 0.75
+    rsd_mutation_whitelist_prob: float = 0.8
+    rsd_min_buffer_days: int = 63
+
+    # Freeze-and-evaluate library
+    freeze_top_n: int = 10
+    gauntlet_window_days: int = 63
+    tail_fold_only: bool = False
     
-    # Support & Safety Gates (enforced as constraints, not objectives)
-    min_support_bars: int = 252                    # Minimum 1 year of daily returns
-    min_trades: int = 50                            # Minimum 50 trades for trade-based metrics
-    max_drawdown_threshold: float = -0.6            # Reject if MaxDD worse than -60%
-    min_hit_rate: float = 0.30                      # Minimum 30% win rate
-    max_hit_rate: float = 0.70                      # Maximum 70% win rate (avoid degenerate filters)
-    min_psr: float = 0.60                           # Minimum Probabilistic Sharpe Ratio (60% prob Sharpe > 0)
+    # Support & Safety Gates (soft penalties during fitness evaluation)
+    min_support_bars: int = 0                      # Legacy placeholder; trade-centric gates supersede bars
+    min_trades: int = 0                            # Legacy aggregate minimum (set 0 to rely on min_total_trades)
+    min_trades_per_fold: int = 1                   # Minimum trades required inside each inner fold
+    min_trade_days_per_fold: int = 1               # Minimum distinct trade days per inner fold
+    min_total_trades: int = 10                     # Minimum trades across all supported folds (soft)
+    max_drawdown_threshold: float = -0.6           # Soft veto if MaxDD worse than -60%
+    min_hit_rate: float = 0.10                     # Softer hit-rate band lower bound
+    max_hit_rate: float = 0.90                     # Softer hit-rate band upper bound
+    min_psr: float = 0.60                          # Soft penalty if Probabilistic Sharpe falls below 60%
     cvar_5_threshold: Optional[float] = None        # Optional: CVaR 5% threshold (e.g., -0.10)
+    min_supported_fold_ratio: float = 0.1           # Target ≥10% of outer folds with support (soft penalty)
+    min_outer_folds: int = 2                        # Absolute minimum number of outer folds with support
 
     # Penalty objective for GA (complexity vs redundancy)
     # Use 'redundancy_neg' or 'complexity_index_neg'
@@ -207,6 +228,9 @@ class HybridSplitConfig(BaseModel):
     discovery_train_years: float = 3.0
     discovery_test_years: float = 1.0
     discovery_step_months: int = 12
+    test_window_days: int = 252
+    embargo_cap_days: int = 21
+    pawf_step_months: int = 9
 
     # True OOS settings
     n_oos_folds: int = 1
@@ -362,7 +386,7 @@ class DataConfig(BaseModel):
     single_ticker_mode: Optional[str] = None  # Example: 'AAPL US Equity' to focus on AAPL only
 
     # Sector mode: pick one or more named groups; union forms tradables for this run
-    sector_modes: Optional[List[str]] = ["Semiconductors"]
+    sector_modes: Optional[List[str]] = ["Tech & AI Platforms", "Semiconductors", "Crypto Proxies"]
     include_macro_etfs_in_tradables: bool = True  # If False, SPY/QQQ/TLT remain macro-only
     sector_groups: dict = {
         "Tech & AI Platforms": [
@@ -436,6 +460,17 @@ class ReportingConfig(BaseModel):
     slate_max_per_ticker: int = 7  # Increased from 5
 
 
+class DtsConfig(BaseModel):
+    entry_window_days: int = Field(12, description="Trading days to look back for DTS triggers.")
+    recent_trades_floor: int = Field(3, description="Minimum trades in the last 12 months before applying a recency haircut.")
+    min_total_trades: int = Field(5, description="Minimum lifetime trades before trade-depth penalties apply.")
+    dormancy_half_life_days: int = Field(180, description="Half-life (in days) for recency decay weighting.")
+    cooldown_days: int = Field(5, description="Cooldown window in days to suppress duplicate triggers for the same setup/ticker.")
+    mode: Literal['soft_and', 'strict_and'] = Field('soft_and', description="Trigger combination mode for DTS scoring.")
+    soft_and_penalty: float = Field(0.15, description="Penalty applied when only a subset of signals fire in soft-AND mode.")
+    friction_penalty: float = Field(0.0, description="Flat friction deduction applied to candidate scores.")
+
+
 class Settings(BaseModel):
     # Top-level run mode: discover, validate, gauntlet, or full
     run_mode: Literal['discover', 'validate', 'gauntlet', 'full'] = Field(
@@ -455,6 +490,7 @@ class Settings(BaseModel):
     elv: ElvConfig = ElvConfig()
     data: DataConfig = Field(default_factory=DataConfig)
     reporting: ReportingConfig = Field(default_factory=ReportingConfig)
+    dts: DtsConfig = Field(default_factory=DtsConfig)
     simulation: PostSimulationConfig = Field(default_factory=PostSimulationConfig)
 
     # Back-compat alias so existing code can use settings.validate

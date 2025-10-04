@@ -622,6 +622,39 @@ def _save_cached_signals(cache_key: str, signals_df: pd.DataFrame, signals_meta:
         print(f"  ⚠️  Error saving cache: {e}")
 
 
+def _ensure_cache_metadata(
+    cache_key: str,
+    feature_matrix: Optional[pd.DataFrame],
+    signals_df: pd.DataFrame,
+    signals_meta: List[Dict],
+) -> None:
+    """Upgrade legacy caches by attaching feature metadata if missing."""
+    if feature_matrix is None:
+        return
+
+    cache_file = SIGNALS_CACHE_DIR / f"signals_{cache_key}.pkl"
+    if not cache_file.exists():
+        return
+
+    try:
+        with open(cache_file, 'rb') as f:
+            cached_data = pickle.load(f)
+    except Exception:
+        return
+
+    if cached_data.get('feature_columns') and cached_data.get('feature_index') is not None:
+        return
+
+    _save_cached_signals(
+        cache_key,
+        signals_df,
+        signals_meta,
+        feature_columns=list(feature_matrix.columns),
+        feature_index=feature_matrix.index,
+    )
+    print("  🔁 Upgraded signal cache with feature metadata")
+
+
 def check_signals_cache(master_df: pd.DataFrame) -> Tuple[Optional[pd.DataFrame], Optional[List[Dict]]]:
     """
     Check if signals are cached for this master_df WITHOUT building features.
@@ -701,6 +734,7 @@ def compile_signals(feature_matrix: pd.DataFrame, use_cache: bool = True) -> Tup
         # First try exact match
         cached_signals, cached_meta = _load_cached_signals(cache_key)
         if cached_signals is not None:
+            _ensure_cache_metadata(cache_key, feature_matrix, cached_signals, cached_meta)
             return cached_signals, cached_meta
         
         # No exact match - try incremental cache (same features, older dates)
@@ -712,10 +746,10 @@ def compile_signals(feature_matrix: pd.DataFrame, use_cache: bool = True) -> Tup
             
             # Load compatible cache
             old_signals, old_meta = _load_cached_signals(compat_key)
-            
+
             # Compute signals only for new dates
             new_rows = feature_matrix.loc[feature_matrix.index > compat_idx[-1]]
-            
+
             if len(new_rows) > 0:
                 # Recursively call compile_signals for new rows only (without cache)
                 new_signals, new_meta = compile_signals(new_rows, use_cache=False)
@@ -731,9 +765,12 @@ def compile_signals(feature_matrix: pd.DataFrame, use_cache: bool = True) -> Tup
                 _save_cached_signals(cache_key, combined_signals, combined_meta, 
                                     feature_columns=list(feature_matrix.columns),
                                     feature_index=feature_matrix.index)
-                
+
                 print(f"  ✅ Incremental update complete: {len(combined_signals)} total rows")
                 return combined_signals, combined_meta
+            else:
+                _ensure_cache_metadata(compat_key, feature_matrix, old_signals, old_meta)
+                return old_signals, old_meta
     
     print("  Cache miss - computing signals from scratch...")
 
